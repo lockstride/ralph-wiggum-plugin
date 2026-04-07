@@ -36,10 +36,18 @@ fi
 # Which agent CLI drives the loop: "claude" or "cursor-agent"
 RALPH_AGENT_CLI="${RALPH_AGENT_CLI:-claude}"
 
-# Token thresholds — defaults come from the adapter, per-CLI
+# Model selection — resolved first so thresholds can key off [1m] suffix
+if type agent_default_model >/dev/null 2>&1; then
+  DEFAULT_MODEL="$(agent_default_model "$RALPH_AGENT_CLI")"
+else
+  DEFAULT_MODEL=""
+fi
+MODEL="${RALPH_MODEL:-${MODEL:-$DEFAULT_MODEL}}"
+
+# Token thresholds — derived from CLI + model (extended [1m] vs standard)
 if type agent_default_rotate_threshold >/dev/null 2>&1; then
-  ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-$(agent_default_rotate_threshold "$RALPH_AGENT_CLI")}"
-  WARN_THRESHOLD="${WARN_THRESHOLD:-$(agent_default_warn_threshold "$RALPH_AGENT_CLI")}"
+  ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-$(agent_default_rotate_threshold "$RALPH_AGENT_CLI" "$MODEL")}"
+  WARN_THRESHOLD="${WARN_THRESHOLD:-$(agent_default_warn_threshold "$RALPH_AGENT_CLI" "$MODEL")}"
 else
   ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-80000}"
   WARN_THRESHOLD="${WARN_THRESHOLD:-70000}"
@@ -47,14 +55,6 @@ fi
 
 # Iteration limits
 MAX_ITERATIONS="${MAX_ITERATIONS:-20}"
-
-# Model selection — default comes from the adapter, per-CLI
-if type agent_default_model >/dev/null 2>&1; then
-  DEFAULT_MODEL="$(agent_default_model "$RALPH_AGENT_CLI")"
-else
-  DEFAULT_MODEL=""
-fi
-MODEL="${RALPH_MODEL:-${MODEL:-$DEFAULT_MODEL}}"
 
 # Feature flags (set by caller)
 USE_BRANCH="${USE_BRANCH:-}"

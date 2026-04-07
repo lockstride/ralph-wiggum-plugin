@@ -241,15 +241,35 @@ agent_normalize() {
   jq --unbuffered -c "$filter" 2>/dev/null || true
 }
 
-# Default rotate threshold per CLI (in tokens). Claude's Opus models
-# have a large context window; we rotate well before the limit to
-# leave headroom for a final commit + progress.md write. Cursor models
-# have smaller effective windows, so we rotate sooner.
-agent_default_rotate_threshold() {
+# Default model alias per CLI. Claude defaults to opus[1m] for the
+# extended 1M-token context window. Use RALPH_MODEL to override
+# (e.g. "sonnet[1m]", "opus", "sonnet" for 200K standard window).
+agent_default_model() {
   local cli
   cli="$(agent_normalize_cli_name "$1")"
   case "$cli" in
-    claude)       echo "400000" ;;
+    claude)       echo "opus[1m]" ;;
+    cursor-agent) echo "composer-2" ;;
+    *)            echo "" ;;
+  esac
+}
+
+# Default rotate threshold based on CLI and model (in tokens).
+# Models with the [1m] suffix have a 1M-token context window and
+# rotate at 700K. Standard models (200K window) rotate at 150K.
+agent_default_rotate_threshold() {
+  local cli model
+  cli="$(agent_normalize_cli_name "$1")"
+  model="${2:-}"
+
+  case "$cli" in
+    claude)
+      if [[ "$model" == *"[1m]"* ]]; then
+        echo "700000"
+      else
+        echo "150000"
+      fi
+      ;;
     cursor-agent) echo "150000" ;;
     *)            echo "150000" ;;
   esac
@@ -257,18 +277,6 @@ agent_default_rotate_threshold() {
 
 agent_default_warn_threshold() {
   local rotate
-  rotate="$(agent_default_rotate_threshold "$1")"
+  rotate="$(agent_default_rotate_threshold "$1" "$2")"
   echo $((rotate * 7 / 8))
-}
-
-# Default model alias per CLI. Uses versionless aliases so the CLI
-# automatically resolves to the latest release.
-agent_default_model() {
-  local cli
-  cli="$(agent_normalize_cli_name "$1")"
-  case "$cli" in
-    claude)       echo "opus" ;;
-    cursor-agent) echo "composer-2" ;;
-    *)            echo "" ;;
-  esac
 }
