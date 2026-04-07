@@ -130,21 +130,25 @@ select_cli() {
   fi
 }
 
-# Default-per-CLI models for the picker
+# Default-per-CLI models for the picker. Update when new frontier
+# models ship; `Custom...` lets the user paste any model id.
 models_for_cli() {
   local cli="$1"
   case "$cli" in
     claude)
+      # Opus 4.6 is the current top Claude model (1M-token context, beta)
+      echo "claude-opus-4-6"
       echo "claude-sonnet-4-5"
-      echo "claude-opus-4-5"
       echo "claude-haiku-4-5"
       echo "Custom..."
       ;;
     cursor-agent)
-      echo "opus-4.5-thinking"
-      echo "sonnet-4.5-thinking"
-      echo "gpt-5.2-high"
-      echo "composer-1"
+      # Composer 2 is Cursor's current frontier first-party model
+      echo "composer-2"
+      echo "claude-opus-4-6"
+      echo "gpt-5.4"
+      echo "gemini-3-pro"
+      echo "grok-code"
       echo "Custom..."
       ;;
   esac

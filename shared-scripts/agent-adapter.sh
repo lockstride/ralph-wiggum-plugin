@@ -244,13 +244,17 @@ agent_normalize() {
 # Default rotate thresholds per CLI (in tokens). Claude Sonnet's
 # effective usable window is larger than Cursor's default models, so
 # we give Claude more headroom before rotating.
+# Default rotate threshold per CLI (in tokens). Claude Opus 4.6 has a
+# 1M-token context window in beta; we rotate well before the limit to
+# leave headroom for a final commit + progress.md write. Cursor models
+# have smaller effective windows, so we rotate sooner.
 agent_default_rotate_threshold() {
   local cli
   cli="$(agent_normalize_cli_name "$1")"
   case "$cli" in
-    claude)       echo "150000" ;;
-    cursor-agent) echo "80000" ;;
-    *)            echo "80000" ;;
+    claude)       echo "400000" ;;
+    cursor-agent) echo "150000" ;;
+    *)            echo "150000" ;;
   esac
 }
 
@@ -260,13 +264,15 @@ agent_default_warn_threshold() {
   echo $((rotate * 7 / 8))
 }
 
-# Default model id per CLI
+# Default model id per CLI. Claude Opus 4.6 (1M context) is the
+# current top Claude model as of 2026-02. For Cursor, Composer 2 is
+# the current frontier first-party model.
 agent_default_model() {
   local cli
   cli="$(agent_normalize_cli_name "$1")"
   case "$cli" in
-    claude)       echo "claude-sonnet-4-5" ;;
-    cursor-agent) echo "opus-4.5-thinking" ;;
+    claude)       echo "claude-opus-4-6" ;;
+    cursor-agent) echo "composer-2" ;;
     *)            echo "" ;;
   esac
 }

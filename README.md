@@ -15,11 +15,13 @@ Other Ralph plugins run as an in-session Stop-hook — that means no token track
 - **Unattended-by-default**: both CLIs are always invoked with their skip-approval flag
 - **Claude Code slash commands** (`/ralph`, `/ralph-once`, `/ralph-cancel`) that launch the terminal loop
 
-## Important: what this plugin is and isn't
+## How it runs
 
-The Ralph loop runs in a **terminal, outside any editor session**. Claude Code plugin wrapping is just a delivery mechanism — the `/ralph` slash command prints a one-liner that starts `shared-scripts/ralph-setup.sh` in your terminal. The loop then shells out to whichever agent CLI you picked.
+The Ralph loop is a **shell script you run in a terminal**. It is not tied to any editor session. You decide which agent CLI it drives (`claude` or `cursor-agent`) at shell script execution time — via the interactive picker, or a `--cli` flag.
 
-Cursor users can skip the Claude Code plugin system entirely and use the `install.sh` script (see below).
+There is no "inside Claude Code" vs "inside Cursor" distinction for the loop itself. The editor you happen to have open is irrelevant. Ralph spawns the agent CLI as a subprocess, reads its stream-json output, tracks tokens, rotates context when the window fills, and keeps going until the task is done or max iterations is reached.
+
+The Claude Code plugin wrapping — the `/ralph` slash command, the plugin manifest — is only a discoverability convenience for Claude Code users. The slash command itself does nothing except print the same one-liner shell command you would run directly. Cursor users (or anyone else) can and should skip it.
 
 ## ⚠️ Blast radius
 
@@ -43,33 +45,38 @@ There is no flag to disable YOLO mode. That is the point of Ralph.
   - `cursor-agent`: `curl https://cursor.com/install -fsS | bash`
 - **gum** (optional, nicer UI): `brew install gum`
 
-## Install as a Claude Code plugin
+## Install
 
-Via a marketplace (recommended):
+Pick **one** of these. They all give you the same `ralph-setup.sh` to run from your terminal.
 
-```
-/plugin marketplace add lockstride/claude-marketplace
-/plugin install ralph-wiggum-plugin@lockstride
-```
+### Option A — `install.sh` (recommended, editor-agnostic)
 
-Then from inside a Claude Code session:
-
-```
-/ralph --cli claude --spec --yes
-```
-
-The slash command prints a one-liner you paste into your terminal. The loop starts there and runs independently of the editor session.
-
-## Install as plain scripts (Cursor users, or anyone who wants the raw loop)
+Works whether you use Claude Code, Cursor, Zed, Vim, or nothing at all. Drops the scripts + templates into `.claude/ralph-scripts/` and `.claude/ralph-templates/` inside the current repo:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/lockstride/ralph-wiggum-plugin/main/install.sh | bash
 ```
 
-This drops the scripts into `.claude/ralph-scripts/` inside the current repo. You then run:
+Then run the loop:
 
 ```
 ./.claude/ralph-scripts/ralph-setup.sh
+```
+
+### Option B — git clone
+
+```
+git clone https://github.com/lockstride/ralph-wiggum-plugin.git ~/ralph-wiggum-plugin
+~/ralph-wiggum-plugin/shared-scripts/ralph-setup.sh /path/to/your/repo
+```
+
+### Option C — Claude Code marketplace (adds slash commands)
+
+Only if you use Claude Code and want `/ralph`, `/ralph-once`, `/ralph-cancel` to appear in the slash-command menu. The slash commands are pure convenience — each one prints a shell command you run in your terminal. You get nothing beyond that which the other install methods don't give you.
+
+```
+/plugin marketplace add lockstride/claude-marketplace
+/plugin install ralph-wiggum-plugin@lockstride-marketplace
 ```
 
 ## Usage
@@ -118,7 +125,7 @@ bash shared-scripts/ralph-once.sh --cli claude --spec
 | Flag | What it does |
 |---|---|
 | `--cli <claude\|cursor-agent>` | Which agent CLI to drive. Default: `claude`. |
-| `-m, --model <id>` | Model name. Default: `claude-sonnet-4-5` / `opus-4.5-thinking`. |
+| `-m, --model <id>` | Model name. Default: `claude-opus-4-6` (1M context) for Claude, `composer-2` for Cursor. |
 | `-n, --iterations N` | Max iterations. Default: 20. |
 | `--prompt` | Use `PROMPT.md` at the workspace root. |
 | `--prompt-file <path>` | Use a custom prompt file. |
@@ -169,7 +176,7 @@ Emitted by the stream parser to the loop on stdout:
 - **Tool calls don't appear in the stream** — Claude Code requires `--verbose` when combining `-p` with `--output-format stream-json`. The adapter passes this automatically.
 - **Cursor stream events look different from what the parser expects** — run `cursor-agent -p --force --output-format stream-json "hello"` and diff the top-level shapes against the filter in `agent-adapter.sh` → `cursor-agent` branch.
 - **`jq: error` in the pipeline** — install jq (`brew install jq`). The canonical-schema normalization pipeline needs it.
-- **Context rotation never fires** — `ROTATE_THRESHOLD` defaults to 150k for Claude, 80k for Cursor. Override with `ROTATE_THRESHOLD=50000 ./ralph-loop.sh ...` to force it to fire sooner for debugging.
+- **Context rotation never fires** — `ROTATE_THRESHOLD` defaults to 400k for Claude (Opus 4.6 has a 1M context window, we rotate well before the limit to leave headroom for a clean handoff commit) and 150k for Cursor. Override with `ROTATE_THRESHOLD=50000 ./ralph-loop.sh ...` to force it to fire sooner for debugging.
 - **Agent keeps "completing" but checkboxes aren't updated** — the parser re-scans your task file before honoring the completion sigil. Check that your task file is where the parser expects (`RALPH_TASK.md`, `PROMPT.md`, or `.ralph/effective-prompt.md`) and uses real checkbox syntax (`- [ ]`, `* [x]`, `1. [ ]`).
 
 ## What's not in v0.1.0
