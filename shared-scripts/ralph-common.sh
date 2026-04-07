@@ -59,8 +59,6 @@ MODEL="${RALPH_MODEL:-${MODEL:-$DEFAULT_MODEL}}"
 # Feature flags (set by caller)
 USE_BRANCH="${USE_BRANCH:-}"
 OPEN_PR="${OPEN_PR:-false}"
-SKIP_CONFIRM="${SKIP_CONFIRM:-false}"
-
 # Parallel mode ceiling (Phase 5 — reserved; sequential-only in v0.1.0).
 # Change this number to raise the cap. Each parallel agent is expensive
 # (worktree + dependency install), so 5 is the recommended ceiling.

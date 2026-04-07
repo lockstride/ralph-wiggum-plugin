@@ -9,7 +9,7 @@
 #   ./ralph-once.sh --prompt-file PROMPT.md              # one iter on a file
 #   ./ralph-once.sh --cli cursor-agent -m composer-1     # one iter with model
 #
-# Flags mirror ralph-loop.sh (minus iterations/branch/pr).
+# Flags mirror ralph-loop.sh (minus iterations/branch/pr/completion-promise).
 
 set -euo pipefail
 
@@ -20,7 +20,7 @@ source "$SCRIPT_DIR/ralph-common.sh"
 source "$SCRIPT_DIR/prompt-resolver.sh"
 
 show_help() {
-  sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 WORKSPACE=""
@@ -41,7 +41,6 @@ while [[ $# -gt 0 ]]; do
         shift
       fi
       ;;
-    -y|--yes)       SKIP_CONFIRM=true; shift ;;
     -h|--help)      show_help; exit 0 ;;
     -*)             echo "Unknown option: $1" >&2; exit 1 ;;
     *)              WORKSPACE="$1"; shift ;;
@@ -100,15 +99,6 @@ main() {
   if [[ "$task_status" == "COMPLETE" ]]; then
     echo "🎉 Task already complete."
     exit 0
-  fi
-
-  if [[ "${SKIP_CONFIRM:-false}" != "true" ]]; then
-    read -p "Run single iteration? [Y/n] " -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
-      echo "Aborted."
-      exit 0
-    fi
   fi
 
   cd "$WORKSPACE"

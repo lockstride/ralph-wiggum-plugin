@@ -100,7 +100,7 @@ agent_build_cmd() {
       # --dangerously-skip-permissions grants all tools without prompts.
       # --verbose is required by Claude Code when combining -p with
       # stream-json so that tool calls actually appear in the stream.
-      local cmd="claude -p --output-format stream-json --verbose --dangerously-skip-permissions --model \"$model\""
+      local cmd="claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model \"$model\""
       if [[ -n "$session_id" ]]; then
         cmd="$cmd --resume \"$session_id\""
       fi
@@ -241,11 +241,8 @@ agent_normalize() {
   jq --unbuffered -c "$filter" 2>/dev/null || true
 }
 
-# Default rotate thresholds per CLI (in tokens). Claude Sonnet's
-# effective usable window is larger than Cursor's default models, so
-# we give Claude more headroom before rotating.
-# Default rotate threshold per CLI (in tokens). Claude Opus 4.6 has a
-# 1M-token context window in beta; we rotate well before the limit to
+# Default rotate threshold per CLI (in tokens). Claude's Opus models
+# have a large context window; we rotate well before the limit to
 # leave headroom for a final commit + progress.md write. Cursor models
 # have smaller effective windows, so we rotate sooner.
 agent_default_rotate_threshold() {
@@ -264,14 +261,13 @@ agent_default_warn_threshold() {
   echo $((rotate * 7 / 8))
 }
 
-# Default model id per CLI. Claude Opus 4.6 (1M context) is the
-# current top Claude model as of 2026-02. For Cursor, Composer 2 is
-# the current frontier first-party model.
+# Default model alias per CLI. Uses versionless aliases so the CLI
+# automatically resolves to the latest release.
 agent_default_model() {
   local cli
   cli="$(agent_normalize_cli_name "$1")"
   case "$cli" in
-    claude)       echo "claude-opus-4-6" ;;
+    claude)       echo "opus" ;;
     cursor-agent) echo "composer-2" ;;
     *)            echo "" ;;
   esac

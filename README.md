@@ -47,7 +47,7 @@ There is no flag to disable YOLO mode. That is the point of Ralph.
 
 ## Install
 
-Pick **one** of these. They all give you the same `ralph-setup.sh` to run from your terminal.
+All three options give you the same loop scripts. Options A and B are standalone — they put the scripts on disk and you run them directly. Option C additionally registers the repo as a Claude Code plugin, which adds slash commands (`/ralph`, `/ralph-once`, `/ralph-cancel`) for discoverability. The slash commands themselves just print a shell command for you to copy-paste into a terminal; they don't execute anything.
 
 ### Option A — `install.sh` (recommended, editor-agnostic)
 
@@ -57,12 +57,6 @@ Works whether you use Claude Code, Cursor, Zed, Vim, or nothing at all. Drops th
 curl -fsSL https://raw.githubusercontent.com/lockstride/ralph-wiggum-plugin/main/install.sh | bash
 ```
 
-Then run the loop:
-
-```
-./.claude/ralph-scripts/ralph-setup.sh
-```
-
 ### Option B — git clone
 
 ```
@@ -70,9 +64,9 @@ git clone https://github.com/lockstride/ralph-wiggum-plugin.git ~/ralph-wiggum-p
 ~/ralph-wiggum-plugin/shared-scripts/ralph-setup.sh /path/to/your/repo
 ```
 
-### Option C — Claude Code marketplace (adds slash commands)
+### Option C — Claude Code plugin (adds slash commands)
 
-Only if you use Claude Code and want `/ralph`, `/ralph-once`, `/ralph-cancel` to appear in the slash-command menu. The slash commands are pure convenience — each one prints a shell command you run in your terminal. You get nothing beyond that which the other install methods don't give you.
+Installs the repo as a registered Claude Code plugin. You get the same loop scripts as A and B, plus `/ralph`, `/ralph-once`, and `/ralph-cancel` in the slash-command menu. Only useful if you run Claude Code and want that discoverability — the slash commands are convenience wrappers that print a terminal command, nothing more.
 
 ```
 /plugin marketplace add lockstride/claude-marketplace
@@ -84,16 +78,15 @@ Only if you use Claude Code and want `/ralph`, `/ralph-once`, `/ralph-cancel` to
 ### Interactive launcher
 
 ```
-bash shared-scripts/ralph-setup.sh
+./.claude/ralph-scripts/ralph-setup.sh
 ```
 
 Walks you through:
 
 1. CLI (`claude` or `cursor-agent`)
-2. Prompt source (PROMPT.md / custom file / spec dir)
-3. Model
+2. Model
+3. Prompt source (PROMPT.md / custom file / spec dir)
 4. Max iterations
-5. Confirmation
 
 ### Scripted / unattended
 
@@ -101,40 +94,48 @@ All interactive prompts are skipped when the corresponding flag is present:
 
 ```
 # Drive Claude Code against the newest spec, 30 iters, no prompts
-bash shared-scripts/ralph-setup.sh --cli claude --spec -n 30 --yes
+./.claude/ralph-scripts/ralph-setup.sh --cli claude -m opus --spec -n 30
 
 # Drive Cursor against a specific prompt file
-bash shared-scripts/ralph-setup.sh --cli cursor-agent --prompt-file PROMPT.md --yes
+./.claude/ralph-scripts/ralph-setup.sh --cli cursor-agent --prompt-file PROMPT.md
 
 # Drive Claude against a named spec, with a branch and PR
-bash shared-scripts/ralph-setup.sh \
+./.claude/ralph-scripts/ralph-setup.sh \
   --cli claude \
   --spec 20260131-example-feature \
   --branch feature/example \
-  --pr --yes
+  --pr
 ```
 
 ### Smoke test a single iteration
 
 ```
-bash shared-scripts/ralph-once.sh --cli claude --spec
+./.claude/ralph-scripts/ralph-once.sh --cli claude --spec
 ```
 
 ### Flags
 
-| Flag | What it does |
+Flags that take a required value are shown with `<value>`. When a flag is omitted, the interactive launcher prompts you to choose; the "if omitted" column shows what the picker pre-selects (accepted by pressing Enter).
+
+| Flag | What it does | If omitted |
+|---|---|---|
+| `--cli <claude\|cursor-agent>` | Which agent CLI to drive | interactive picker (pre-selects `claude`) |
+| `-m, --model <id>` | Model name | interactive picker (pre-selects `opus` for Claude, `composer-2` for Cursor) |
+| `-n, --iterations N` | Max iterations | interactive picker (pre-fills `20`) |
+| `--completion-promise <text>` | Completion sigil (back-compat with the official plugin) | `<ralph>COMPLETE</ralph>` |
+| `--branch <name>` | Work on a named branch | current branch |
+| `--pr` | Open a PR when complete; requires `--branch` | off |
+| `-h, --help` | Show help | — |
+
+**Prompt source** — mutually exclusive, pick at most one:
+
+| Flag | Behavior |
 |---|---|
-| `--cli <claude\|cursor-agent>` | Which agent CLI to drive. Default: `claude`. |
-| `-m, --model <id>` | Model name. Default: `claude-opus-4-6` (1M context) for Claude, `composer-2` for Cursor. |
-| `-n, --iterations N` | Max iterations. Default: 20. |
-| `--prompt` | Use `PROMPT.md` at the workspace root. |
-| `--prompt-file <path>` | Use a custom prompt file. |
-| `--spec [name]` | Use a Spec Kit spec dir. No name = most recent by mtime. |
-| `--completion-promise <text>` | Custom completion sigil (back-compat with the official plugin). |
-| `--branch <name>` | Work on a named branch. |
-| `--pr` | Open a PR when complete. Requires `--branch`. |
-| `-y, --yes` | Skip confirmation prompt. |
-| `-h, --help` | Show help. |
+| *(none of the below)* | Interactive picker prompts you to choose |
+| `--prompt` | Uses `PROMPT.md` at the workspace root |
+| `--prompt-file <path>` | Uses the file at `<path>` |
+| `--spec` | Uses the most recent Spec Kit spec dir by mtime |
+| `--spec <name>` | Uses the named Spec Kit spec dir |
 
 ### What runs in your repo
 

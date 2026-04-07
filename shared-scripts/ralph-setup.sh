@@ -9,7 +9,7 @@
 #   ./ralph-setup.sh /path/to/project   # Run in specific project
 #
 # You can also pass any ralph-loop.sh flag to skip specific prompts:
-#   ./ralph-setup.sh --cli claude --spec -n 30 --yes
+#   ./ralph-setup.sh --cli claude --spec -n 30
 #
 # Requirements:
 #   - Either `claude` or `cursor-agent` installed and logged in
@@ -31,7 +31,7 @@ if command -v gum &>/dev/null; then
 fi
 
 # =============================================================================
-# FLAG PASSTHROUGH (so ralph-setup.sh --cli claude --spec -y works)
+# FLAG PASSTHROUGH (so ralph-setup.sh --cli claude --spec works)
 # =============================================================================
 
 WORKSPACE=""
@@ -42,8 +42,6 @@ PROMPT_MODE=""
 PROMPT_VALUE=""
 BRANCH_FROM_FLAG=""
 OPEN_PR_FLAG=""
-SKIP_CONFIRM_FLAG=""
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cli)          CLI_FROM_FLAG="$2"; shift 2 ;;
@@ -61,7 +59,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --branch)       BRANCH_FROM_FLAG="$2"; shift 2 ;;
     --pr)           OPEN_PR_FLAG=true; shift ;;
-    -y|--yes)       SKIP_CONFIRM_FLAG=true; shift ;;
     -h|--help)
       cat <<'EOF'
 Ralph Wiggum: Interactive Setup & Loop
@@ -73,17 +70,16 @@ Options:
   --cli <claude|cursor-agent>  Skip CLI picker
   -m, --model <id>             Skip model picker
   -n, --iterations N           Skip iterations picker
-  --prompt                     Use PROMPT.md
+  --prompt, --prompt-md        Use PROMPT.md
   --prompt-file <path>         Use custom prompt file
   --spec [name]                Use Spec Kit spec (default: newest)
   --branch <name>              Work on named branch
   --pr                         Open PR when complete (requires --branch)
-  -y, --yes                    Skip confirmation prompt
   -h, --help                   Show this help
 
 Any flags you pass cause the interactive prompt for that setting to be
 skipped, so you can go fully unattended with:
-  ./ralph-setup.sh --cli claude --spec --yes
+  ./ralph-setup.sh --cli claude -m opus --spec -n 20
 
 Inside Claude Code: the /ralph slash command prints a one-liner that
 invokes this script.
@@ -130,25 +126,66 @@ select_cli() {
   fi
 }
 
-# Default-per-CLI models for the picker. Update when new frontier
-# models ship; `Custom...` lets the user paste any model id.
+# Filter cursor-agent --list-models output: drop -fast variants and
+# older versions, keeping only models at the highest version per vendor
+# (claude, gpt, composer, gemini, …).  Input: raw output with ANSI
+# codes already stripped.  Output: "id - description" lines, sorted
+# alphabetically by vendor then model name.
+filter_cursor_models() {
+  awk '
+  / - / {
+    idx = index($0, " - ")
+    id = substr($0, 1, idx - 1)
+    gsub(/[[:space:]]/, "", id)
+    if (id ~ /-fast$/ || id == "auto") next
+
+    n = split(id, p, "-")
+    vendor = p[1]
+
+    ver = ""
+    for (i = 2; i <= n; i++) {
+      if (p[i] ~ /^[0-9]+(\.[0-9]+)?$/) {
+        ver = (ver == "" ? p[i] : ver "." p[i])
+      } else break
+    }
+
+    split(ver, vp, ".")
+    vn = (vp[1]+0) * 1000000 + (vp[2]+0) * 1000 + (vp[3]+0)
+    if (!(vendor in mx) || vn > mx[vendor]) mx[vendor] = vn
+
+    c++
+    line[c] = $0; ven[c] = vendor; vnum[c] = vn
+  }
+  END {
+    for (i = 1; i <= c; i++)
+      if (vnum[i] == mx[ven[i]]) print line[i]
+  }' | sort
+}
+
+# Model list for the interactive picker.
+# Claude CLI uses versionless aliases resolved by the CLI itself.
+# cursor-agent models are queried at runtime via --list-models;
+# if nothing comes back the user hasn't logged in yet.
 models_for_cli() {
   local cli="$1"
   case "$cli" in
     claude)
-      # Opus 4.6 is the current top Claude model (1M-token context, beta)
-      echo "claude-opus-4-6"
-      echo "claude-sonnet-4-5"
-      echo "claude-haiku-4-5"
+      echo "opus"
+      echo "sonnet"
+      echo "haiku"
       echo "Custom..."
       ;;
     cursor-agent)
-      # Composer 2 is Cursor's current frontier first-party model
-      echo "composer-2"
-      echo "claude-opus-4-6"
-      echo "gpt-5.4"
-      echo "gemini-3-pro"
-      echo "grok-code"
+      local raw
+      raw=$(cursor-agent --list-models 2>/dev/null \
+            | sed $'s/\x1b\[[0-9;]*[A-Za-z]//g')
+      local filtered
+      filtered=$(echo "$raw" | filter_cursor_models)
+      if [[ -z "$filtered" ]]; then
+        echo "ERROR: cursor-agent returned no models. Run 'cursor-agent' once to log in." >&2
+        return 1
+      fi
+      echo "$filtered"
       echo "Custom..."
       ;;
   esac
@@ -161,6 +198,9 @@ select_model() {
   fi
   local -a opts=()
   while IFS= read -r line; do opts+=("$line"); done < <(models_for_cli "$cli")
+  if [[ ${#opts[@]} -eq 0 ]]; then
+    return 1
+  fi
   local selected
   if [[ "$HAS_GUM" == "true" ]]; then
     selected=$(gum choose --header "Model:" "${opts[@]}")
@@ -178,6 +218,8 @@ select_model() {
       read -p "Model id: " selected
     fi
   fi
+  # Strip " - description" suffix if present (cursor-agent format)
+  selected="${selected%% - *}"
   echo "$selected"
 }
 
@@ -259,17 +301,6 @@ select_prompt_source() {
   esac
 }
 
-confirm_action() {
-  local message="$1"
-  if [[ "$HAS_GUM" == "true" ]]; then
-    gum confirm "$message"
-  else
-    read -p "$message [y/N] " -n 1 -r
-    echo ""
-    [[ $REPLY =~ ^[Yy]$ ]]
-  fi
-}
-
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -302,6 +333,11 @@ main() {
     exit 1
   fi
 
+  if ! MODEL=$(select_model "$RALPH_AGENT_CLI"); then
+    exit 1
+  fi
+  echo "✓ Model: $MODEL"
+
   # Prompt source selector
   local pair
   pair=$(select_prompt_source "$WORKSPACE")
@@ -318,9 +354,6 @@ main() {
   echo "✓ Effective prompt: $out"
   echo ""
 
-  # Model + iterations
-  MODEL=$(select_model "$RALPH_AGENT_CLI")
-  echo "✓ Model: $MODEL"
   MAX_ITERATIONS=$(get_max_iterations)
   echo "✓ Max iterations: $MAX_ITERATIONS"
 
@@ -363,13 +396,6 @@ main() {
   [[ "${OPEN_PR:-false}" == "true" ]] && echo "  • Open PR:    Yes"
   echo "─────────────────────────────────────────────────────────────────"
   echo ""
-
-  if [[ "${SKIP_CONFIRM_FLAG:-${SKIP_CONFIRM:-false}}" != "true" ]]; then
-    if ! confirm_action "Start Ralph loop?"; then
-      echo "Aborted."
-      exit 0
-    fi
-  fi
 
   run_ralph_loop "$WORKSPACE" "$SCRIPT_DIR"
   exit $?

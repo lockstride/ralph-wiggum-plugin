@@ -14,7 +14,6 @@
 #   ./ralph-loop.sh --cli claude --prompt-file PROMPT.md     # Plain prompt
 #   ./ralph-loop.sh --cli cursor-agent --spec               # Most-recent spec
 #   ./ralph-loop.sh --cli claude --spec 20260406-foo -n 30   # Named spec
-#   ./ralph-loop.sh --yes                                    # Skip confirmation
 #
 # Flags:
 #   --cli <claude|cursor-agent>   Agent CLI (default: claude)
@@ -26,7 +25,6 @@
 #   --completion-promise <text>    Custom completion sigil (default: <ralph>COMPLETE</ralph>)
 #   --branch <name>                Work on a named branch
 #   --pr                           Open a PR when complete (requires --branch)
-#   -y, --yes                      Skip confirmation prompt
 #   -h, --help                     Show this help
 #
 # Requirements:
@@ -48,7 +46,7 @@ source "$SCRIPT_DIR/prompt-resolver.sh"
 # =============================================================================
 
 show_help() {
-  sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,35p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 WORKSPACE=""
@@ -82,8 +80,6 @@ while [[ $# -gt 0 ]]; do
       USE_BRANCH="$2"; shift 2 ;;
     --pr)
       OPEN_PR=true; shift ;;
-    -y|--yes)
-      SKIP_CONFIRM=true; shift ;;
     -h|--help)
       show_help; exit 0 ;;
     -*)
@@ -164,21 +160,6 @@ main() {
   if [[ "$task_status" == "COMPLETE" ]]; then
     echo "🎉 Task already complete. Nothing to do."
     exit 0
-  fi
-
-  if [[ "$SKIP_CONFIRM" != "true" ]]; then
-    echo "This will run $RALPH_AGENT_CLI unattended with all tool approvals"
-    echo "pre-granted. The agent will be rotated when context fills up."
-    echo ""
-    echo "  Tip: use ralph-setup.sh for an interactive launcher,"
-    echo "       or pass -y / --yes to skip this prompt."
-    echo ""
-    read -p "Start Ralph loop? [y/N] " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-      echo "Aborted."
-      exit 0
-    fi
   fi
 
   run_ralph_loop "$WORKSPACE" "$SCRIPT_DIR"
