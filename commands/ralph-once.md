@@ -8,7 +8,7 @@ Run a single iteration of the Ralph loop — useful for smoke-testing your promp
 From a terminal in the current repo, run:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/shared-scripts/ralph-once.sh" $ARGUMENTS
+"${CLAUDE_PLUGIN_ROOT}/shared-scripts/ralph-once.sh" $ARGUMENTS
 ```
 
 After the iteration finishes, review:

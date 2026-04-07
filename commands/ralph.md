@@ -8,7 +8,7 @@ Ralph is a **shell script that runs in a terminal**, not inside this session. Th
 Copy and paste this into a terminal open to the current repo:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/shared-scripts/ralph-setup.sh" $ARGUMENTS
+"${CLAUDE_PLUGIN_ROOT}/shared-scripts/ralph-setup.sh" $ARGUMENTS
 ```
 
 Any arguments you pass after `/ralph` are forwarded to the launcher:
