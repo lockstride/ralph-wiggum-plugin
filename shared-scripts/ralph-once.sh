@@ -75,8 +75,8 @@ main() {
   if [[ -z "${MODEL:-}" ]] || [[ "$MODEL" == "$DEFAULT_MODEL" ]]; then
     MODEL="$(agent_default_model "$RALPH_AGENT_CLI")"
   fi
-  ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-$(agent_default_rotate_threshold "$RALPH_AGENT_CLI")}"
-  WARN_THRESHOLD="${WARN_THRESHOLD:-$(agent_default_warn_threshold "$RALPH_AGENT_CLI")}"
+  ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-$(agent_default_rotate_threshold "$RALPH_AGENT_CLI" "$MODEL")}"
+  WARN_THRESHOLD="${WARN_THRESHOLD:-$(agent_default_warn_threshold "$RALPH_AGENT_CLI" "$MODEL")}"
   export MODEL RALPH_AGENT_CLI ROTATE_THRESHOLD WARN_THRESHOLD
 
   if [[ -z "$WORKSPACE" ]] || [[ "$WORKSPACE" == "." ]]; then

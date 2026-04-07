@@ -277,6 +277,6 @@ agent_default_rotate_threshold() {
 
 agent_default_warn_threshold() {
   local rotate
-  rotate="$(agent_default_rotate_threshold "$1" "$2")"
+  rotate="$(agent_default_rotate_threshold "$1" "${2:-}")"
   echo $((rotate * 7 / 8))
 }

@@ -177,7 +177,7 @@ Emitted by the stream parser to the loop on stdout:
 - **Tool calls don't appear in the stream** — Claude Code requires `--verbose` when combining `-p` with `--output-format stream-json`. The adapter passes this automatically.
 - **Cursor stream events look different from what the parser expects** — run `cursor-agent -p --force --output-format stream-json "hello"` and diff the top-level shapes against the filter in `agent-adapter.sh` → `cursor-agent` branch.
 - **`jq: error` in the pipeline** — install jq (`brew install jq`). The canonical-schema normalization pipeline needs it.
-- **Context rotation never fires** — `ROTATE_THRESHOLD` defaults to 400k for Claude (Opus 4.6 has a 1M context window, we rotate well before the limit to leave headroom for a clean handoff commit) and 150k for Cursor. Override with `ROTATE_THRESHOLD=50000 ./ralph-loop.sh ...` to force it to fire sooner for debugging.
+- **Context rotation never fires** — `ROTATE_THRESHOLD` defaults to 700k for Claude models with the `[1m]` suffix (1M context window; we rotate well before the limit to leave headroom for a clean handoff commit), 150k for standard Claude models and Cursor. Override with `ROTATE_THRESHOLD=50000 ./ralph-loop.sh ...` to force it to fire sooner for debugging.
 - **Agent keeps "completing" but checkboxes aren't updated** — the parser re-scans your task file before honoring the completion sigil. Check that your task file is where the parser expects (`RALPH_TASK.md`, `PROMPT.md`, or `.ralph/effective-prompt.md`) and uses real checkbox syntax (`- [ ]`, `* [x]`, `1. [ ]`).
 
 ## What's not in v0.1.0

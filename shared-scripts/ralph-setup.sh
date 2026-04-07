@@ -406,9 +406,9 @@ main() {
   [[ -n "$USE_BRANCH" ]] && echo "✓ Branch: $USE_BRANCH"
   [[ "${OPEN_PR:-false}" == "true" ]] && echo "✓ Will open PR when complete"
 
-  # Re-derive thresholds for selected CLI
-  ROTATE_THRESHOLD="$(agent_default_rotate_threshold "$RALPH_AGENT_CLI")"
-  WARN_THRESHOLD="$(agent_default_warn_threshold "$RALPH_AGENT_CLI")"
+  # Re-derive thresholds for selected CLI + model ([1m] suffix → 700K)
+  ROTATE_THRESHOLD="$(agent_default_rotate_threshold "$RALPH_AGENT_CLI" "$MODEL")"
+  WARN_THRESHOLD="$(agent_default_warn_threshold "$RALPH_AGENT_CLI" "$MODEL")"
   export RALPH_AGENT_CLI MODEL MAX_ITERATIONS USE_BRANCH OPEN_PR ROTATE_THRESHOLD WARN_THRESHOLD
 
   echo ""
