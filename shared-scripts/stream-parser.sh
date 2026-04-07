@@ -101,6 +101,41 @@ log_token_status() {
   echo "[$timestamp] $emoji $status_msg $breakdown" >>"$RALPH_DIR/activity.log"
 }
 
+wrap_line() {
+  local prefix="$1"
+  local text="$2"
+  local width="${3:-120}"
+
+  if [[ $((${#prefix} + ${#text})) -le $width ]]; then
+    printf '%s%s\n' "$prefix" "$text"
+    return
+  fi
+
+  local non_alnum="${text%%[[:alnum:]]*}"
+  local cont_indent=$((${#prefix} + ${#non_alnum}))
+  local indent
+  indent=$(printf '%*s' "$cont_indent" '')
+
+  local first_avail=$((width - ${#prefix}))
+  local break_at=$first_avail
+  while [[ $break_at -gt 0 ]] && [[ "${text:$break_at:1}" != " " ]]; do
+    break_at=$((break_at - 1))
+  done
+  [[ $break_at -eq 0 ]] && break_at=$first_avail
+
+  printf '%s%s\n' "$prefix" "${text:0:$break_at}"
+  local rest="${text:$break_at}"
+  rest="${rest# }"
+  [[ -z "$rest" ]] && return
+
+  local cont_avail=$((width - cont_indent))
+  [[ $cont_avail -lt 30 ]] && cont_avail=30
+
+  while IFS= read -r seg; do
+    printf '%s%s\n' "$indent" "$seg"
+  done < <(printf '%s\n' "$rest" | fold -s -w "$cont_avail")
+}
+
 is_retryable_api_error() {
   local error_msg="$1"
   local lower_msg
@@ -203,7 +238,7 @@ process_line() {
           while IFS= read -r task_line; do
             local cleaned
             cleaned=$(echo "$task_line" | sed 's/^[[:space:]]*/  /' | sed 's/\[ \]/☐/')
-            echo "[$timestamp]    $cleaned" >>"$RALPH_DIR/activity.log"
+            wrap_line "[$timestamp]    " "$cleaned" >>"$RALPH_DIR/activity.log"
           done < <(sed -n '/^---$/,$p' "$summary_file" | tail -n +2)
         fi
       fi
