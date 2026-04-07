@@ -91,29 +91,27 @@ agent_build_cmd() {
   prompt_text="$3"
   session_id="${4:-}"
 
-  # Escape prompt for embedding in a single-quoted string
-  local esc_prompt
-  esc_prompt=$(printf '%s' "$prompt_text" | sed "s/'/'\\\\''/g")
+  # Escape all interpolated values for single-quote embedding to
+  # prevent shell injection via RALPH_MODEL or session ids.
+  local sq_esc="s/'/'\\\\''/g"
+  local esc_prompt esc_model esc_session
+  esc_prompt=$(printf '%s' "$prompt_text" | sed "$sq_esc")
+  esc_model=$(printf '%s' "$model" | sed "$sq_esc")
+  esc_session=$(printf '%s' "$session_id" | sed "$sq_esc")
 
   case "$cli" in
     claude)
-      # Claude Code headless: -p <prompt> with stream-json output.
-      # --dangerously-skip-permissions grants all tools without prompts.
-      # --verbose is required by Claude Code when combining -p with
-      # stream-json so that tool calls actually appear in the stream.
-      local cmd="claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model \"$model\""
+      local cmd="claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model '$esc_model'"
       if [[ -n "$session_id" ]]; then
-        cmd="$cmd --resume \"$session_id\""
+        cmd="$cmd --resume '$esc_session'"
       fi
       cmd="$cmd '$esc_prompt'"
       echo "$cmd"
       ;;
     cursor-agent)
-      # cursor-agent headless: -p --force with stream-json output.
-      # --force is cursor-agent's permissive/unattended mode.
-      local cmd="cursor-agent -p --force --output-format stream-json --model \"$model\""
+      local cmd="cursor-agent -p --force --output-format stream-json --model '$esc_model'"
       if [[ -n "$session_id" ]]; then
-        cmd="$cmd --resume=\"$session_id\""
+        cmd="$cmd --resume='$esc_session'"
       fi
       cmd="$cmd '$esc_prompt'"
       echo "$cmd"
@@ -134,94 +132,114 @@ agent_normalize_filter() {
 
   case "$cli" in
     claude)
+      # Uses foreach+inputs to track tool_use_id -> name/path/cmd across
+      # events, so tool_result events carry the real tool identity.
+      # Requires jq -n so inputs reads the stream.
       cat <<'JQ'
-# Claude Code stream-json → canonical events
-# Claude emits one JSON object per line with a "type" discriminator.
-. as $e
-| if .type == "system" and (.subtype // "") == "init" then
-    {kind:"system", model:(.model // "unknown")}
-  elif .type == "assistant" then
-    # Assistant message content is an array of blocks; text and tool_use mixed.
-    (.message.content // [])
-    | map(
-        if .type == "text" then
-          {kind:"assistant_text", text:(.text // "")}
-        elif .type == "tool_use" then
-          (.name // "Other") as $tname
-          | (.input // {}) as $inp
-          | if ($tname | IN("Read","Edit","Write","NotebookEdit","MultiEdit")) then
-              {kind:"tool_use", name:$tname, path:($inp.file_path // $inp.path // $inp.notebook_path // "")}
-            elif ($tname == "Bash") then
-              {kind:"tool_use", name:"Shell", cmd:($inp.command // "")}
-            else
-              {kind:"tool_use", name:$tname, path:""}
-            end
-        else empty end
-      )
-    | .[]
-  elif .type == "user" then
-    # tool_result comes back wrapped in a user message
-    (.message.content // [])
-    | map(
-        if .type == "tool_result" then
-          (.content // "") as $c
-          | ( if ($c | type) == "string" then $c
-              elif ($c | type) == "array" then ($c | map(.text // "") | join("\n"))
-              else "" end
-            ) as $txt
-          | {kind:"tool_result", name:"Other",
-             bytes: ($txt | length),
-             exit_code: (if .is_error then 1 else 0 end)}
-        else empty end
-      )
-    | .[]
-  elif .type == "result" then
-    {kind:"result", duration_ms:(.duration_ms // 0)}
-  elif .type == "rate_limit_event" then
-    (.rate_limit_info // {}) as $rl
+foreach inputs as $e (
+  {};
+  if $e.type == "assistant" then
+    reduce (($e.message.content // [])[] | select(.type == "tool_use")) as $tu (
+      .;
+      .[$tu.id] = {
+        name: (($tu.name // "Other") | if IN("Read","Edit","Write","NotebookEdit","MultiEdit") then .
+              elif . == "Bash" then "Shell" else . end),
+        path: ($tu.input.file_path // $tu.input.path // $tu.input.notebook_path // ""),
+        cmd: (if $tu.name == "Bash" then ($tu.input.command // "") else "" end)
+      }
+    )
+  else . end;
+  if $e.type == "system" and ($e.subtype // "") == "init" then
+    {kind:"system", model:($e.model // "unknown")}
+  elif $e.type == "assistant" then
+    (($e.message.content // [])[] |
+      if .type == "text" then
+        {kind:"assistant_text", text:(.text // "")}
+      elif .type == "tool_use" then
+        (.name // "Other") as $tname
+        | (.input // {}) as $inp
+        | if ($tname | IN("Read","Edit","Write","NotebookEdit","MultiEdit")) then
+            {kind:"tool_use", name:$tname, path:($inp.file_path // $inp.path // $inp.notebook_path // "")}
+          elif ($tname == "Bash") then
+            {kind:"tool_use", name:"Shell", cmd:($inp.command // "")}
+          else
+            {kind:"tool_use", name:$tname, path:""}
+          end
+      else empty end
+    )
+  elif $e.type == "user" then
+    . as $state |
+    (($e.message.content // [])[] |
+      if .type == "tool_result" then
+        (.tool_use_id // "") as $tuid
+        | ($state[$tuid] // {name:"Other", path:"", cmd:""}) as $info
+        | (.content // "") as $c
+        | ( if ($c | type) == "string" then $c
+            elif ($c | type) == "array" then ($c | map(.text // "") | join("\n"))
+            else "" end
+          ) as $txt
+        | {kind:"tool_result",
+           name: $info.name,
+           path: $info.path,
+           cmd: $info.cmd,
+           bytes: ($txt | length),
+           lines: (if ($info.name | IN("Read","Edit","Write","NotebookEdit","MultiEdit"))
+                   then ($txt | split("\n") | length) else 0 end),
+           exit_code: (if .is_error then 1 else 0 end)}
+      else empty end
+    )
+  elif $e.type == "result" then
+    {kind:"result", duration_ms:($e.duration_ms // 0)}
+  elif $e.type == "rate_limit_event" then
+    ($e.rate_limit_info // {}) as $rl
     | {kind:"rate_limit",
        status:($rl.status // "unknown"),
        resets_at:($rl.resetsAt // 0)}
-  elif .type == "error" then
-    {kind:"error", message:(.error.message // .message // "Unknown error")}
+  elif $e.type == "error" then
+    {kind:"error", message:($e.error.message // $e.message // "Unknown error")}
   else empty end
+)
 JQ
       ;;
     cursor-agent)
+      # Uses foreach+inputs for consistency with the Claude filter
+      # (both require jq -n). State is unused here.
       cat <<'JQ'
-# cursor-agent stream-json → canonical events
-. as $e
-| if .type == "system" and (.subtype // "") == "init" then
-    {kind:"system", model:(.model // "unknown")}
-  elif .type == "assistant" then
-    (.message.content // []) as $c
+foreach inputs as $e (
+  {};
+  .;
+  if $e.type == "system" and ($e.subtype // "") == "init" then
+    {kind:"system", model:($e.model // "unknown")}
+  elif $e.type == "assistant" then
+    ($e.message.content // []) as $c
     | ( if ($c | type) == "array" then
-          ($c[0].text // "")
+          ($c | map(select(.type == "text") | .text // "") | join(""))
         else "" end
       ) as $txt
-    | {kind:"assistant_text", text:$txt}
-  elif .type == "tool_call" and (.subtype // "") == "completed" then
-    if (.tool_call.readToolCall.result.success // null) != null then
-      (.tool_call.readToolCall.args.path // "unknown") as $p
-      | (.tool_call.readToolCall.result.success.totalLines // 0) as $ln
-      | (.tool_call.readToolCall.result.success.contentSize // ($ln * 100)) as $b
+    | if $txt != "" then {kind:"assistant_text", text:$txt} else empty end
+  elif $e.type == "tool_call" and ($e.subtype // "") == "completed" then
+    if ($e.tool_call.readToolCall.result.success // null) != null then
+      ($e.tool_call.readToolCall.args.path // "unknown") as $p
+      | ($e.tool_call.readToolCall.result.success.totalLines // 0) as $ln
+      | ($e.tool_call.readToolCall.result.success.contentSize // ($ln * 100)) as $b
       | {kind:"tool_result", name:"Read", path:$p, bytes:$b, lines:$ln, exit_code:0}
-    elif (.tool_call.writeToolCall.result.success // null) != null then
-      (.tool_call.writeToolCall.args.path // "unknown") as $p
-      | (.tool_call.writeToolCall.result.success.linesCreated // 0) as $ln
-      | (.tool_call.writeToolCall.result.success.fileSize // 0) as $b
+    elif ($e.tool_call.writeToolCall.result.success // null) != null then
+      ($e.tool_call.writeToolCall.args.path // "unknown") as $p
+      | ($e.tool_call.writeToolCall.result.success.linesCreated // 0) as $ln
+      | ($e.tool_call.writeToolCall.result.success.fileSize // 0) as $b
       | {kind:"tool_result", name:"Write", path:$p, bytes:$b, lines:$ln, exit_code:0}
-    elif (.tool_call.shellToolCall.result // null) != null then
-      (.tool_call.shellToolCall.args.command // "unknown") as $cmd
-      | (.tool_call.shellToolCall.result.exitCode // 0) as $ec
-      | ((.tool_call.shellToolCall.result.stdout // "") + (.tool_call.shellToolCall.result.stderr // "")) as $o
+    elif ($e.tool_call.shellToolCall.result // null) != null then
+      ($e.tool_call.shellToolCall.args.command // "unknown") as $cmd
+      | ($e.tool_call.shellToolCall.result.exitCode // 0) as $ec
+      | (($e.tool_call.shellToolCall.result.stdout // "") + ($e.tool_call.shellToolCall.result.stderr // "")) as $o
       | {kind:"tool_result", name:"Shell", cmd:$cmd, bytes:($o | length), exit_code:$ec}
     else empty end
-  elif .type == "result" then
-    {kind:"result", duration_ms:(.duration_ms // 0)}
-  elif .type == "error" then
-    {kind:"error", message:(.error.data.message // .error.message // .message // "Unknown error")}
+  elif $e.type == "result" then
+    {kind:"result", duration_ms:($e.duration_ms // 0)}
+  elif $e.type == "error" then
+    {kind:"error", message:($e.error.data.message // $e.error.message // $e.message // "Unknown error")}
   else empty end
+)
 JQ
       ;;
     *)
@@ -242,9 +260,9 @@ agent_normalize() {
   cli="$(agent_normalize_cli_name "$1")"
   local filter
   filter="$(agent_normalize_filter "$cli")"
-  # -c = compact, -R = raw input, but we want parsed JSON, so skip -R.
-  # Use --unbuffered for real-time streaming.
-  jq --unbuffered -c "$filter" 2>/dev/null || true
+  # -n = null input so foreach/inputs reads the stream.
+  # --unbuffered for real-time streaming.
+  jq -n --unbuffered -c "$filter" 2>/dev/null || true
 }
 
 # Default model alias per CLI. Claude defaults to opus[1m] for the

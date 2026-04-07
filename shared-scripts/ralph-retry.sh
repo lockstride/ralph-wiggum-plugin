@@ -133,11 +133,11 @@ with_retry() {
     command_start=4
 
     # Check if 4th arg is jitter flag
-    if [[ $# -ge 5 ]] && [[ "$4" == "true" ]] || [[ "$4" == "false" ]] || [[ "$4" == "1" ]] || [[ "$4" == "0" ]]; then
+    if [[ $# -ge 5 ]] && { [[ "$4" == "true" ]] || [[ "$4" == "false" ]] || [[ "$4" == "1" ]] || [[ "$4" == "0" ]]; }; then
       use_jitter="$4"
       command_start=5
     fi
-  elif [[ $# -ge 4 ]] && [[ "$3" == "true" ]] || [[ "$3" == "false" ]] || [[ "$3" == "1" ]] || [[ "$3" == "0" ]]; then
+  elif [[ $# -ge 4 ]] && { [[ "$3" == "true" ]] || [[ "$3" == "false" ]] || [[ "$3" == "1" ]] || [[ "$3" == "0" ]]; }; then
     # 3rd arg is jitter flag, use default max_delay
     use_jitter="$3"
     command_start=4

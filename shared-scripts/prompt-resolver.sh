@@ -34,7 +34,8 @@ _PR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Default template lookup path:
 #   1. $RALPH_TEMPLATES_DIR
 #   2. Plugin layout: ../shared-references/templates
-#   3. Same-directory fallback
+#   3. Standalone install layout: ../ralph-templates (install.sh convention)
+#   4. Same-directory fallback
 _default_templates_dir() {
   if [[ -n "${RALPH_TEMPLATES_DIR:-}" ]]; then
     echo "$RALPH_TEMPLATES_DIR"
@@ -42,6 +43,10 @@ _default_templates_dir() {
   fi
   if [[ -d "$_PR_SCRIPT_DIR/../shared-references/templates" ]]; then
     echo "$_PR_SCRIPT_DIR/../shared-references/templates"
+    return
+  fi
+  if [[ -d "$_PR_SCRIPT_DIR/../ralph-templates" ]]; then
+    echo "$_PR_SCRIPT_DIR/../ralph-templates"
     return
   fi
   echo "$_PR_SCRIPT_DIR/templates"
@@ -73,9 +78,9 @@ _render_template() {
     local key="$1"
     local val="$2"
     shift 2
-    # Escape for sed
+    # Escape for sed (delimiter is |)
     local esc_val
-    esc_val=$(printf '%s' "$val" | sed -e 's/[\/&]/\\&/g')
+    esc_val=$(printf '%s' "$val" | sed -e 's/[\/&|]/\\&/g')
     content=$(printf '%s' "$content" | sed "s|{{${key}}}|${esc_val}|g")
   done
   printf '%s' "$content"
@@ -89,6 +94,7 @@ resolve_prompt_promptmd() {
     echo "❌ PROMPT.md not found at $prompt_file" >&2
     return 1
   fi
+  rm -f "$workspace/.ralph/task-file-path"
   _write_effective_prompt "$workspace" "$(cat "$prompt_file")"
 }
 
@@ -108,6 +114,7 @@ resolve_prompt_file() {
     echo "❌ Prompt file not found: $path" >&2
     return 1
   fi
+  rm -f "$workspace/.ralph/task-file-path"
   _write_effective_prompt "$workspace" "$(cat "$path")"
 }
 

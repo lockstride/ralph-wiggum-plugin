@@ -184,7 +184,7 @@ track_shell_failure() {
   local exit_code="$2"
   if [[ $exit_code -ne 0 ]]; then
     local count
-    count=$(grep -c "^${cmd}$" "$FAILURES_FILE" 2>/dev/null) || count=0
+    count=$(grep -cxF "$cmd" "$FAILURES_FILE" 2>/dev/null) || count=0
     count=$((count + 1))
     echo "$cmd" >>"$FAILURES_FILE"
     log_error "SHELL FAIL: $cmd → exit $exit_code (attempt $count)"

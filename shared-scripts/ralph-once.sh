@@ -147,7 +147,7 @@ main() {
   echo ""
   case "$signal" in
     COMPLETE)
-      if [[ "$task_status" == "COMPLETE" ]]; then
+      if [[ "$task_status" == "COMPLETE" || "$task_status" == "NO_TASKS" || "$task_status" == "NO_TASK_FILE" ]]; then
         echo "🎉 Task completed in a single iteration!"
       else
         echo "⚠️  Agent signaled complete but criteria remain unchecked."
@@ -163,8 +163,10 @@ main() {
     *)
       if [[ "$task_status" == "COMPLETE" ]]; then
         echo "🎉 Task complete."
-      else
+      elif [[ "$task_status" == INCOMPLETE:* ]]; then
         echo "Agent finished. Remaining: ${task_status#INCOMPLETE:}"
+      else
+        echo "Agent finished naturally (no checkbox tracking)."
       fi
       ;;
   esac

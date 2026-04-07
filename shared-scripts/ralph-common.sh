@@ -298,6 +298,12 @@ check_task_complete() {
 
 _check_task_complete_direct() {
   local task_file="$1"
+  local total
+  total=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[(x|X| )\]' "$task_file" 2>/dev/null) || total=0
+  if [[ "$total" -eq 0 ]]; then
+    echo "NO_TASKS"
+    return
+  fi
   local unchecked
   unchecked=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null) || unchecked=0
   if [[ "$unchecked" -eq 0 ]]; then
@@ -524,7 +530,7 @@ run_iteration() {
 
   (
     eval "$invoke_cmd" 2>&1 |
-      jq --unbuffered -c -f "$norm_filter" 2>/dev/null |
+      jq -n --unbuffered -c -f "$norm_filter" 2>>"$workspace/.ralph/errors.log" |
       "$script_dir/stream-parser.sh" "$workspace" "$iteration" >"$fifo"
     rm -f "$norm_filter"
   ) &
@@ -667,7 +673,7 @@ run_ralph_loop() {
 
     case "$signal" in
       "COMPLETE")
-        if [[ "$task_status" == "COMPLETE" ]]; then
+        if [[ "$task_status" == "COMPLETE" || "$task_status" == "NO_TASKS" || "$task_status" == "NO_TASK_FILE" ]]; then
           log_activity "$workspace" "ITERATION $iteration END — ✅ COMPLETE$task_suffix"
           log_progress "$workspace" "**Session $iteration ended** — ✅ TASK COMPLETE (agent signaled)"
           return 0
@@ -732,8 +738,13 @@ run_ralph_loop() {
           log_activity "$workspace" "ITERATION $iteration END — NATURAL ($remaining_count remaining)$task_suffix"
           log_progress "$workspace" "**Session $iteration ended** — Agent finished naturally ($remaining_count remaining)"
           echo "📋 Agent finished but $remaining_count criteria remaining. Starting next iteration..."
-          iteration=$((iteration + 1))
+        else
+          log_activity "$workspace" "ITERATION $iteration END — NATURAL (no checkbox tracking)$task_suffix"
+          log_progress "$workspace" "**Session $iteration ended** — Agent finished naturally (no checkbox tracking)"
+          stall_count=0
+          DEFER_COUNT=0
         fi
+        iteration=$((iteration + 1))
         ;;
     esac
 
