@@ -400,6 +400,11 @@ EOF
 # =============================================================================
 
 spinner() {
+  if [[ ! -t 2 ]]; then
+    # No TTY on stderr (detached / redirected) — sleep quietly instead
+    while true; do sleep 60; done
+    return
+  fi
   local workspace="$1"
   local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
   local i=0
@@ -425,8 +430,24 @@ run_iteration() {
   prompt=$(build_prompt "$workspace" "$iteration")
 
   local fifo="$workspace/.ralph/.parser_fifo"
+  local spinner_pid="" agent_pid="" norm_filter=""
+
+  _iteration_cleanup() {
+    kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+    kill "$spinner_pid" 2>/dev/null || true
+    wait "$agent_pid" 2>/dev/null || true
+    wait "$spinner_pid" 2>/dev/null || true
+    rm -f "$fifo" "$norm_filter"
+    [[ -t 2 ]] && printf "\r\033[K" >&2
+  }
+
   rm -f "$fifo"
   mkfifo "$fifo"
+
+  # Save and install trap; restore on exit
+  local _prev_trap
+  _prev_trap=$(trap -p EXIT)
+  trap '_iteration_cleanup' EXIT SIGTERM SIGHUP
 
   echo "" >&2
   echo "═══════════════════════════════════════════════════════════════════" >&2
@@ -447,14 +468,13 @@ run_iteration() {
   cd "$workspace"
 
   spinner "$workspace" &
-  local spinner_pid=$!
+  spinner_pid=$!
 
   # Export thresholds so stream-parser picks them up
   export WARN_THRESHOLD ROTATE_THRESHOLD
 
   # Write the normalization jq filter to a temp file so it can be
   # used in a subshell pipeline without re-sourcing agent-adapter.sh.
-  local norm_filter
   norm_filter=$(mktemp)
   agent_normalize_filter "$RALPH_AGENT_CLI" > "$norm_filter"
 
@@ -464,46 +484,53 @@ run_iteration() {
       | "$script_dir/stream-parser.sh" "$workspace" > "$fifo"
     rm -f "$norm_filter"
   ) &
-  local agent_pid=$!
+  agent_pid=$!
 
   local signal=""
   while IFS= read -r line; do
     case "$line" in
       "ROTATE")
-        printf "\r\033[K" >&2
+        [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "🔄 Context rotation triggered — stopping agent..." >&2
-        kill $agent_pid 2>/dev/null || true
+        kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
         signal="ROTATE"
         break
         ;;
       "WARN")
-        printf "\r\033[K" >&2
+        [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "⚠️  Context warning — agent should wrap up soon..." >&2
         ;;
       "GUTTER")
-        printf "\r\033[K" >&2
+        [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "🚨 Gutter detected — agent may be stuck..." >&2
         signal="GUTTER"
         ;;
       "COMPLETE")
-        printf "\r\033[K" >&2
+        [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "✅ Agent signaled completion!" >&2
         signal="COMPLETE"
         ;;
       "DEFER")
-        printf "\r\033[K" >&2
+        [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "⏸️  Rate limit or transient error — deferring for retry..." >&2
         signal="DEFER"
-        kill $agent_pid 2>/dev/null || true
+        kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
         ;;
     esac
   done < "$fifo"
 
-  wait $agent_pid 2>/dev/null || true
-  kill $spinner_pid 2>/dev/null || true
-  wait $spinner_pid 2>/dev/null || true
-  printf "\r\033[K" >&2
+  wait "$agent_pid" 2>/dev/null || true
+  kill "$spinner_pid" 2>/dev/null || true
+  wait "$spinner_pid" 2>/dev/null || true
+  [[ -t 2 ]] && printf "\r\033[K" >&2
   rm -f "$fifo"
+
+  # Restore previous trap
+  if [[ -n "$_prev_trap" ]]; then
+    eval "$_prev_trap"
+  else
+    trap - EXIT SIGTERM SIGHUP
+  fi
 
   echo "$signal"
 }
