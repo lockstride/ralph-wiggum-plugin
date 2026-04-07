@@ -8,7 +8,7 @@
 # Usage:
 #   eval "$(agent_build_cmd "$CLI" "$MODEL" "$PROMPT")" 2>&1 \
 #     | agent_normalize "$CLI" \
-#     | ./stream-parser.sh /path/to/workspace
+#     | ./stream-parser.sh /path/to/workspace [iteration]
 #
 # Emits on stdout (one per line):
 #   ROTATE   — token threshold reached, stop and rotate context
@@ -24,6 +24,7 @@
 set -euo pipefail
 
 WORKSPACE="${1:-.}"
+ITERATION="${2:-}"
 RALPH_DIR="$WORKSPACE/.ralph"
 mkdir -p "$RALPH_DIR"
 
@@ -182,6 +183,25 @@ process_line() {
       local model
       model=$(echo "$line" | jq -r '.model // "unknown"' 2>/dev/null) || model="unknown"
       log_activity "SESSION START: model=$model"
+
+      local summary_file="$RALPH_DIR/task-summary"
+      if [[ -f "$summary_file" ]]; then
+        local ts_done ts_total ts_remaining
+        ts_done=$(grep '^done=' "$summary_file" | head -1 | cut -d= -f2) || ts_done=0
+        ts_total=$(grep '^total=' "$summary_file" | head -1 | cut -d= -f2) || ts_total=0
+        ts_remaining=$(grep '^remaining=' "$summary_file" | head -1 | cut -d= -f2) || ts_remaining=0
+        if [[ "$ts_total" -gt 0 ]]; then
+          local timestamp
+          timestamp=$(date '+%H:%M:%S')
+          echo "[$timestamp] 📋 Tasks: $ts_done/$ts_total complete ($ts_remaining remaining)" >> "$RALPH_DIR/activity.log"
+          local task_line
+          while IFS= read -r task_line; do
+            local cleaned
+            cleaned=$(echo "$task_line" | sed 's/^[[:space:]]*/  /' | sed 's/\[ \]/☐/')
+            echo "[$timestamp]    $cleaned" >> "$RALPH_DIR/activity.log"
+          done < <(sed -n '/^---$/,$p' "$summary_file" | tail -n +2)
+        fi
+      fi
       ;;
 
     assistant_text)
@@ -228,7 +248,31 @@ process_line() {
           ;;
         Shell)
           SHELL_OUTPUT_CHARS=$((SHELL_OUTPUT_CHARS + bytes))
-          if [[ $exit_code -eq 0 ]]; then
+          if [[ "$cmd" =~ ^git[[:space:]]+commit ]]; then
+            if [[ $exit_code -eq 0 ]]; then
+              local commit_msg=""
+              if [[ "$cmd" =~ -m[[:space:]]+[\"\']([^\"\']+)[\"\'] ]]; then
+                commit_msg="${BASH_REMATCH[1]}"
+              elif [[ "$cmd" =~ -m[[:space:]]+([^[:space:]]+) ]]; then
+                commit_msg="${BASH_REMATCH[1]}"
+              fi
+              if [[ -n "$commit_msg" ]]; then
+                log_activity "COMMIT \"$commit_msg\""
+              else
+                log_activity "COMMIT (via $cmd)"
+              fi
+            else
+              log_activity "COMMIT FAILED $cmd → exit $exit_code"
+              track_shell_failure "$cmd" "$exit_code"
+            fi
+          elif [[ "$cmd" =~ ^git[[:space:]]+push ]]; then
+            if [[ $exit_code -eq 0 ]]; then
+              log_activity "PUSH $cmd → exit 0"
+            else
+              log_activity "PUSH FAILED $cmd → exit $exit_code"
+              track_shell_failure "$cmd" "$exit_code"
+            fi
+          elif [[ $exit_code -eq 0 ]]; then
             if [[ $bytes -gt 1024 ]]; then
               log_activity "SHELL $cmd → exit 0 (${bytes} chars output)"
             else
@@ -273,9 +317,14 @@ process_line() {
 }
 
 main() {
+  local iter_label=""
+  if [[ -n "$ITERATION" ]]; then
+    iter_label=" (Iteration $ITERATION)"
+  fi
+
   echo "" >> "$RALPH_DIR/activity.log"
   echo "═══════════════════════════════════════════════════════════════" >> "$RALPH_DIR/activity.log"
-  echo "Ralph Session Started: $(date)" >> "$RALPH_DIR/activity.log"
+  echo "Ralph Session Started${iter_label}: $(date)" >> "$RALPH_DIR/activity.log"
   echo "═══════════════════════════════════════════════════════════════" >> "$RALPH_DIR/activity.log"
 
   local last_token_log

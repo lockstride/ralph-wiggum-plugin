@@ -312,6 +312,36 @@ count_criteria() {
 }
 
 # =============================================================================
+# TASK SUMMARY (for activity.log)
+# =============================================================================
+
+_write_task_summary() {
+  local workspace="$1"
+  local ralph_dir="$workspace/.ralph"
+  local summary_file="$ralph_dir/task-summary"
+  local task_file
+  task_file=$(_resolve_task_file "$workspace")
+
+  if [[ -z "$task_file" ]] || [[ ! -f "$task_file" ]]; then
+    rm -f "$summary_file"
+    return
+  fi
+
+  local done_count total
+  total=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[(x| )\]' "$task_file" 2>/dev/null) || total=0
+  done_count=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[x\]' "$task_file" 2>/dev/null) || done_count=0
+  local remaining=$((total - done_count))
+
+  {
+    echo "done=$done_count"
+    echo "total=$total"
+    echo "remaining=$remaining"
+    echo "---"
+    grep -E '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | head -10 || true
+  } > "$summary_file"
+}
+
+# =============================================================================
 # PROMPT BUILDING
 # =============================================================================
 
@@ -470,6 +500,9 @@ run_iteration() {
   spinner "$workspace" &
   spinner_pid=$!
 
+  # Write task summary so stream-parser can log it on session start
+  _write_task_summary "$workspace"
+
   # Export thresholds so stream-parser picks them up
   export WARN_THRESHOLD ROTATE_THRESHOLD
 
@@ -481,7 +514,7 @@ run_iteration() {
   (
     eval "$invoke_cmd" 2>&1 \
       | jq --unbuffered -c -f "$norm_filter" 2>/dev/null \
-      | "$script_dir/stream-parser.sh" "$workspace" > "$fifo"
+      | "$script_dir/stream-parser.sh" "$workspace" "$iteration" > "$fifo"
     rm -f "$norm_filter"
   ) &
   agent_pid=$!
@@ -563,13 +596,42 @@ run_ralph_loop() {
   local session_id=""
 
   while [[ $iteration -le $MAX_ITERATIONS ]]; do
+    local pre_counts
+    pre_counts=$(count_criteria "$workspace")
+    local pre_done=${pre_counts%%:*}
+    local pre_total=${pre_counts##*:}
+    local pre_remaining=$((pre_total - pre_done))
+
+    if [[ "$pre_total" -gt 0 ]]; then
+      log_activity "$workspace" "ITERATION $iteration START — Tasks: $pre_done/$pre_total complete ($pre_remaining remaining)"
+    else
+      log_activity "$workspace" "ITERATION $iteration START"
+    fi
+
     local signal
     signal=$(run_iteration "$workspace" "$iteration" "$session_id" "$script_dir")
 
     local task_status
     task_status=$(check_task_complete "$workspace")
 
+    # Compute post-iteration task counts for the ITERATION END line
+    local post_counts post_done post_total post_remaining task_delta task_suffix
+    post_counts=$(count_criteria "$workspace")
+    post_done=${post_counts%%:*}
+    post_total=${post_counts##*:}
+    post_remaining=$((post_total - post_done))
+    task_delta=$((post_done - pre_done))
+    task_suffix=""
+    if [[ "$post_total" -gt 0 ]]; then
+      task_suffix=" (Tasks: $post_done/$post_total complete"
+      if [[ "$task_delta" -gt 0 ]]; then
+        task_suffix="$task_suffix, +$task_delta this iteration"
+      fi
+      task_suffix="$task_suffix)"
+    fi
+
     if [[ "$task_status" == "COMPLETE" ]]; then
+      log_activity "$workspace" "ITERATION $iteration END — ✅ COMPLETE$task_suffix"
       log_progress "$workspace" "**Session $iteration ended** — ✅ TASK COMPLETE"
       echo ""
       echo "═══════════════════════════════════════════════════════════════════"
@@ -594,26 +656,31 @@ run_ralph_loop() {
     case "$signal" in
       "COMPLETE")
         if [[ "$task_status" == "COMPLETE" ]]; then
+          log_activity "$workspace" "ITERATION $iteration END — ✅ COMPLETE$task_suffix"
           log_progress "$workspace" "**Session $iteration ended** — ✅ TASK COMPLETE (agent signaled)"
           return 0
         else
+          log_activity "$workspace" "ITERATION $iteration END — ⚠️ AGENT SIGNALED COMPLETE (criteria remain)$task_suffix"
           log_progress "$workspace" "**Session $iteration ended** — Agent signaled complete but criteria remain"
           echo "⚠️  Agent signaled completion but unchecked criteria remain. Continuing..."
           iteration=$((iteration + 1))
         fi
         ;;
       "ROTATE")
+        log_activity "$workspace" "ITERATION $iteration END — 🔄 ROTATE$task_suffix"
         log_progress "$workspace" "**Session $iteration ended** — 🔄 Context rotation"
         echo "🔄 Rotating to fresh context..."
         iteration=$((iteration + 1))
         session_id=""
         ;;
       "GUTTER")
+        log_activity "$workspace" "ITERATION $iteration END — 🚨 GUTTER$task_suffix"
         log_progress "$workspace" "**Session $iteration ended** — 🚨 GUTTER"
         echo "🚨 Gutter detected. Check .ralph/errors.log for details."
         return 1
         ;;
       "DEFER")
+        log_activity "$workspace" "ITERATION $iteration END — ⏸️ DEFERRED$task_suffix"
         log_progress "$workspace" "**Session $iteration ended** — ⏸️ DEFERRED"
         local defer_delay=30
         if type calculate_backoff_delay &>/dev/null; then
@@ -627,6 +694,7 @@ run_ralph_loop() {
       *)
         if [[ "$task_status" == INCOMPLETE:* ]]; then
           local remaining_count=${task_status#INCOMPLETE:}
+          log_activity "$workspace" "ITERATION $iteration END — NATURAL ($remaining_count remaining)$task_suffix"
           log_progress "$workspace" "**Session $iteration ended** — Agent finished naturally ($remaining_count remaining)"
           echo "📋 Agent finished but $remaining_count criteria remaining. Starting next iteration..."
           iteration=$((iteration + 1))
@@ -637,6 +705,15 @@ run_ralph_loop() {
     sleep 2
   done
 
+  local final_counts final_done final_total
+  final_counts=$(count_criteria "$workspace")
+  final_done=${final_counts%%:*}
+  final_total=${final_counts##*:}
+  if [[ "$final_total" -gt 0 ]]; then
+    log_activity "$workspace" "LOOP END — ⚠️ Max iterations ($MAX_ITERATIONS) reached (Tasks: $final_done/$final_total complete)"
+  else
+    log_activity "$workspace" "LOOP END — ⚠️ Max iterations ($MAX_ITERATIONS) reached"
+  fi
   log_progress "$workspace" "**Loop ended** — ⚠️ Max iterations ($MAX_ITERATIONS) reached"
   echo "⚠️  Max iterations ($MAX_ITERATIONS) reached. Check progress manually."
   return 1
