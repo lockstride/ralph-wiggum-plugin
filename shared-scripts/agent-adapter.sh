@@ -30,8 +30,8 @@ set -euo pipefail
 agent_normalize_cli_name() {
   local cli="$1"
   case "$cli" in
-    claude|claude-code|cc) echo "claude" ;;
-    cursor|cursor-agent|ca) echo "cursor-agent" ;;
+    claude | claude-code | cc) echo "claude" ;;
+    cursor | cursor-agent | ca) echo "cursor-agent" ;;
     *) echo "$cli" ;;
   esac
 }
@@ -248,9 +248,9 @@ agent_default_model() {
   local cli
   cli="$(agent_normalize_cli_name "$1")"
   case "$cli" in
-    claude)       echo "opus[1m]" ;;
+    claude) echo "opus[1m]" ;;
     cursor-agent) echo "composer-2" ;;
-    *)            echo "" ;;
+    *) echo "" ;;
   esac
 }
 
@@ -271,7 +271,7 @@ agent_default_rotate_threshold() {
       fi
       ;;
     cursor-agent) echo "150000" ;;
-    *)            echo "150000" ;;
+    *) echo "150000" ;;
   esac
 }
 

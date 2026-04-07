@@ -38,20 +38,23 @@ BYTES_READ=0
 BYTES_WRITTEN=0
 ASSISTANT_CHARS=0
 SHELL_OUTPUT_CHARS=0
-PROMPT_CHARS=3000   # rough estimate of the framing prompt + state files
+PROMPT_CHARS=3000 # rough estimate of the framing prompt + state files
 WARN_SENT=0
 
 # Gutter detection — temp files (macOS bash 3.x has no assoc arrays)
 FAILURES_FILE=$(mktemp)
 WRITES_FILE=$(mktemp)
-trap "rm -f $FAILURES_FILE $WRITES_FILE" EXIT
+trap 'rm -f "$FAILURES_FILE" "$WRITES_FILE"' EXIT
 
 get_health_emoji() {
   local tokens=$1
   local pct=$((tokens * 100 / ROTATE_THRESHOLD))
-  if   [[ $pct -lt 60 ]]; then echo "🟢"
-  elif [[ $pct -lt 80 ]]; then echo "🟡"
-  else                         echo "🔴"
+  if [[ $pct -lt 60 ]]; then
+    echo "🟢"
+  elif [[ $pct -lt 80 ]]; then
+    echo "🟡"
+  else
+    echo "🔴"
   fi
 }
 
@@ -68,14 +71,14 @@ log_activity() {
   tokens=$(calc_tokens)
   local emoji
   emoji=$(get_health_emoji "$tokens")
-  echo "[$timestamp] $emoji $message" >> "$RALPH_DIR/activity.log"
+  echo "[$timestamp] $emoji $message" >>"$RALPH_DIR/activity.log"
 }
 
 log_error() {
   local message="$1"
   local timestamp
   timestamp=$(date '+%H:%M:%S')
-  echo "[$timestamp] $message" >> "$RALPH_DIR/errors.log"
+  echo "[$timestamp] $message" >>"$RALPH_DIR/errors.log"
 }
 
 log_token_status() {
@@ -88,12 +91,14 @@ log_token_status() {
   timestamp=$(date '+%H:%M:%S')
 
   local status_msg="TOKENS: $tokens / $ROTATE_THRESHOLD ($pct%)"
-  if   [[ $pct -ge 90 ]]; then status_msg="$status_msg - rotation imminent"
-  elif [[ $pct -ge 72 ]]; then status_msg="$status_msg - approaching limit"
+  if [[ $pct -ge 90 ]]; then
+    status_msg="$status_msg - rotation imminent"
+  elif [[ $pct -ge 72 ]]; then
+    status_msg="$status_msg - approaching limit"
   fi
 
-  local breakdown="[read:$((BYTES_READ/1024))KB write:$((BYTES_WRITTEN/1024))KB assist:$((ASSISTANT_CHARS/1024))KB shell:$((SHELL_OUTPUT_CHARS/1024))KB]"
-  echo "[$timestamp] $emoji $status_msg $breakdown" >> "$RALPH_DIR/activity.log"
+  local breakdown="[read:$((BYTES_READ / 1024))KB write:$((BYTES_WRITTEN / 1024))KB assist:$((ASSISTANT_CHARS / 1024))KB shell:$((SHELL_OUTPUT_CHARS / 1024))KB]"
+  echo "[$timestamp] $emoji $status_msg $breakdown" >>"$RALPH_DIR/activity.log"
 }
 
 is_retryable_api_error() {
@@ -101,21 +106,21 @@ is_retryable_api_error() {
   local lower_msg
   lower_msg=$(echo "$error_msg" | tr '[:upper:]' '[:lower:]')
 
-  if [[ "$lower_msg" =~ (rate[[:space:]]*limit|rate_limit|rate-limit) ]] || \
-     [[ "$lower_msg" =~ (quota[[:space:]]*exceeded|quota[[:space:]]*limit|hit[[:space:]]*your[[:space:]]*limit) ]] || \
-     [[ "$lower_msg" =~ (too[[:space:]]*many[[:space:]]*requests|429|http[[:space:]]*429) ]]; then
+  if [[ "$lower_msg" =~ (rate[[:space:]]*limit|rate_limit|rate-limit) ]] ||
+    [[ "$lower_msg" =~ (quota[[:space:]]*exceeded|quota[[:space:]]*limit|hit[[:space:]]*your[[:space:]]*limit) ]] ||
+    [[ "$lower_msg" =~ (too[[:space:]]*many[[:space:]]*requests|429|http[[:space:]]*429) ]]; then
     return 0
   fi
-  if [[ "$lower_msg" =~ (timeout|timed[[:space:]]*out|connection[[:space:]]*timeout) ]] || \
-     [[ "$lower_msg" =~ (network[[:space:]]*error|network[[:space:]]*unavailable) ]] || \
-     [[ "$lower_msg" =~ (connection[[:space:]]*refused|connection[[:space:]]*reset|econnreset) ]] || \
-     [[ "$lower_msg" =~ (connection[[:space:]]*closed|connection[[:space:]]*failed|etimedout|enotfound) ]]; then
+  if [[ "$lower_msg" =~ (timeout|timed[[:space:]]*out|connection[[:space:]]*timeout) ]] ||
+    [[ "$lower_msg" =~ (network[[:space:]]*error|network[[:space:]]*unavailable) ]] ||
+    [[ "$lower_msg" =~ (connection[[:space:]]*refused|connection[[:space:]]*reset|econnreset) ]] ||
+    [[ "$lower_msg" =~ (connection[[:space:]]*closed|connection[[:space:]]*failed|etimedout|enotfound) ]]; then
     return 0
   fi
-  if [[ "$lower_msg" =~ (service[[:space:]]*unavailable|503) ]] || \
-     [[ "$lower_msg" =~ (bad[[:space:]]*gateway|502) ]] || \
-     [[ "$lower_msg" =~ (gateway[[:space:]]*timeout|504) ]] || \
-     [[ "$lower_msg" =~ (overloaded|server[[:space:]]*busy|try[[:space:]]*again) ]]; then
+  if [[ "$lower_msg" =~ (service[[:space:]]*unavailable|503) ]] ||
+    [[ "$lower_msg" =~ (bad[[:space:]]*gateway|502) ]] ||
+    [[ "$lower_msg" =~ (gateway[[:space:]]*timeout|504) ]] ||
+    [[ "$lower_msg" =~ (overloaded|server[[:space:]]*busy|try[[:space:]]*again) ]]; then
     return 0
   fi
   return 1
@@ -144,7 +149,7 @@ track_shell_failure() {
     local count
     count=$(grep -c "^${cmd}$" "$FAILURES_FILE" 2>/dev/null) || count=0
     count=$((count + 1))
-    echo "$cmd" >> "$FAILURES_FILE"
+    echo "$cmd" >>"$FAILURES_FILE"
     log_error "SHELL FAIL: $cmd → exit $exit_code (attempt $count)"
     if [[ $count -ge 3 ]]; then
       log_error "⚠️ GUTTER: same command failed ${count}x"
@@ -157,7 +162,7 @@ track_file_write() {
   local path="$1"
   local now
   now=$(date +%s)
-  echo "$now:$path" >> "$WRITES_FILE"
+  echo "$now:$path" >>"$WRITES_FILE"
   local cutoff=$((now - 600))
   local count
   count=$(awk -F: -v cutoff="$cutoff" -v path="$path" '
@@ -193,12 +198,12 @@ process_line() {
         if [[ "$ts_total" -gt 0 ]]; then
           local timestamp
           timestamp=$(date '+%H:%M:%S')
-          echo "[$timestamp] 📋 Tasks: $ts_done/$ts_total complete ($ts_remaining remaining)" >> "$RALPH_DIR/activity.log"
+          echo "[$timestamp] 📋 Tasks: $ts_done/$ts_total complete ($ts_remaining remaining)" >>"$RALPH_DIR/activity.log"
           local task_line
           while IFS= read -r task_line; do
             local cleaned
             cleaned=$(echo "$task_line" | sed 's/^[[:space:]]*/  /' | sed 's/\[ \]/☐/')
-            echo "[$timestamp]    $cleaned" >> "$RALPH_DIR/activity.log"
+            echo "[$timestamp]    $cleaned" >>"$RALPH_DIR/activity.log"
           done < <(sed -n '/^---$/,$p' "$summary_file" | tail -n +2)
         fi
       fi
@@ -209,8 +214,8 @@ process_line() {
       text=$(echo "$line" | jq -r '.text // empty' 2>/dev/null) || text=""
       if [[ -n "$text" ]]; then
         ASSISTANT_CHARS=$((ASSISTANT_CHARS + ${#text}))
-        if [[ "$text" == *"<ralph>COMPLETE</ralph>"* ]] || \
-           [[ "$text" == *"<promise>ALL_TASKS_DONE</promise>"* ]]; then
+        if [[ "$text" == *"<ralph>COMPLETE</ralph>"* ]] ||
+          [[ "$text" == *"<promise>ALL_TASKS_DONE</promise>"* ]]; then
           log_activity "✅ Agent signaled COMPLETE"
           echo "COMPLETE" 2>/dev/null || true
         fi
@@ -235,7 +240,7 @@ process_line() {
       cmd=$(echo "$line" | jq -r '.cmd // ""' 2>/dev/null) || cmd=""
 
       case "$name" in
-        Read|Edit|MultiEdit|NotebookEdit)
+        Read | Edit | MultiEdit | NotebookEdit)
           BYTES_READ=$((BYTES_READ + bytes))
           local kb=$((bytes / 1024))
           log_activity "READ $path (${lines} lines, ~${kb}KB)"
@@ -322,10 +327,12 @@ main() {
     iter_label=" (Iteration $ITERATION)"
   fi
 
-  echo "" >> "$RALPH_DIR/activity.log"
-  echo "═══════════════════════════════════════════════════════════════" >> "$RALPH_DIR/activity.log"
-  echo "Ralph Session Started${iter_label}: $(date)" >> "$RALPH_DIR/activity.log"
-  echo "═══════════════════════════════════════════════════════════════" >> "$RALPH_DIR/activity.log"
+  {
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "Ralph Session Started${iter_label}: $(date)"
+    echo "═══════════════════════════════════════════════════════════════"
+  } >>"$RALPH_DIR/activity.log"
 
   local last_token_log
   last_token_log=$(date +%s)

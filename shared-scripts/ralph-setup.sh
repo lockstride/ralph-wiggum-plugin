@@ -44,22 +44,45 @@ BRANCH_FROM_FLAG=""
 OPEN_PR_FLAG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --cli)          CLI_FROM_FLAG="$2"; shift 2 ;;
-    -m|--model)     MODEL_FROM_FLAG="$2"; shift 2 ;;
-    -n|--iterations) ITER_FROM_FLAG="$2"; shift 2 ;;
-    --prompt|--prompt-md) PROMPT_MODE="prompt"; shift ;;
-    --prompt-file)  PROMPT_MODE="file"; PROMPT_VALUE="$2"; shift 2 ;;
+    --cli)
+      CLI_FROM_FLAG="$2"
+      shift 2
+      ;;
+    -m | --model)
+      MODEL_FROM_FLAG="$2"
+      shift 2
+      ;;
+    -n | --iterations)
+      ITER_FROM_FLAG="$2"
+      shift 2
+      ;;
+    --prompt | --prompt-md)
+      PROMPT_MODE="prompt"
+      shift
+      ;;
+    --prompt-file)
+      PROMPT_MODE="file"
+      PROMPT_VALUE="$2"
+      shift 2
+      ;;
     --spec)
       PROMPT_MODE="spec"
       if [[ $# -gt 1 ]] && [[ "${2:0:1}" != "-" ]]; then
-        PROMPT_VALUE="$2"; shift 2
+        PROMPT_VALUE="$2"
+        shift 2
       else
         shift
       fi
       ;;
-    --branch)       BRANCH_FROM_FLAG="$2"; shift 2 ;;
-    --pr)           OPEN_PR_FLAG=true; shift ;;
-    -h|--help)
+    --branch)
+      BRANCH_FROM_FLAG="$2"
+      shift 2
+      ;;
+    --pr)
+      OPEN_PR_FLAG=true
+      shift
+      ;;
+    -h | --help)
       cat <<'EOF'
 Ralph Wiggum: Interactive Setup & Loop
 
@@ -90,7 +113,10 @@ EOF
       echo "Unknown option: $1" >&2
       exit 1
       ;;
-    *) WORKSPACE="$1"; shift ;;
+    *)
+      WORKSPACE="$1"
+      shift
+      ;;
   esac
 done
 
@@ -112,17 +138,21 @@ show_header() {
 CLI_OPTIONS=("claude" "cursor-agent")
 select_cli() {
   if [[ -n "$CLI_FROM_FLAG" ]]; then
-    echo "$CLI_FROM_FLAG"; return
+    echo "$CLI_FROM_FLAG"
+    return
   fi
   if [[ "$HAS_GUM" == "true" ]]; then
     gum choose --header "Agent CLI:" "${CLI_OPTIONS[@]}"
   else
     echo "Select agent CLI:"
     local i=1
-    for c in "${CLI_OPTIONS[@]}"; do echo "  $i) $c"; ((i++)); done
-    read -p "Choice [1]: " choice
+    for c in "${CLI_OPTIONS[@]}"; do
+      echo "  $i) $c"
+      ((i++))
+    done
+    read -rp "Choice [1]: " choice
     choice="${choice:-1}"
-    echo "${CLI_OPTIONS[$((choice-1))]}"
+    echo "${CLI_OPTIONS[$((choice - 1))]}"
   fi
 }
 
@@ -177,8 +207,8 @@ models_for_cli() {
       ;;
     cursor-agent)
       local raw
-      raw=$(cursor-agent --list-models 2>/dev/null \
-            | sed $'s/\x1b\[[0-9;]*[A-Za-z]//g')
+      raw=$(cursor-agent --list-models 2>/dev/null |
+        sed $'s/\x1b\[[0-9;]*[A-Za-z]//g')
       local filtered
       filtered=$(echo "$raw" | filter_cursor_models)
       if [[ -z "$filtered" ]]; then
@@ -194,7 +224,8 @@ models_for_cli() {
 select_model() {
   local cli="$1"
   if [[ -n "$MODEL_FROM_FLAG" ]]; then
-    echo "$MODEL_FROM_FLAG"; return
+    echo "$MODEL_FROM_FLAG"
+    return
   fi
   local -a opts=()
   while IFS= read -r line; do opts+=("$line"); done < <(models_for_cli "$cli")
@@ -210,12 +241,15 @@ select_model() {
   else
     echo "Select model:"
     local i=1
-    for m in "${opts[@]}"; do echo "  $i) $m"; ((i++)); done
-    read -p "Choice [1]: " choice
+    for m in "${opts[@]}"; do
+      echo "  $i) $m"
+      ((i++))
+    done
+    read -rp "Choice [1]: " choice
     choice="${choice:-1}"
-    selected="${opts[$((choice-1))]}"
+    selected="${opts[$((choice - 1))]}"
     if [[ "$selected" == "Custom..." ]]; then
-      read -p "Model id: " selected
+      read -rp "Model id: " selected
     fi
   fi
   # Strip " - description" suffix if present (cursor-agent format)
@@ -224,11 +258,14 @@ select_model() {
 }
 
 get_max_iterations() {
-  if [[ -n "$ITER_FROM_FLAG" ]]; then echo "$ITER_FROM_FLAG"; return; fi
+  if [[ -n "$ITER_FROM_FLAG" ]]; then
+    echo "$ITER_FROM_FLAG"
+    return
+  fi
   if [[ "$HAS_GUM" == "true" ]]; then
     gum input --header "Max iterations:" --placeholder "20" --value "20"
   else
-    read -p "Max iterations [20]: " value
+    read -rp "Max iterations [20]: " value
     echo "${value:-20}"
   fi
 }
@@ -261,10 +298,13 @@ select_prompt_source() {
   else
     echo "Prompt source:"
     local i=1
-    for o in "${opts[@]}"; do echo "  $i) $o"; ((i++)); done
-    read -p "Choice [1]: " choice
+    for o in "${opts[@]}"; do
+      echo "  $i) $o"
+      ((i++))
+    done
+    read -rp "Choice [1]: " choice
     choice="${choice:-1}"
-    picked="${opts[$((choice-1))]}"
+    picked="${opts[$((choice - 1))]}"
   fi
 
   case "$picked" in
@@ -276,7 +316,7 @@ select_prompt_source() {
       if [[ "$HAS_GUM" == "true" ]]; then
         path=$(gum input --header "Prompt file path:" --placeholder "PROMPT.md")
       else
-        read -p "Prompt file path: " path
+        read -rp "Prompt file path: " path
       fi
       echo "file|$path"
       ;;
@@ -293,7 +333,7 @@ select_prompt_source() {
       else
         echo "Specs (newest first, default = $default_spec):"
         list_specs "$workspace" | head -10 | nl
-        read -p "Spec name [${default_spec}]: " input
+        read -rp "Spec name [${default_spec}]: " input
         chosen="${input:-$default_spec}"
       fi
       echo "spec|$chosen"

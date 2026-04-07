@@ -29,21 +29,44 @@ PROMPT_VALUE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --cli)          RALPH_AGENT_CLI="$2"; shift 2 ;;
-    -m|--model)     MODEL="$2"; shift 2 ;;
-    --prompt|--prompt-md) PROMPT_MODE="prompt"; shift ;;
-    --prompt-file)  PROMPT_MODE="file"; PROMPT_VALUE="$2"; shift 2 ;;
+    --cli)
+      RALPH_AGENT_CLI="$2"
+      shift 2
+      ;;
+    -m | --model)
+      MODEL="$2"
+      shift 2
+      ;;
+    --prompt | --prompt-md)
+      PROMPT_MODE="prompt"
+      shift
+      ;;
+    --prompt-file)
+      PROMPT_MODE="file"
+      PROMPT_VALUE="$2"
+      shift 2
+      ;;
     --spec)
       PROMPT_MODE="spec"
       if [[ $# -gt 1 ]] && [[ "${2:0:1}" != "-" ]]; then
-        PROMPT_VALUE="$2"; shift 2
+        PROMPT_VALUE="$2"
+        shift 2
       else
         shift
       fi
       ;;
-    -h|--help)      show_help; exit 0 ;;
-    -*)             echo "Unknown option: $1" >&2; exit 1 ;;
-    *)              WORKSPACE="$1"; shift ;;
+    -h | --help)
+      show_help
+      exit 0
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      WORKSPACE="$1"
+      shift
+      ;;
   esac
 done
 

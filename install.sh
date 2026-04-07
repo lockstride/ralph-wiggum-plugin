@@ -35,7 +35,7 @@ if [[ -n "$SCRIPT_DIR" ]] && [[ -d "$SCRIPT_DIR/shared-scripts" ]]; then
 else
   # Otherwise clone a shallow copy into a tmp dir and copy out the bits we need.
   tmp=$(mktemp -d)
-  trap "rm -rf $tmp" EXIT
+  trap 'rm -rf "$tmp"' EXIT
   echo "📥 Cloning $REPO_URL#$REF..."
   git clone --depth 1 --branch "$REF" "$REPO_URL" "$tmp/ralph" >/dev/null 2>&1
   mkdir -p "$TARGET_DIR" "$TEMPLATES_DIR"

@@ -99,7 +99,7 @@ set_iteration() {
   local iteration="$2"
   local ralph_dir="$workspace/.ralph"
   mkdir -p "$ralph_dir"
-  echo "$iteration" > "$ralph_dir/.iteration"
+  echo "$iteration" >"$ralph_dir/.iteration"
 }
 
 increment_iteration() {
@@ -114,9 +114,12 @@ increment_iteration() {
 get_health_emoji() {
   local tokens="$1"
   local pct=$((tokens * 100 / ROTATE_THRESHOLD))
-  if   [[ $pct -lt 60 ]]; then echo "🟢"
-  elif [[ $pct -lt 80 ]]; then echo "🟡"
-  else                         echo "🔴"
+  if [[ $pct -lt 60 ]]; then
+    echo "🟢"
+  elif [[ $pct -lt 80 ]]; then
+    echo "🟡"
+  else
+    echo "🔴"
   fi
 }
 
@@ -131,7 +134,7 @@ log_activity() {
   local timestamp
   timestamp=$(date '+%H:%M:%S')
   mkdir -p "$ralph_dir"
-  echo "[$timestamp] $message" >> "$ralph_dir/activity.log"
+  echo "[$timestamp] $message" >>"$ralph_dir/activity.log"
 }
 
 log_error() {
@@ -141,7 +144,7 @@ log_error() {
   local timestamp
   timestamp=$(date '+%H:%M:%S')
   mkdir -p "$ralph_dir"
-  echo "[$timestamp] $message" >> "$ralph_dir/errors.log"
+  echo "[$timestamp] $message" >>"$ralph_dir/errors.log"
 }
 
 log_progress() {
@@ -150,9 +153,11 @@ log_progress() {
   local timestamp
   timestamp=$(date '+%Y-%m-%d %H:%M:%S')
   local progress_file="$workspace/.ralph/progress.md"
-  echo "" >> "$progress_file"
-  echo "### $timestamp" >> "$progress_file"
-  echo "$message" >> "$progress_file"
+  {
+    echo ""
+    echo "### $timestamp"
+    echo "$message"
+  } >>"$progress_file"
 }
 
 # =============================================================================
@@ -165,7 +170,7 @@ init_ralph_dir() {
   mkdir -p "$ralph_dir"
 
   if [[ ! -f "$ralph_dir/progress.md" ]]; then
-    cat > "$ralph_dir/progress.md" << 'EOF'
+    cat >"$ralph_dir/progress.md" <<'EOF'
 # Progress Log
 
 > Updated by the agent after significant work.
@@ -178,7 +183,7 @@ EOF
   fi
 
   if [[ ! -f "$ralph_dir/guardrails.md" ]]; then
-    cat > "$ralph_dir/guardrails.md" << 'EOF'
+    cat >"$ralph_dir/guardrails.md" <<'EOF'
 # Ralph Guardrails (Signs)
 
 > Lessons learned from past failures. READ THESE BEFORE ACTING.
@@ -208,7 +213,7 @@ EOF
   fi
 
   if [[ ! -f "$ralph_dir/errors.log" ]]; then
-    cat > "$ralph_dir/errors.log" << 'EOF'
+    cat >"$ralph_dir/errors.log" <<'EOF'
 # Error Log
 
 > Failures detected by stream-parser. Use to update guardrails.
@@ -217,7 +222,7 @@ EOF
   fi
 
   if [[ ! -f "$ralph_dir/activity.log" ]]; then
-    cat > "$ralph_dir/activity.log" << 'EOF'
+    cat >"$ralph_dir/activity.log" <<'EOF'
 # Activity Log
 
 > Real-time tool call logging from stream-parser.
@@ -229,10 +234,10 @@ EOF
   local gitignore="$workspace/.gitignore"
   if [[ -f "$gitignore" ]]; then
     if ! grep -qxF ".ralph/" "$gitignore" 2>/dev/null; then
-      echo ".ralph/" >> "$gitignore"
+      echo ".ralph/" >>"$gitignore"
     fi
   else
-    echo ".ralph/" > "$gitignore"
+    echo ".ralph/" >"$gitignore"
   fi
 }
 
@@ -252,7 +257,8 @@ EOF
 _resolve_task_file() {
   local workspace="$1"
   if [[ -n "${RALPH_TASK_FILE:-}" ]] && [[ -f "${RALPH_TASK_FILE}" ]]; then
-    echo "$RALPH_TASK_FILE"; return
+    echo "$RALPH_TASK_FILE"
+    return
   fi
   # Spec-kit breadcrumb: resolve_prompt_spec writes the real tasks.md path here
   local breadcrumb="$workspace/.ralph/task-file-path"
@@ -260,17 +266,21 @@ _resolve_task_file() {
     local bf
     bf=$(cat "$breadcrumb")
     if [[ -f "$bf" ]]; then
-      echo "$bf"; return
+      echo "$bf"
+      return
     fi
   fi
   if [[ -f "$workspace/RALPH_TASK.md" ]]; then
-    echo "$workspace/RALPH_TASK.md"; return
+    echo "$workspace/RALPH_TASK.md"
+    return
   fi
   if [[ -f "$workspace/PROMPT.md" ]]; then
-    echo "$workspace/PROMPT.md"; return
+    echo "$workspace/PROMPT.md"
+    return
   fi
   if [[ -f "$workspace/.ralph/effective-prompt.md" ]]; then
-    echo "$workspace/.ralph/effective-prompt.md"; return
+    echo "$workspace/.ralph/effective-prompt.md"
+    return
   fi
   echo ""
 }
@@ -338,7 +348,7 @@ _write_task_summary() {
     echo "remaining=$remaining"
     echo "---"
     grep -E '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | head -10 || true
-  } > "$summary_file"
+  } >"$summary_file"
 }
 
 # =============================================================================
@@ -358,7 +368,7 @@ build_prompt() {
     user_body=$(cat "$user_prompt_file")
   fi
 
-  cat << EOF
+  cat <<EOF
 # Ralph Iteration $iteration
 
 You are an autonomous development agent using the Ralph methodology.
@@ -462,6 +472,7 @@ run_iteration() {
   local fifo="$workspace/.ralph/.parser_fifo"
   local spinner_pid="" agent_pid="" norm_filter=""
 
+  # shellcheck disable=SC2329 # invoked indirectly via trap
   _iteration_cleanup() {
     kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
     kill "$spinner_pid" 2>/dev/null || true
@@ -495,7 +506,7 @@ run_iteration() {
   local invoke_cmd
   invoke_cmd=$(agent_build_cmd "$RALPH_AGENT_CLI" "$MODEL" "$prompt" "$session_id")
 
-  cd "$workspace"
+  cd "$workspace" || return
 
   spinner "$workspace" &
   spinner_pid=$!
@@ -509,12 +520,12 @@ run_iteration() {
   # Write the normalization jq filter to a temp file so it can be
   # used in a subshell pipeline without re-sourcing agent-adapter.sh.
   norm_filter=$(mktemp)
-  agent_normalize_filter "$RALPH_AGENT_CLI" > "$norm_filter"
+  agent_normalize_filter "$RALPH_AGENT_CLI" >"$norm_filter"
 
   (
-    eval "$invoke_cmd" 2>&1 \
-      | jq --unbuffered -c -f "$norm_filter" 2>/dev/null \
-      | "$script_dir/stream-parser.sh" "$workspace" "$iteration" > "$fifo"
+    eval "$invoke_cmd" 2>&1 |
+      jq --unbuffered -c -f "$norm_filter" 2>/dev/null |
+      "$script_dir/stream-parser.sh" "$workspace" "$iteration" >"$fifo"
     rm -f "$norm_filter"
   ) &
   agent_pid=$!
@@ -550,7 +561,7 @@ run_iteration() {
         kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
         ;;
     esac
-  done < "$fifo"
+  done <"$fifo"
 
   wait "$agent_pid" 2>/dev/null || true
   kill "$spinner_pid" 2>/dev/null || true
@@ -576,7 +587,7 @@ run_ralph_loop() {
   local workspace="$1"
   local script_dir="${2:-$(dirname "${BASH_SOURCE[0]}")}"
 
-  cd "$workspace"
+  cd "$workspace" || return
   if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
     echo "📦 Committing uncommitted changes..."
     git add -A
@@ -615,11 +626,10 @@ run_ralph_loop() {
     task_status=$(check_task_complete "$workspace")
 
     # Compute post-iteration task counts for the ITERATION END line
-    local post_counts post_done post_total post_remaining task_delta task_suffix
+    local post_counts post_done post_total task_delta task_suffix
     post_counts=$(count_criteria "$workspace")
     post_done=${post_counts%%:*}
     post_total=${post_counts##*:}
-    post_remaining=$((post_total - post_done))
     task_delta=$((post_done - pre_done))
     task_suffix=""
     if [[ "$post_total" -gt 0 ]]; then

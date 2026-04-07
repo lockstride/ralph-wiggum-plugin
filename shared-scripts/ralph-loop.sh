@@ -50,45 +50,67 @@ show_help() {
 }
 
 WORKSPACE=""
-PROMPT_MODE=""       # prompt | file | spec
+PROMPT_MODE="" # prompt | file | spec
 PROMPT_VALUE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cli)
-      RALPH_AGENT_CLI="$2"; shift 2 ;;
-    -m|--model)
-      MODEL="$2"; shift 2 ;;
-    -n|--iterations)
-      MAX_ITERATIONS="$2"; shift 2 ;;
-    --prompt|--prompt-md)
-      PROMPT_MODE="prompt"; shift ;;
+      RALPH_AGENT_CLI="$2"
+      shift 2
+      ;;
+    -m | --model)
+      MODEL="$2"
+      shift 2
+      ;;
+    -n | --iterations)
+      MAX_ITERATIONS="$2"
+      shift 2
+      ;;
+    --prompt | --prompt-md)
+      PROMPT_MODE="prompt"
+      shift
+      ;;
     --prompt-file)
-      PROMPT_MODE="file"; PROMPT_VALUE="$2"; shift 2 ;;
+      PROMPT_MODE="file"
+      PROMPT_VALUE="$2"
+      shift 2
+      ;;
     --spec)
       PROMPT_MODE="spec"
       # Optional positional after --spec
       if [[ $# -gt 1 ]] && [[ "${2:0:1}" != "-" ]]; then
-        PROMPT_VALUE="$2"; shift 2
+        PROMPT_VALUE="$2"
+        shift 2
       else
         shift
       fi
       ;;
     --completion-promise)
-      RALPH_COMPLETION_SIGIL="$2"; shift 2 ;;
+      export RALPH_COMPLETION_SIGIL="$2"
+      shift 2
+      ;;
     --branch)
-      USE_BRANCH="$2"; shift 2 ;;
+      USE_BRANCH="$2"
+      shift 2
+      ;;
     --pr)
-      OPEN_PR=true; shift ;;
-    -h|--help)
-      show_help; exit 0 ;;
+      OPEN_PR=true
+      shift
+      ;;
+    -h | --help)
+      show_help
+      exit 0
+      ;;
     -*)
       echo "Unknown option: $1" >&2
       echo "Use -h for help." >&2
       exit 1
       ;;
     *)
-      WORKSPACE="$1"; shift ;;
+      WORKSPACE="$1"
+      shift
+      ;;
   esac
 done
 

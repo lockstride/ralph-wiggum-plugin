@@ -37,10 +37,12 @@ _PR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   3. Same-directory fallback
 _default_templates_dir() {
   if [[ -n "${RALPH_TEMPLATES_DIR:-}" ]]; then
-    echo "$RALPH_TEMPLATES_DIR"; return
+    echo "$RALPH_TEMPLATES_DIR"
+    return
   fi
   if [[ -d "$_PR_SCRIPT_DIR/../shared-references/templates" ]]; then
-    echo "$_PR_SCRIPT_DIR/../shared-references/templates"; return
+    echo "$_PR_SCRIPT_DIR/../shared-references/templates"
+    return
   fi
   echo "$_PR_SCRIPT_DIR/templates"
 }
@@ -52,7 +54,7 @@ _write_effective_prompt() {
   local rel="${RALPH_EFFECTIVE_PROMPT:-.ralph/effective-prompt.md}"
   local out="$workspace/$rel"
   mkdir -p "$(dirname "$out")"
-  printf '%s' "$body" > "$out"
+  printf '%s' "$body" >"$out"
   echo "$out"
 }
 
@@ -126,7 +128,7 @@ resolve_prompt_spec() {
   fi
 
   if [[ -z "$spec_name" ]]; then
-    # ls -t handles both timestamped and lexical names; head -1 picks most-recent mtime
+    # shellcheck disable=SC2012 # ls -t is the simplest portable way to sort by mtime
     spec_name=$(ls -t "$specs_root" 2>/dev/null | head -1 || true)
     if [[ -z "$spec_name" ]]; then
       echo "❌ No spec directories found in $specs_root" >&2
@@ -162,20 +164,20 @@ resolve_prompt_spec() {
 
   local rendered
   if ! rendered=$(_render_template "$template" \
-      SPEC_DIR "$spec_dir" \
-      SPEC_NAME "$spec_name" \
-      CONSTITUTION_PATH "$constitution_path" \
-      TEST_COMMAND "$test_command" \
-      TASK_FILE "$task_file" \
-      PLAN_FILE "$plan_file" \
-      SPEC_FILE "$spec_file"); then
+    SPEC_DIR "$spec_dir" \
+    SPEC_NAME "$spec_name" \
+    CONSTITUTION_PATH "$constitution_path" \
+    TEST_COMMAND "$test_command" \
+    TASK_FILE "$task_file" \
+    PLAN_FILE "$plan_file" \
+    SPEC_FILE "$spec_file"); then
     return 1
   fi
 
   # Leave a breadcrumb so _resolve_task_file counts checkboxes from
   # the real tasks file, not the rendered effective prompt (which has none).
   mkdir -p "$workspace/.ralph"
-  echo "$task_file" > "$workspace/.ralph/task-file-path"
+  echo "$task_file" >"$workspace/.ralph/task-file-path"
 
   _write_effective_prompt "$workspace" "$rendered"
 }
@@ -187,9 +189,9 @@ resolve_prompt() {
   local value="${3:-}"
 
   case "$mode" in
-    prompt|promptmd|1)     resolve_prompt_promptmd "$workspace" ;;
-    file|custom|2)         resolve_prompt_file "$workspace" "$value" ;;
-    spec|speckit|3)        resolve_prompt_spec "$workspace" "$value" ;;
+    prompt | promptmd | 1) resolve_prompt_promptmd "$workspace" ;;
+    file | custom | 2) resolve_prompt_file "$workspace" "$value" ;;
+    spec | speckit | 3) resolve_prompt_spec "$workspace" "$value" ;;
     *)
       echo "❌ Unknown prompt mode: $mode (expected prompt|file|spec)" >&2
       return 1
