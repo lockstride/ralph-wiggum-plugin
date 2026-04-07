@@ -40,6 +40,8 @@ ASSISTANT_CHARS=0
 SHELL_OUTPUT_CHARS=0
 PROMPT_CHARS=3000 # rough estimate of the framing prompt + state files
 WARN_SENT=0
+TOOL_CALL_COUNT=0
+RATE_LIMITED=0
 
 # Gutter detection — temp files (macOS bash 3.x has no assoc arrays)
 FAILURES_FILE=$(mktemp)
@@ -262,7 +264,7 @@ process_line() {
       ;;
 
     tool_use)
-      # Informational — real accounting happens on tool_result
+      TOOL_CALL_COUNT=$((TOOL_CALL_COUNT + 1))
       ;;
 
     tool_result)
@@ -332,6 +334,35 @@ process_line() {
       check_gutter
       ;;
 
+    rate_limit)
+      local rl_status
+      rl_status=$(echo "$line" | jq -r '.status // "unknown"' 2>/dev/null) || rl_status="unknown"
+      if [[ "$rl_status" == "rejected" ]]; then
+        RATE_LIMITED=1
+        local resets_at
+        resets_at=$(echo "$line" | jq -r '.resets_at // 0' 2>/dev/null) || resets_at=0
+        local resets_human=""
+        if [[ $resets_at -gt 0 ]]; then
+          resets_human=$(date -r "$resets_at" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null) || resets_human="unix $resets_at"
+        fi
+        log_error "RATE LIMITED: API rejected the request. Resets at: ${resets_human:-unknown}"
+        {
+          echo ""
+          echo "  ┌──────────────────────────────────────────────────────────┐"
+          echo "  │  ⛔ RATE LIMIT HIT — API refused this request.          │"
+          echo "  │  The loop will back off and retry automatically.        │"
+          if [[ -n "$resets_human" ]]; then
+            printf '  │  Resets at: %-46s│\n' "$resets_human"
+          fi
+          echo "  └──────────────────────────────────────────────────────────┘"
+          echo ""
+        } >>"$RALPH_DIR/activity.log"
+        echo "DEFER" 2>/dev/null || true
+      else
+        log_activity "RATE LIMIT: status=$rl_status (within quota)"
+      fi
+      ;;
+
     error)
       local error_msg
       error_msg=$(echo "$line" | jq -r '.message // "Unknown error"' 2>/dev/null) || error_msg="Unknown error"
@@ -352,6 +383,21 @@ process_line() {
       local tokens
       tokens=$(calc_tokens)
       log_activity "SESSION END: ${duration}ms, ~$tokens tokens used"
+
+      if [[ $TOOL_CALL_COUNT -eq 0 ]] && [[ $ASSISTANT_CHARS -eq 0 ]] && [[ $RATE_LIMITED -eq 0 ]]; then
+        log_error "EMPTY SESSION: agent produced zero output in ${duration}ms — likely rate limited or API issue"
+        {
+          echo ""
+          echo "  ┌──────────────────────────────────────────────────────────┐"
+          echo "  │  ⚠️  EMPTY SESSION — agent started but did nothing.     │"
+          echo "  │  No tool calls, no text output (${duration}ms).            │"
+          echo "  │  This usually means the API rate limit was hit silently.│"
+          echo "  │  The loop will back off and retry automatically.        │"
+          echo "  └──────────────────────────────────────────────────────────┘"
+          echo ""
+        } >>"$RALPH_DIR/activity.log"
+        echo "DEFER" 2>/dev/null || true
+      fi
       ;;
   esac
 }

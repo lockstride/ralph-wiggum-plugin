@@ -605,6 +605,8 @@ run_ralph_loop() {
 
   local iteration=1
   local session_id=""
+  local stall_count=0
+  local DEFER_COUNT=0
 
   while [[ $iteration -le $MAX_ITERATIONS ]]; do
     local pre_counts
@@ -673,6 +675,8 @@ run_ralph_loop() {
           log_activity "$workspace" "ITERATION $iteration END — ⚠️ AGENT SIGNALED COMPLETE (criteria remain)$task_suffix"
           log_progress "$workspace" "**Session $iteration ended** — Agent signaled complete but criteria remain"
           echo "⚠️  Agent signaled completion but unchecked criteria remain. Continuing..."
+          stall_count=0
+          DEFER_COUNT=0
           iteration=$((iteration + 1))
         fi
         ;;
@@ -680,6 +684,8 @@ run_ralph_loop() {
         log_activity "$workspace" "ITERATION $iteration END — 🔄 ROTATE$task_suffix"
         log_progress "$workspace" "**Session $iteration ended** — 🔄 Context rotation"
         echo "🔄 Rotating to fresh context..."
+        stall_count=0
+        DEFER_COUNT=0
         iteration=$((iteration + 1))
         session_id=""
         ;;
@@ -692,18 +698,37 @@ run_ralph_loop() {
       "DEFER")
         log_activity "$workspace" "ITERATION $iteration END — ⏸️ DEFERRED$task_suffix"
         log_progress "$workspace" "**Session $iteration ended** — ⏸️ DEFERRED"
-        local defer_delay=30
-        if type calculate_backoff_delay &>/dev/null; then
-          local defer_attempt=${DEFER_COUNT:-1}
-          DEFER_COUNT=$((defer_attempt + 1))
-          defer_delay=$(($(calculate_backoff_delay "$defer_attempt" 15 120 true) / 1000))
+        DEFER_COUNT=$((DEFER_COUNT + 1))
+        stall_count=$((stall_count + 1))
+        if [[ $stall_count -ge 10 ]]; then
+          log_activity "$workspace" "LOOP END — 🚨 STALL: $stall_count consecutive empty/deferred iterations"
+          log_progress "$workspace" "**Loop ended** — 🚨 STALL: $stall_count consecutive empty/deferred iterations, likely rate limited"
+          echo "🚨 Stall detected: $stall_count consecutive iterations with no progress (likely rate limited)."
+          echo "   Wait for your rate limit to reset and re-run."
+          return 1
         fi
-        echo "⏸️  Waiting ${defer_delay}s before retrying..."
+        local defer_delay
+        defer_delay=$((15 * (1 << (DEFER_COUNT > 6 ? 6 : DEFER_COUNT - 1))))
+        [[ $defer_delay -gt 300 ]] && defer_delay=300
+        echo "⏸️  Waiting ${defer_delay}s before retrying (attempt $DEFER_COUNT)..."
         sleep "$defer_delay"
         ;;
       *)
         if [[ "$task_status" == INCOMPLETE:* ]]; then
           local remaining_count=${task_status#INCOMPLETE:}
+          if [[ "$task_delta" -eq 0 ]]; then
+            stall_count=$((stall_count + 1))
+          else
+            stall_count=0
+            DEFER_COUNT=0
+          fi
+          if [[ $stall_count -ge 10 ]]; then
+            log_activity "$workspace" "LOOP END — 🚨 STALL: $stall_count consecutive iterations with zero progress"
+            log_progress "$workspace" "**Loop ended** — 🚨 STALL: $stall_count consecutive iterations with zero task progress"
+            echo "🚨 Stall detected: $stall_count consecutive iterations completed zero tasks."
+            echo "   Check .ralph/activity.log for details."
+            return 1
+          fi
           log_activity "$workspace" "ITERATION $iteration END — NATURAL ($remaining_count remaining)$task_suffix"
           log_progress "$workspace" "**Session $iteration ended** — Agent finished naturally ($remaining_count remaining)"
           echo "📋 Agent finished but $remaining_count criteria remaining. Starting next iteration..."

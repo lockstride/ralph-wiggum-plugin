@@ -19,6 +19,7 @@
 #   {"kind":"tool_result","name":"<Read|Write|Shell|Other>","path":"<path>","cmd":"<cmd>","bytes":N,"lines":N,"exit_code":N}
 #   {"kind":"result","duration_ms":N}
 #   {"kind":"error","message":"<msg>"}
+#   {"kind":"rate_limit","status":"<allowed|rejected>","resets_at":N}
 #
 # NOTE: YOLO / unattended mode is mandatory. The adapter always passes
 # the "skip approval" flag for the chosen CLI. See the warning in
@@ -176,6 +177,11 @@ agent_normalize_filter() {
     | .[]
   elif .type == "result" then
     {kind:"result", duration_ms:(.duration_ms // 0)}
+  elif .type == "rate_limit_event" then
+    (.rate_limit_info // {}) as $rl
+    | {kind:"rate_limit",
+       status:($rl.status // "unknown"),
+       resets_at:($rl.resetsAt // 0)}
   elif .type == "error" then
     {kind:"error", message:(.error.message // .message // "Unknown error")}
   else empty end
