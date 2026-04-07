@@ -172,6 +172,11 @@ resolve_prompt_spec() {
     return 1
   fi
 
+  # Leave a breadcrumb so _resolve_task_file counts checkboxes from
+  # the real tasks file, not the rendered effective prompt (which has none).
+  mkdir -p "$workspace/.ralph"
+  echo "$task_file" > "$workspace/.ralph/task-file-path"
+
   _write_effective_prompt "$workspace" "$rendered"
 }
 

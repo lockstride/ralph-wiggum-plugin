@@ -254,6 +254,15 @@ _resolve_task_file() {
   if [[ -n "${RALPH_TASK_FILE:-}" ]] && [[ -f "${RALPH_TASK_FILE}" ]]; then
     echo "$RALPH_TASK_FILE"; return
   fi
+  # Spec-kit breadcrumb: resolve_prompt_spec writes the real tasks.md path here
+  local breadcrumb="$workspace/.ralph/task-file-path"
+  if [[ -f "$breadcrumb" ]]; then
+    local bf
+    bf=$(cat "$breadcrumb")
+    if [[ -f "$bf" ]]; then
+      echo "$bf"; return
+    fi
+  fi
   if [[ -f "$workspace/RALPH_TASK.md" ]]; then
     echo "$workspace/RALPH_TASK.md"; return
   fi
