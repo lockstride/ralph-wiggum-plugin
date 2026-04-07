@@ -1,0 +1,2 @@
+# SC1091: Can't follow sourced files — scripts source siblings at runtime
+disable=SC1091

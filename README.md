@@ -185,6 +185,40 @@ Emitted by the stream parser to the loop on stdout:
 - **Parallel mode** — Phase 5 of the plan (Worktrunk-based sub-worktrees with squash-merge-back) ships in v0.2.0. The prompt template already supports a parallel variant, so nothing is wasted.
 - **Automatic spec analyzer** — determines whether a spec is parallel-friendly. Ships with parallel mode.
 
+## Development
+
+### Prerequisites
+
+Install the linting and formatting tools:
+
+```
+brew install shellcheck shfmt
+```
+
+### Linting & formatting
+
+Run checks across all shell scripts:
+
+```
+./lint.sh
+```
+
+Auto-format with shfmt:
+
+```
+./lint.sh --fix
+```
+
+### Pre-commit hook
+
+The repo uses a git pre-commit hook (`.githooks/pre-commit`) that runs shellcheck and shfmt on staged `.sh` files. Wire it up once after cloning:
+
+```
+git config core.hooksPath .githooks
+```
+
+Commits that introduce lint or formatting issues will be blocked. Bypass with `git commit --no-verify` if needed.
+
 ## Credits
 
 - [@agrimsingh](https://github.com/agrimsingh) for [`ralph-wiggum-cursor`](https://github.com/agrimsingh/ralph-wiggum-cursor) — the proven cursor-agent implementation this plugin ports (MIT).

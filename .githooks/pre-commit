@@ -1,0 +1,39 @@
+#!/bin/bash
+set -euo pipefail
+
+staged_sh_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.sh' || true)
+
+if [[ -z "$staged_sh_files" ]]; then
+  exit 0
+fi
+
+errors=0
+
+if command -v shellcheck >/dev/null 2>&1; then
+  echo "Running shellcheck..."
+  for f in $staged_sh_files; do
+    if ! shellcheck "$f"; then
+      errors=1
+    fi
+  done
+else
+  echo "⚠️  shellcheck not found — skipping (brew install shellcheck)" >&2
+fi
+
+if command -v shfmt >/dev/null 2>&1; then
+  echo "Running shfmt..."
+  for f in $staged_sh_files; do
+    if ! shfmt -i 2 -ci -d "$f" >/dev/null 2>&1; then
+      echo "shfmt: $f needs formatting (run: shfmt -i 2 -ci -w $f)"
+      errors=1
+    fi
+  done
+else
+  echo "⚠️  shfmt not found — skipping (brew install shfmt)" >&2
+fi
+
+if [[ "$errors" -ne 0 ]]; then
+  echo ""
+  echo "Pre-commit checks failed. Fix issues above or bypass with --no-verify."
+  exit 1
+fi
