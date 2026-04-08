@@ -186,6 +186,11 @@ Emitted by the stream parser to the loop on stdout:
 - **Parallel mode** — Phase 5 of the plan (Worktrunk-based sub-worktrees with squash-merge-back) ships in v0.2.0. The prompt template already supports a parallel variant, so nothing is wasted.
 - **Automatic spec analyzer** — determines whether a spec is parallel-friendly. Ships with parallel mode.
 
+## Changelog
+
+- **0.1.8** — Phase-level iteration for Spec Kit (replaces one-task-per-iteration), dual `BASIC_CHECK_COMMAND` / `FINAL_CHECK_COMMAND` placeholders with `.ralph/basic-check-command` / `.ralph/final-check-command` breadcrumbs, tighter stall detection (natural-end threshold lowered from 10 to 3 on a dedicated counter, DEFER still at 10), hard `.ralph/` commit guardrail in the framing prompt, dropped `activity.log` from the agent read-list, zero-baseline test-discipline section.
+- **0.1.7** — `--version` flag and doc polish.
+
 ## Development
 
 ### Prerequisites
