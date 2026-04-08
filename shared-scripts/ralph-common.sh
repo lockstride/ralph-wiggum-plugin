@@ -377,14 +377,23 @@ build_prompt() {
   cat <<EOF
 # Ralph Iteration $iteration
 
-You are an autonomous development agent using the Ralph methodology.
+You are an autonomous development agent using the Ralph methodology. You have
+a fresh process every iteration — no memory of prior iterations. Your commits
+in \`git log\` and the checkbox state of \`tasks.md\` are the authoritative
+record of what is done. Everything else is advisory.
 
-## FIRST: Read State Files
+## FIRST: Read State Files (targeted)
 
 Before doing anything:
-1. Read \`.ralph/guardrails.md\` — lessons from past failures (FOLLOW THESE)
-2. Read \`.ralph/progress.md\` — what's been accomplished so far
-3. Read \`.ralph/errors.log\` — recent failures to avoid
+1. Read \`.ralph/guardrails.md\` in full — lessons from past failures. FOLLOW THESE.
+2. Read the **last ~100 lines** of \`.ralph/progress.md\` (use \`Read\` with \`offset\`, or \`tail -n 100\`). It is an append-only log, not a plan. Recent entries only.
+3. Read \`.ralph/errors.log\` in full — recent shell/tool failures to avoid repeating.
+
+Do **not** read \`.ralph/activity.log\`. It is a human-facing monitoring stream and is not useful to you.
+
+## Zero-baseline assumption (critical)
+
+The baseline on \`main\` is green — no pre-existing test failures, lint errors, or build breaks. Any failure you observe is a regression introduced during this refactor. **Diagnose and fix it in this iteration.** Do not assume failures are pre-existing; do not use \`--no-verify\`; do not leave TODOs to "fix later."
 
 ## Working Directory (Critical)
 
@@ -398,14 +407,15 @@ You are already in a git repository. Work HERE, not in a subdirectory:
 
 Ralph's strength is state-in-git, not LLM memory. Commit early and often:
 
-1. After completing each unit of work, commit with a descriptive message
-2. After any significant code change (even partial): commit
-3. Before any risky refactor: commit current state as a checkpoint
-4. Push after every 2–3 commits
-5. Never include "Co-authored-by" trailers or messages in your commits
+1. After completing each unit of work, commit with a descriptive message.
+2. After any significant code change (even partial): commit.
+3. Push after every 2–3 commits.
+4. **Never include \`.ralph/\` paths in \`git add\` or \`git commit\`.** \`.ralph/\` is in \`.gitignore\`; \`git add\` on an ignored path returns exit 1 and aborts the whole commit. This is the single most common failure mode of past loops. Commit only source files, \`tasks.md\`, and other non-ignored content.
+5. Write progress notes directly to \`.ralph/progress.md\` with the \`Write\`/\`Edit\` tool — never via commits.
+6. Never include "Co-authored-by" trailers in commit messages.
+7. Never use \`--amend\`, \`--force\`, \`reset --hard\`, or other destructive git operations. Fix mistakes with a new commit.
 
-If you get rotated, the next agent picks up from your last commit.
-Your commits ARE your memory.
+If you get rotated, the next agent picks up from your last commit. Your commits ARE your memory.
 
 ## Task Execution (from effective prompt)
 
@@ -413,15 +423,15 @@ $user_body
 
 ## Completion Protocol
 
-- When ALL criteria show \`[x]\`: output \`<ralph>COMPLETE</ralph>\` (or \`<promise>ALL_TASKS_DONE</promise>\`)
+- When ALL criteria show \`[x]\` AND the final check passes: output \`<promise>ALL_TASKS_DONE</promise>\` (or \`<ralph>COMPLETE</ralph>\`)
 - If stuck 3+ times on the same issue: output \`<ralph>GUTTER</ralph>\`
 
 ## Learning from Failures
 
 When something fails:
-1. Check \`.ralph/errors.log\` for failure history
-2. Figure out the root cause
-3. Add a Sign to \`.ralph/guardrails.md\`:
+1. Check \`.ralph/errors.log\` and \`.ralph/guardrails.md\` for a prior occurrence.
+2. Figure out the root cause — do not paper over it.
+3. Add a Sign to \`.ralph/guardrails.md\` (via \`Write\`/\`Edit\`, never via a commit that touches \`.ralph/\`):
 
 \`\`\`
 ### Sign: [Descriptive Name]
@@ -433,10 +443,10 @@ When something fails:
 ## Context Rotation Warning
 
 You may receive a warning that context is running low. When you see it:
-1. Finish your current file edit
-2. Commit and push
-3. Update .ralph/progress.md with what you accomplished and what's next
-4. You will be rotated to a fresh agent that continues your work
+1. Finish your current file edit.
+2. Commit and push (source files only — never \`.ralph/\`).
+3. Append a brief summary to \`.ralph/progress.md\` with the Write tool.
+4. You will be rotated to a fresh agent that continues from your last commit.
 
 Begin by reading the state files.
 EOF
@@ -612,7 +622,8 @@ run_ralph_loop() {
 
   local iteration=1
   local session_id=""
-  local stall_count=0
+  local stall_count=0         # DEFER/rate-limit consecutive count (threshold 10)
+  local zero_progress_count=0 # natural-end with zero task delta (threshold 3)
   local DEFER_COUNT=0
 
   while [[ $iteration -le $MAX_ITERATIONS ]]; do
@@ -683,6 +694,7 @@ run_ralph_loop() {
           log_progress "$workspace" "**Session $iteration ended** — Agent signaled complete but criteria remain"
           echo "⚠️  Agent signaled completion but unchecked criteria remain. Continuing..."
           stall_count=0
+          zero_progress_count=0
           DEFER_COUNT=0
           iteration=$((iteration + 1))
         fi
@@ -692,6 +704,7 @@ run_ralph_loop() {
         log_progress "$workspace" "**Session $iteration ended** — 🔄 Context rotation"
         echo "🔄 Rotating to fresh context..."
         stall_count=0
+        zero_progress_count=0
         DEFER_COUNT=0
         iteration=$((iteration + 1))
         session_id=""
@@ -703,6 +716,10 @@ run_ralph_loop() {
         return 1
         ;;
       "DEFER")
+        # DEFER = API/network transient error (rate limit, 429, etc.).
+        # Kept lenient (threshold 10) because rate limits can take minutes to clear.
+        # Does NOT increment zero_progress_count — that's reserved for the agent
+        # genuinely doing nothing useful, not for API hiccups.
         log_activity "$workspace" "ITERATION $iteration END — ⏸️ DEFERRED$task_suffix"
         log_progress "$workspace" "**Session $iteration ended** — ⏸️ DEFERRED"
         DEFER_COUNT=$((DEFER_COUNT + 1))
@@ -721,19 +738,23 @@ run_ralph_loop() {
         sleep "$defer_delay"
         ;;
       *)
+        # Natural end (no signal). Uses zero_progress_count (threshold 3)
+        # because repeated zero-delta iterations here mean the agent is
+        # silently bailing out — not an API issue.
         if [[ "$task_status" == INCOMPLETE:* ]]; then
           local remaining_count=${task_status#INCOMPLETE:}
           if [[ "$task_delta" -eq 0 ]]; then
-            stall_count=$((stall_count + 1))
+            zero_progress_count=$((zero_progress_count + 1))
           else
+            zero_progress_count=0
             stall_count=0
             DEFER_COUNT=0
           fi
-          if [[ $stall_count -ge 10 ]]; then
-            log_activity "$workspace" "LOOP END — 🚨 STALL: $stall_count consecutive iterations with zero progress"
-            log_progress "$workspace" "**Loop ended** — 🚨 STALL: $stall_count consecutive iterations with zero task progress"
-            echo "🚨 Stall detected: $stall_count consecutive iterations completed zero tasks."
-            echo "   Check .ralph/activity.log for details."
+          if [[ $zero_progress_count -ge 3 ]]; then
+            log_activity "$workspace" "LOOP END — 🚨 STALL: $zero_progress_count consecutive natural-end iterations with zero task progress"
+            log_progress "$workspace" "**Loop ended** — 🚨 STALL: $zero_progress_count consecutive natural-end iterations with zero task progress"
+            echo "🚨 Stall detected: $zero_progress_count consecutive iterations completed zero tasks and exited naturally."
+            echo "   The agent is silently bailing out — check .ralph/errors.log and .ralph/progress.md for why."
             return 1
           fi
           log_activity "$workspace" "ITERATION $iteration END — NATURAL ($remaining_count remaining)$task_suffix"
@@ -743,6 +764,7 @@ run_ralph_loop() {
           log_activity "$workspace" "ITERATION $iteration END — NATURAL (no checkbox tracking)$task_suffix"
           log_progress "$workspace" "**Session $iteration ended** — Agent finished naturally (no checkbox tracking)"
           stall_count=0
+          zero_progress_count=0
           DEFER_COUNT=0
         fi
         iteration=$((iteration + 1))

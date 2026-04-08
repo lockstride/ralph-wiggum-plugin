@@ -155,11 +155,34 @@ resolve_prompt_spec() {
     constitution_path="(no constitution found — proceed without one)"
   fi
 
-  # Resolve test command: prefer .ralph/test-command, fall back to "pnpm test"
-  local test_command="pnpm test"
-  if [[ -f "$workspace/.ralph/test-command" ]]; then
-    test_command=$(cat "$workspace/.ralph/test-command")
+  # Resolve check commands.
+  #
+  # Ralph runs two tiers of gate:
+  #   - BASIC_CHECK_COMMAND: fast per-task smoke gate (no e2e). Run after
+  #     every individual task, must pass before marking [x].
+  #   - FINAL_CHECK_COMMAND: full gate including e2e. Run at phase boundaries
+  #     and before emitting ALL_TASKS_DONE.
+  #
+  # Breadcrumb precedence:
+  #   BASIC: .ralph/basic-check-command → .ralph/test-command → "pnpm basic-check"
+  #   FINAL: .ralph/final-check-command → "pnpm all-check"
+  #
+  # The .ralph/test-command fallback preserves back-compat with pre-0.1.8
+  # setups where only a single test command was configured.
+  local basic_check_command="pnpm basic-check"
+  if [[ -f "$workspace/.ralph/basic-check-command" ]]; then
+    basic_check_command=$(cat "$workspace/.ralph/basic-check-command")
+  elif [[ -f "$workspace/.ralph/test-command" ]]; then
+    basic_check_command=$(cat "$workspace/.ralph/test-command")
   fi
+
+  local final_check_command="pnpm all-check"
+  if [[ -f "$workspace/.ralph/final-check-command" ]]; then
+    final_check_command=$(cat "$workspace/.ralph/final-check-command")
+  fi
+
+  # Legacy TEST_COMMAND variable still populated for any downstream callers.
+  local test_command="$basic_check_command"
 
   local task_file="$spec_dir/tasks.md"
   local plan_file="$spec_dir/plan.md"
@@ -175,6 +198,8 @@ resolve_prompt_spec() {
     SPEC_NAME "$spec_name" \
     CONSTITUTION_PATH "$constitution_path" \
     TEST_COMMAND "$test_command" \
+    BASIC_CHECK_COMMAND "$basic_check_command" \
+    FINAL_CHECK_COMMAND "$final_check_command" \
     TASK_FILE "$task_file" \
     PLAN_FILE "$plan_file" \
     SPEC_FILE "$spec_file"); then
