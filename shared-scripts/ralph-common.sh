@@ -467,6 +467,123 @@ spinner() {
 }
 
 # =============================================================================
+# ITERATION HYGIENE HELPERS
+#
+# Forensic helpers that run around each iteration to catch orphan-file
+# leaks (see 0.1.10 RCA on the 005-comparison-*.md incident) and to
+# persist a post-mortem tarball outside of .ralph/ when the loop crashes.
+# =============================================================================
+
+# Capture the baseline state of the worktree at the start of an iteration:
+# current HEAD SHA and the list of currently-untracked files. Used by
+# _check_orphan_leak after the iteration to detect whether the agent
+# committed any files that were untracked at start (a strong signal that
+# `git add .` / `git add <dir>` swept up orphans).
+_capture_iteration_baseline() {
+  local workspace="$1"
+  local ralph_dir="$workspace/.ralph"
+  mkdir -p "$ralph_dir"
+  (cd "$workspace" && git rev-parse HEAD 2>/dev/null) >"$ralph_dir/iteration-baseline-head" || true
+  (cd "$workspace" && git ls-files --others --exclude-standard 2>/dev/null | LC_ALL=C sort) \
+    >"$ralph_dir/iteration-baseline-untracked" || true
+}
+
+# After an iteration, compare the files touched by any new commits against
+# the untracked baseline. If any committed file was untracked at iteration
+# start, it's a suspected orphan leak — log a warning to activity.log and
+# append a concrete finding to errors.log. Non-blocking (the commits already
+# happened); this is pure telemetry so the operator can spot the problem.
+_check_orphan_leak() {
+  local workspace="$1"
+  local ralph_dir="$workspace/.ralph"
+  local baseline_head="$ralph_dir/iteration-baseline-head"
+  local baseline_untracked="$ralph_dir/iteration-baseline-untracked"
+  [[ -f "$baseline_head" ]] || return 0
+  [[ -f "$baseline_untracked" ]] || return 0
+  [[ -s "$baseline_untracked" ]] || return 0
+
+  local before_head after_head
+  before_head=$(cat "$baseline_head")
+  after_head=$(cd "$workspace" && git rev-parse HEAD 2>/dev/null) || return 0
+  [[ "$before_head" == "$after_head" ]] && return 0
+
+  local changed_files
+  changed_files=$(cd "$workspace" && git diff --name-only "$before_head".."$after_head" 2>/dev/null) || return 0
+  [[ -z "$changed_files" ]] && return 0
+
+  local leaked
+  leaked=$(LC_ALL=C comm -12 \
+    <(printf '%s\n' "$changed_files" | LC_ALL=C sort -u) \
+    "$baseline_untracked" 2>/dev/null)
+  [[ -z "$leaked" ]] && return 0
+
+  local leaked_inline
+  leaked_inline=$(printf '%s' "$leaked" | tr '\n' ' ')
+  log_activity "$workspace" "⚠️  ORPHAN LEAK: iteration committed files that were untracked at start: $leaked_inline"
+  {
+    echo ""
+    echo "⚠️  ORPHAN FILE LEAK DETECTED"
+    echo "   iteration baseline HEAD: $before_head"
+    echo "   iteration end HEAD:      $after_head"
+    echo "   files committed that were untracked at iteration start:"
+    while IFS= read -r _leak_path; do
+      [[ -n "$_leak_path" ]] && echo "     - $_leak_path"
+    done <<<"$leaked"
+    echo "   likely cause: agent used 'git add .', 'git add -A', or 'git add <dir>'"
+    echo "   action: review the commits and revert the orphan files if they are"
+    echo "           not part of the current task"
+    echo ""
+  } >>"$workspace/.ralph/errors.log"
+}
+
+# Write a post-mortem bundle when a loop ends in GUTTER or STALL. The bundle
+# lives at <workspace>/.ralph-postmortems/<ISO-timestamp>-<reason>.tar.gz and
+# contains the most important .ralph/ state files plus a snapshot of recent
+# git activity. Host projects should gitignore .ralph-postmortems/.
+_write_postmortem() {
+  local workspace="$1"
+  local reason="${2:-unknown}"
+  local ralph_dir="$workspace/.ralph"
+  [[ -d "$ralph_dir" ]] || return 0
+
+  local pm_dir="$workspace/.ralph-postmortems"
+  mkdir -p "$pm_dir"
+
+  local ts
+  ts=$(date -u '+%Y%m%dT%H%M%SZ')
+  local tarball="$pm_dir/${ts}-${reason}.tar.gz"
+
+  local staging
+  staging=$(mktemp -d) || return 0
+
+  local f
+  for f in errors.log activity.log progress.md guardrails.md effective-prompt.md \
+    iteration-baseline-head iteration-baseline-untracked task-file-path \
+    basic-check-command final-check-command test-command; do
+    [[ -f "$ralph_dir/$f" ]] && cp "$ralph_dir/$f" "$staging/" 2>/dev/null || true
+  done
+
+  (cd "$workspace" && git log --oneline -30 2>/dev/null) >"$staging/git-log.txt" || true
+  (cd "$workspace" && git status --porcelain 2>/dev/null) >"$staging/git-status.txt" || true
+  (cd "$workspace" && git rev-parse HEAD 2>/dev/null) >"$staging/git-head.txt" || true
+
+  {
+    echo "reason: $reason"
+    echo "timestamp_utc: $ts"
+    echo "workspace: $workspace"
+    echo "ralph_agent_cli: ${RALPH_AGENT_CLI:-unknown}"
+    echo "model: ${MODEL:-unknown}"
+  } >"$staging/post-mortem-meta.txt"
+
+  (cd "$staging" && tar -czf "$tarball" ./* 2>/dev/null) || true
+  rm -rf "$staging"
+
+  [[ -f "$tarball" ]] || return 0
+  echo "📦 Post-mortem saved: $tarball" >&2
+  log_activity "$workspace" "📦 Post-mortem bundle written: $tarball"
+}
+
+# =============================================================================
 # ITERATION RUNNER
 # =============================================================================
 
@@ -480,6 +597,10 @@ run_iteration() {
 
   local prompt
   prompt=$(build_prompt "$workspace" "$iteration")
+
+  # Snapshot worktree state before the agent runs so _check_orphan_leak
+  # can flag any untracked files the agent commits.
+  _capture_iteration_baseline "$workspace"
 
   local fifo="$workspace/.ralph/.parser_fifo"
   local spinner_pid="" agent_pid="" norm_filter=""
@@ -637,6 +758,10 @@ run_ralph_loop() {
     local signal
     signal=$(run_iteration "$workspace" "$iteration" "$session_id" "$script_dir")
 
+    # Non-blocking check: did the agent commit any files that were
+    # untracked at iteration start? (orphan sweep via broad `git add`)
+    _check_orphan_leak "$workspace"
+
     local task_status
     task_status=$(check_task_complete "$workspace")
 
@@ -708,6 +833,7 @@ run_ralph_loop() {
         log_activity "$workspace" "ITERATION $iteration END — 🚨 GUTTER$task_suffix"
         log_progress "$workspace" "**Session $iteration ended** — 🚨 GUTTER"
         echo "🚨 Gutter detected. Check .ralph/errors.log for details."
+        _write_postmortem "$workspace" "gutter"
         return 1
         ;;
       "DEFER")
@@ -724,6 +850,7 @@ run_ralph_loop() {
           log_progress "$workspace" "**Loop ended** — 🚨 STALL: $stall_count consecutive empty/deferred iterations, likely rate limited"
           echo "🚨 Stall detected: $stall_count consecutive iterations with no progress (likely rate limited)."
           echo "   Wait for your rate limit to reset and re-run."
+          _write_postmortem "$workspace" "stall-defer"
           return 1
         fi
         local defer_delay
@@ -750,6 +877,7 @@ run_ralph_loop() {
             log_progress "$workspace" "**Loop ended** — 🚨 STALL: $zero_progress_count consecutive natural-end iterations with zero task progress"
             echo "🚨 Stall detected: $zero_progress_count consecutive iterations completed zero tasks and exited naturally."
             echo "   The agent is silently bailing out — check .ralph/errors.log and .ralph/progress.md for why."
+            _write_postmortem "$workspace" "stall-natural"
             return 1
           fi
           log_activity "$workspace" "ITERATION $iteration END — NATURAL ($remaining_count remaining)$task_suffix"
@@ -780,6 +908,7 @@ run_ralph_loop() {
   fi
   log_progress "$workspace" "**Loop ended** — ⚠️ Max iterations ($MAX_ITERATIONS) reached"
   echo "⚠️  Max iterations ($MAX_ITERATIONS) reached. Check progress manually."
+  _write_postmortem "$workspace" "max-iterations"
   return 1
 }
 

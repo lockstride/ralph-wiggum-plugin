@@ -205,6 +205,28 @@ git config core.hooksPath .githooks
 
 Commits that introduce lint or formatting issues will be blocked. Bypass with `git commit --no-verify` if needed.
 
+## Changelog
+
+### 0.1.10
+
+- **Gate discipline.** Spec Kit task execution now runs exactly one gate per task (`{{BASIC_CHECK_COMMAND}}` or `{{FINAL_CHECK_COMMAND}}`, never both). The agent picks based on what the task touched — barrel exports, Prisma schema, module registration, app bootstrap, tsconfig paths, workspace deps, and auth middleware trigger the full final check; everything else uses basic check. Phase completion skips the redundant final-check run if the last task already ran it.
+- **Gate before commit, always.** The task loop now runs the chosen gate *before* `git add` / `git commit`, so red code never enters HEAD. No `--amend` churn on test failures.
+- **Explicit-file staging rule.** The Git Protocol now mandates `git add <exact paths>` and forbids `git add .`, `git add -A`, and `git add <dir>`. This closes the orphan-file sweep bug that caused stray `specs/005-comparison-*.md` files from a dropped stash to get committed into unrelated task work.
+- **Orphan-file leak detector** in the loop. Each iteration captures a baseline of untracked files at start and compares it to the files committed during the iteration. Leaks get logged to `.ralph/errors.log` and `activity.log` as a non-blocking warning so the operator can spot broad-add problems immediately.
+- **Post-mortem bundles** on GUTTER / STALL / max-iterations. When a loop ends abnormally, a tarball is written to `<workspace>/.ralph-postmortems/<timestamp>-<reason>.tar.gz` containing `.ralph/` state files and a git snapshot. Survives `/ralph-cancel` cleanup. Host projects should gitignore `.ralph-postmortems/`.
+- **Tighter `check_gutter`.** The "same shell command failed" threshold in the stream parser dropped from 3 to 2. A second identical failure is already strong evidence of stuckness and the extra retry just burns tokens.
+
+### 0.1.9
+
+- Refactor and cleanup: removed `--completion-promise` flag, streamlined task file resolution to prioritize `.ralph/task-file-path` in Spec Kit mode, removed legacy command fallbacks.
+
+### 0.1.8
+
+- Phase-level iteration for Spec Kit mode: one iteration now completes an entire phase's worth of tasks instead of a single task, better matching 1M-context model capacity.
+- Dual check commands: `{{BASIC_CHECK_COMMAND}}` for per-task gating and `{{FINAL_CHECK_COMMAND}}` for phase boundaries.
+- Stall detector split into two counters: `zero_progress_count` (threshold 3) for natural-end iterations with zero task progress, and `stall_count` (threshold 10) for rate-limit/DEFER chains.
+- `build_prompt` no longer feeds `activity.log` to the agent (human-only monitoring); `progress.md` is trimmed to last ~100 lines.
+
 ## Credits
 
 - [@agrimsingh](https://github.com/agrimsingh) for [`ralph-wiggum-cursor`](https://github.com/agrimsingh/ralph-wiggum-cursor) — the proven cursor-agent implementation this plugin ports (MIT).

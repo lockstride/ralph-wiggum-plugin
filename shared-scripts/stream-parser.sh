@@ -13,7 +13,7 @@
 # Emits on stdout (one per line):
 #   ROTATE   — token threshold reached, stop and rotate context
 #   WARN     — approaching limit, agent should wrap up
-#   GUTTER   — stuck pattern detected (3× same failure, 5× file thrash)
+#   GUTTER   — stuck pattern detected (2× same failure, 5× file thrash)
 #   COMPLETE — agent emitted <ralph>COMPLETE</ralph>
 #   DEFER    — retryable API/network error, back off and retry
 #
@@ -190,7 +190,10 @@ track_shell_failure() {
     count=$((count + 1))
     echo "$single_line_cmd" >>"$FAILURES_FILE"
     log_error "SHELL FAIL: $cmd → exit $exit_code (attempt $count)"
-    if [[ $count -ge 3 ]]; then
+    # 0.1.10: lowered from 3 to 2. A second identical failure is already
+    # strong evidence of stuckness; the extra retry just burns tokens on
+    # shell output and delays GUTTER detection.
+    if [[ $count -ge 2 ]]; then
       log_error "⚠️ GUTTER: same command failed ${count}x"
       echo "GUTTER" 2>/dev/null || true
     fi
