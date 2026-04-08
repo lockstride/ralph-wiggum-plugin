@@ -184,9 +184,11 @@ track_shell_failure() {
   local exit_code="$2"
   if [[ $exit_code -ne 0 ]]; then
     local count
-    count=$(grep -cxF "$cmd" "$FAILURES_FILE" 2>/dev/null) || count=0
+    local single_line_cmd
+    single_line_cmd=$(echo -n "$cmd" | base64)
+    count=$(grep -cxF "$single_line_cmd" "$FAILURES_FILE" 2>/dev/null) || count=0
     count=$((count + 1))
-    echo "$cmd" >>"$FAILURES_FILE"
+    echo "$single_line_cmd" >>"$FAILURES_FILE"
     log_error "SHELL FAIL: $cmd → exit $exit_code (attempt $count)"
     if [[ $count -ge 3 ]]; then
       log_error "⚠️ GUTTER: same command failed ${count}x"
