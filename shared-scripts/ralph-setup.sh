@@ -82,6 +82,10 @@ while [[ $# -gt 0 ]]; do
       OPEN_PR_FLAG=true
       shift
       ;;
+    -v | --version)
+      jq -r '.version' "$SCRIPT_DIR/../.claude-plugin/plugin.json"
+      exit 0
+      ;;
     -h | --help)
       cat <<'EOF'
 Ralph Wiggum: Interactive Setup & Loop
@@ -98,6 +102,7 @@ Options:
   --spec [name]                Use Spec Kit spec (default: newest)
   --branch <name>              Work on named branch
   --pr                         Open PR when complete (requires --branch)
+  -v, --version                Show version
   -h, --help                   Show this help
 
 Any flags you pass cause the interactive prompt for that setting to be

@@ -125,6 +125,7 @@ Flags that take a required value are shown with `<value>`. When a flag is omitte
 | `--completion-promise <text>` | Completion sigil (back-compat with the official plugin) | `<ralph>COMPLETE</ralph>` |
 | `--branch <name>` | Work on a named branch | current branch |
 | `--pr` | Open a PR when complete; requires `--branch` | off |
+| `-v, --version` | Print version and exit | — |
 | `-h, --help` | Show help | — |
 
 **Prompt source** — mutually exclusive, pick at most one:
