@@ -272,7 +272,6 @@ _parse_tasks_direct() {
 
 # Get all tasks WITH group info (extended format for parallel mode)
 # Format: id|status|group|description
-# Note: get_all_tasks() is kept stable for backward compatibility
 get_all_tasks_with_group() {
   local workspace="${1:-.}"
   local ralph_dir="$workspace/.ralph"

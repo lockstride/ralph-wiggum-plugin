@@ -164,25 +164,17 @@ resolve_prompt_spec() {
   #     and before emitting ALL_TASKS_DONE.
   #
   # Breadcrumb precedence:
-  #   BASIC: .ralph/basic-check-command → .ralph/test-command → "pnpm basic-check"
+  #   BASIC: .ralph/basic-check-command → "pnpm basic-check"
   #   FINAL: .ralph/final-check-command → "pnpm all-check"
-  #
-  # The .ralph/test-command fallback preserves back-compat with pre-0.1.8
-  # setups where only a single test command was configured.
   local basic_check_command="pnpm basic-check"
   if [[ -f "$workspace/.ralph/basic-check-command" ]]; then
     basic_check_command=$(cat "$workspace/.ralph/basic-check-command")
-  elif [[ -f "$workspace/.ralph/test-command" ]]; then
-    basic_check_command=$(cat "$workspace/.ralph/test-command")
   fi
 
   local final_check_command="pnpm all-check"
   if [[ -f "$workspace/.ralph/final-check-command" ]]; then
     final_check_command=$(cat "$workspace/.ralph/final-check-command")
   fi
-
-  # Legacy TEST_COMMAND variable still populated for any downstream callers.
-  local test_command="$basic_check_command"
 
   local task_file="$spec_dir/tasks.md"
   local plan_file="$spec_dir/plan.md"
@@ -197,7 +189,6 @@ resolve_prompt_spec() {
     SPEC_DIR "$spec_dir" \
     SPEC_NAME "$spec_name" \
     CONSTITUTION_PATH "$constitution_path" \
-    TEST_COMMAND "$test_command" \
     BASIC_CHECK_COMMAND "$basic_check_command" \
     FINAL_CHECK_COMMAND "$final_check_command" \
     TASK_FILE "$task_file" \
@@ -221,9 +212,9 @@ resolve_prompt() {
   local value="${3:-}"
 
   case "$mode" in
-    prompt | promptmd | 1) resolve_prompt_promptmd "$workspace" ;;
-    file | custom | 2) resolve_prompt_file "$workspace" "$value" ;;
-    spec | speckit | 3) resolve_prompt_spec "$workspace" "$value" ;;
+    prompt) resolve_prompt_promptmd "$workspace" ;;
+    file) resolve_prompt_file "$workspace" "$value" ;;
+    spec) resolve_prompt_spec "$workspace" "$value" ;;
     *)
       echo "❌ Unknown prompt mode: $mode (expected prompt|file|spec)" >&2
       return 1

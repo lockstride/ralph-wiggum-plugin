@@ -22,7 +22,6 @@
 #   --prompt | --prompt-md         Use PROMPT.md at workspace root
 #   --prompt-file <path>           Use custom prompt file
 #   --spec [name]                  Use Spec Kit spec dir (default: most recent)
-#   --completion-promise <text>    Custom completion sigil (default: <ralph>COMPLETE</ralph>)
 #   --branch <name>                Work on a named branch
 #   --pr                           Open a PR when complete (requires --branch)
 #   -h, --help                     Show this help
@@ -46,7 +45,7 @@ source "$SCRIPT_DIR/prompt-resolver.sh"
 # =============================================================================
 
 show_help() {
-  sed -n '3,35p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,32p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 WORKSPACE=""
@@ -85,10 +84,6 @@ while [[ $# -gt 0 ]]; do
       else
         shift
       fi
-      ;;
-    --completion-promise)
-      export RALPH_COMPLETION_SIGIL="$2"
-      shift 2
       ;;
     --branch)
       USE_BRANCH="$2"

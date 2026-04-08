@@ -251,7 +251,7 @@ EOF
 
 # Resolve which file we count checkboxes from:
 #   1. $RALPH_TASK_FILE if set
-#   2. $workspace/RALPH_TASK.md (upstream convention)
+#   2. .ralph/task-file-path breadcrumb (spec-kit mode)
 #   3. $workspace/PROMPT.md
 #   4. $workspace/.ralph/effective-prompt.md
 _resolve_task_file() {
@@ -260,7 +260,6 @@ _resolve_task_file() {
     echo "$RALPH_TASK_FILE"
     return
   fi
-  # Spec-kit breadcrumb: resolve_prompt_spec writes the real tasks.md path here
   local breadcrumb="$workspace/.ralph/task-file-path"
   if [[ -f "$breadcrumb" ]]; then
     local bf
@@ -269,10 +268,6 @@ _resolve_task_file() {
       echo "$bf"
       return
     fi
-  fi
-  if [[ -f "$workspace/RALPH_TASK.md" ]]; then
-    echo "$workspace/RALPH_TASK.md"
-    return
   fi
   if [[ -f "$workspace/PROMPT.md" ]]; then
     echo "$workspace/PROMPT.md"

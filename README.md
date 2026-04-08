@@ -122,7 +122,6 @@ Flags that take a required value are shown with `<value>`. When a flag is omitte
 | `--cli <claude\|cursor-agent>` | Which agent CLI to drive | interactive picker (pre-selects `claude`) |
 | `-m, --model <id>` | Model name | interactive picker (pre-selects `opus` for Claude, `composer-2` for Cursor) |
 | `-n, --iterations N` | Max iterations | interactive picker (pre-fills `20`) |
-| `--completion-promise <text>` | Completion sigil (back-compat with the official plugin) | `<ralph>COMPLETE</ralph>` |
 | `--branch <name>` | Work on a named branch | current branch |
 | `--pr` | Open a PR when complete; requires `--branch` | off |
 | `-v, --version` | Print version and exit | — |
@@ -160,7 +159,7 @@ If you use [Spec Kit](https://github.com/github/spec-kit), pick `--spec` and Ral
 2. Render `shared-references/templates/speckit-prompt.md` with `{{SPEC_DIR}}`, `{{CONSTITUTION_PATH}}`, `{{TEST_COMMAND}}`, `{{TASK_FILE}}`, `{{PLAN_FILE}}`, and `{{SPEC_FILE}}` substituted.
 3. Enforce the Spec Kit read order (constitution → spec → plan → tasks), one task per iteration, checklist gates, and the `<promise>ALL_TASKS_DONE</promise>` completion sigil (verified against the real checkbox state — no hallucinated promises).
 
-The default test command is `pnpm test`. Override by creating `.ralph/test-command` in your repo with the command you want.
+The default basic check command is `pnpm basic-check`. Override by creating `.ralph/basic-check-command` in your repo. The default final check command is `pnpm all-check`, overridable via `.ralph/final-check-command`.
 
 ## Signals the loop understands
 
@@ -171,25 +170,6 @@ Emitted by the stream parser to the loop on stdout:
 - `GUTTER` — stuck pattern (3× same shell failure, 5× writes to same file in 10 min, non-retryable API error, or agent emits `<ralph>GUTTER</ralph>`)
 - `COMPLETE` — agent emits `<ralph>COMPLETE</ralph>` or `<promise>ALL_TASKS_DONE</promise>`, and the parser re-checks the real checkbox state before honoring it
 - `DEFER` — retryable API / network error (rate limit, 5xx, timeout); loop waits with exponential backoff (15s → 120s + 0–25% jitter) and retries
-
-## Troubleshooting
-
-- **`claude` won't start / hangs on permission prompts** — confirm `--dangerously-skip-permissions` is being passed. It is mandatory for unattended runs.
-- **Tool calls don't appear in the stream** — Claude Code requires `--verbose` when combining `-p` with `--output-format stream-json`. The adapter passes this automatically.
-- **Cursor stream events look different from what the parser expects** — run `cursor-agent -p --force --output-format stream-json "hello"` and diff the top-level shapes against the filter in `agent-adapter.sh` → `cursor-agent` branch.
-- **`jq: error` in the pipeline** — install jq (`brew install jq`). The canonical-schema normalization pipeline needs it.
-- **Context rotation never fires** — `ROTATE_THRESHOLD` defaults to 700k for Claude models with the `[1m]` suffix (1M context window; we rotate well before the limit to leave headroom for a clean handoff commit), 150k for standard Claude models and Cursor. Override with `ROTATE_THRESHOLD=50000 ./ralph-loop.sh ...` to force it to fire sooner for debugging.
-- **Agent keeps "completing" but checkboxes aren't updated** — the parser re-scans your task file before honoring the completion sigil. Check that your task file is where the parser expects (`RALPH_TASK.md`, `PROMPT.md`, or `.ralph/effective-prompt.md`) and uses real checkbox syntax (`- [ ]`, `* [x]`, `1. [ ]`).
-
-## What's not in v0.1.0
-
-- **Parallel mode** — Phase 5 of the plan (Worktrunk-based sub-worktrees with squash-merge-back) ships in v0.2.0. The prompt template already supports a parallel variant, so nothing is wasted.
-- **Automatic spec analyzer** — determines whether a spec is parallel-friendly. Ships with parallel mode.
-
-## Changelog
-
-- **0.1.8** — Phase-level iteration for Spec Kit (replaces one-task-per-iteration), dual `BASIC_CHECK_COMMAND` / `FINAL_CHECK_COMMAND` placeholders with `.ralph/basic-check-command` / `.ralph/final-check-command` breadcrumbs, tighter stall detection (natural-end threshold lowered from 10 to 3 on a dedicated counter, DEFER still at 10), hard `.ralph/` commit guardrail in the framing prompt, dropped `activity.log` from the agent read-list, zero-baseline test-discipline section.
-- **0.1.7** — `--version` flag and doc polish.
 
 ## Development
 
