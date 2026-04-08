@@ -101,7 +101,9 @@ agent_build_cmd() {
 
   case "$cli" in
     claude)
-      local cmd="claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model '$esc_model'"
+      # Unset ANTHROPIC_API_KEY so the CLI uses the logged-in subscription
+      # rather than a stray API key injected by env wrappers (e.g. env-run).
+      local cmd="unset ANTHROPIC_API_KEY; claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model '$esc_model'"
       if [[ -n "$session_id" ]]; then
         cmd="$cmd --resume '$esc_session'"
       fi
@@ -189,7 +191,11 @@ foreach inputs as $e (
       else empty end
     )
   elif $e.type == "result" then
-    {kind:"result", duration_ms:($e.duration_ms // 0)}
+    if $e.is_error == true then
+      {kind:"error", message:($e.result // "Session failed with is_error=true")}
+    else
+      {kind:"result", duration_ms:($e.duration_ms // 0)}
+    end
   elif $e.type == "rate_limit_event" then
     ($e.rate_limit_info // {}) as $rl
     | {kind:"rate_limit",
@@ -235,7 +241,11 @@ foreach inputs as $e (
       | {kind:"tool_result", name:"Shell", cmd:$cmd, bytes:($o | length), exit_code:$ec}
     else empty end
   elif $e.type == "result" then
-    {kind:"result", duration_ms:($e.duration_ms // 0)}
+    if $e.is_error == true then
+      {kind:"error", message:($e.result // "Session failed with is_error=true")}
+    else
+      {kind:"result", duration_ms:($e.duration_ms // 0)}
+    end
   elif $e.type == "error" then
     {kind:"error", message:($e.error.data.message // $e.error.message // $e.message // "Unknown error")}
   else empty end
