@@ -402,6 +402,7 @@ Ralph's strength is state-in-git, not LLM memory. Commit early and often:
 2. After any significant code change (even partial): commit
 3. Before any risky refactor: commit current state as a checkpoint
 4. Push after every 2–3 commits
+5. Never include "Co-authored-by" trailers or messages in your commits
 
 If you get rotated, the next agent picks up from your last commit.
 Your commits ARE your memory.

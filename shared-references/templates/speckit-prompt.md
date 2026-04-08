@@ -70,6 +70,7 @@ If 3+ tasks in a row end up blocked: emit `<ralph>GUTTER</ralph>` so the human i
 - `T###` is the real task ID from `{{TASK_FILE}}` (e.g. `T027`). If the task has no ID, use a short slug.
 - `<task title>` is the task's human-readable title, not a placeholder.
 - Never use `<description>` or similar placeholder strings.
+- Never include a "Co-authored-by" line or message in your commits.
 
 ## Working directory
 
