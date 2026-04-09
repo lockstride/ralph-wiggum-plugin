@@ -184,6 +184,21 @@ resolve_prompt_spec() {
   templates_dir=$(_default_templates_dir)
   local template="$templates_dir/speckit-prompt.md"
 
+  # Resolve the gate-runner wrapper. The plugin ships gate-run.sh next to
+  # this script; we substitute an absolute command the agent can invoke
+  # verbatim from its shell tool. Template consumers use it as
+  #   {{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}
+  # which renders to
+  #   bash /path/to/shared-scripts/gate-run.sh final pnpm all-check
+  local gate_run_path="$_PR_SCRIPT_DIR/gate-run.sh"
+  local gate_run_cmd="bash $gate_run_path"
+  local plugin_root
+  plugin_root=$(cd "$_PR_SCRIPT_DIR/.." && pwd)
+
+  # Ensure .ralph/gates exists before the first iteration so gate-run.sh
+  # (and anything else writing there) has a home. Cheap and idempotent.
+  mkdir -p "$workspace/.ralph/gates"
+
   local rendered
   if ! rendered=$(_render_template "$template" \
     SPEC_DIR "$spec_dir" \
@@ -191,6 +206,8 @@ resolve_prompt_spec() {
     CONSTITUTION_PATH "$constitution_path" \
     BASIC_CHECK_COMMAND "$basic_check_command" \
     FINAL_CHECK_COMMAND "$final_check_command" \
+    GATE_RUN "$gate_run_cmd" \
+    RALPH_PLUGIN_ROOT "$plugin_root" \
     TASK_FILE "$task_file" \
     PLAN_FILE "$plan_file" \
     SPEC_FILE "$spec_file"); then
