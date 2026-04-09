@@ -49,14 +49,51 @@ This is the single most load-bearing rule in this prompt. Past iterations wasted
 
 5. **The wrapper's exit code is authoritative.** If the summary ends with `exit=0`, the gate passed. If it ends with `exit=<N>` where N≠0, the gate failed — regardless of how the output "looks." Do not second-guess it.
 
+6. **Post-gate-success protocol** — when a gate exits zero:
+   - Your **next** tool call MUST be `git status` to see what is staged and what is dirty.
+   - Your tool call after that MUST be `git add <explicit paths>` to stage the files you intended to commit (per the Git Protocol below — never `git add .`).
+   - Your tool call after that MUST be `git commit -m "[ralph][speckit] T### …"`.
+   - Do **not** Read the gate log after a passing gate. Do **not** Grep the gate log. Do **not** `tail` / `wc` / `ls` the gate log. Do **not** run any other shell command between the passing gate and the commit. The wrapper has already printed every fact about the run that you need; the persisted log is only there for the failure-diagnosis path. Re-reading it after a green gate consumes tool calls and tokens for zero new information.
+   - The single legitimate exception: if `git status` shows files modified that you did **not** intend to touch (orphans, IDE droppings, prior-iteration leftovers), surface them per the Git Protocol's orphan-handling rule before committing.
+
+## Iteration handoff (read this first, write it last)
+
+Each iteration is a fresh process with no memory of prior iterations — but the *most recent* iteration was the one with the freshest context, and rediscovering what it already learned is the single biggest source of warm-up cost. You have two responsibilities around the handoff file `.ralph/handoff.md`:
+
+**At session start, BEFORE any other reads.** If `.ralph/handoff.md` exists, `Read` it as your very first action. Trust its pointers: read the files it lists in the order it lists them. Use the architectural facts it records as already-known (do not re-derive them from source). Only fall through to the full Read order below if (a) `handoff.md` does not exist, (b) `handoff.md` is older than the most recent commit on the current branch (its facts may be stale), or (c) `handoff.md`'s "next task" disagrees with the next unchecked task in `{{TASK_FILE}}` (a newer human edit overrides it).
+
+**At session end, AFTER your last commit and BEFORE you stop.** Write `.ralph/handoff.md` for the next iteration. The file MUST follow this exact structure and stay under ~30 lines total. Do not narrate; record pointers.
+
+```markdown
+## Last completed
+<task ID> (<commit SHA short>) — <one-line behavior summary>
+
+## Next task: <task ID>
+**Read these files first** (max 6, in priority order):
+- <relative path>:<line range, optional>  ← <one-clause why>
+- <relative path>:<line range, optional>  ← <one-clause why>
+- ...
+
+## Architectural facts from this iteration (skip rediscovery, max 5 bullets)
+- <one fact, declarative, no narrative>
+- <one fact>
+- ...
+```
+
+Bounding rules: **fewer than 30 lines total, files-most-relevant section ≤ 6 entries, architectural-facts section ≤ 5 bullets, no narrative prose, no rationale, no apology, no praise, no scope discussion.** The next iteration is reading this for navigation, not for context. If the file balloons past 30 lines it becomes the same kind of overhead it was supposed to eliminate; trim ruthlessly.
+
+Do not duplicate content already in `.ralph/guardrails.md` (general lessons), `.ralph/progress.md` (narrative session log), or `tasks.md` (task definitions). The handoff file is **navigation-only**: where to look, in what order, and what facts to take as given.
+
 ## Read order (targeted, not full-file)
+
+This is the fallback path used when `.ralph/handoff.md` is absent or invalid:
 
 1. **Constitution** — scan for any rules that affect this phase. Skip sections irrelevant to the current phase.
 2. **Spec** — read only the user story or section this phase implements.
 3. **Plan** — read only the architectural slice (module layout, tech decisions) this phase touches.
 4. **Tasks** — find the next unchecked phase. Read the tasks belonging to *that phase only*. Use `grep -n '^## Phase'` and narrow `Read` ranges; do not slurp the whole file.
 
-Each iteration is a fresh process with no memory of prior iterations. Rely on `git log`, `tasks.md` checkboxes, and the current code state — **not** on a narrative of what you "already read."
+Each iteration is a fresh process with no memory of prior iterations. Rely on `git log`, `tasks.md` checkboxes, the handoff file, and the current code state — **not** on a narrative of what you "already read."
 
 ## One-phase-per-iteration rule (hard)
 
