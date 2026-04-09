@@ -682,6 +682,19 @@ run_iteration() {
         echo "🚨 Gutter detected — agent may be stuck..." >&2
         signal="GUTTER"
         ;;
+      "RECOVER")
+        # 0.1.16: Emitted by stream-parser on a successful `git commit`
+        # (task boundary). Clears any latched GUTTER so a transient
+        # mid-session stuck-pattern does not poison iteration-end
+        # reporting once the agent has recovered and committed. ROTATE,
+        # COMPLETE, and DEFER are terminal and are NOT cleared — they
+        # represent real decisions the loop must honour.
+        if [[ "$signal" == "GUTTER" ]]; then
+          [[ -t 2 ]] && printf "\r\033[K" >&2
+          echo "✅ Task boundary reached — clearing latched GUTTER signal." >&2
+          signal=""
+        fi
+        ;;
       "COMPLETE")
         [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "✅ Agent signaled completion!" >&2

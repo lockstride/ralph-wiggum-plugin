@@ -193,11 +193,30 @@ track_shell_failure() {
     # 0.1.10: lowered from 3 to 2. A second identical failure is already
     # strong evidence of stuckness; the extra retry just burns tokens on
     # shell output and delays GUTTER detection.
+    # 0.1.16: the counter is reset to zero on any successful `git commit`
+    # (task boundary) via reset_failure_counters_on_task_boundary, so this
+    # counts failures within the current task, not the whole session.
     if [[ $count -ge 2 ]]; then
       log_error "⚠️ GUTTER: same command failed ${count}x"
       echo "GUTTER" 2>/dev/null || true
     fi
   fi
+}
+
+# 0.1.16: Clears the failure counter and emits a RECOVER signal on every
+# successful `git commit`. This reflects that a successful commit marks
+# a task boundary — any prior shell failures within the task have been
+# resolved, and any latched GUTTER signal is stale.
+#
+# Without this reset, a session that survived a transient gate failure
+# early on (fixed, gate green, committed) would still surface GUTTER at
+# iteration-end because FAILURES_FILE accumulates across the entire
+# session and the run-loop's `signal` variable never clears once set.
+reset_failure_counters_on_task_boundary() {
+  : >"$FAILURES_FILE"
+  # Tell run_iteration to clear any latched GUTTER/WARN signals. The
+  # consumer treats RECOVER as "the bad thing is over; keep going".
+  echo "RECOVER" 2>/dev/null || true
 }
 
 track_file_write() {
@@ -308,6 +327,10 @@ process_line() {
               else
                 log_activity "COMMIT (via $cmd)"
               fi
+              # Task boundary: clear any accumulated shell-failure history
+              # and release any latched GUTTER/WARN signals. See
+              # reset_failure_counters_on_task_boundary for rationale.
+              reset_failure_counters_on_task_boundary
             else
               log_activity "COMMIT FAILED $cmd → exit $exit_code"
               track_shell_failure "$cmd" "$exit_code"
