@@ -176,6 +176,42 @@ resolve_prompt_spec() {
     final_check_command=$(cat "$workspace/.ralph/final-check-command")
   fi
 
+  # Push policy — controls whether the agent is instructed to `git push`
+  # during the loop. Breadcrumb: .ralph/push-policy containing one of:
+  #   never            — never push; all commits stay local (default)
+  #   per-commit       — push after every successful commit
+  #   per-3-commits    — push after every ~3 commits (legacy behavior)
+  #   phase-close      — push only at phase completion
+  #   completion-only  — push only right before emitting ALL_TASKS_DONE
+  # Unknown values fall back to `never` and a warning is emitted.
+  local push_policy="never"
+  if [[ -f "$workspace/.ralph/push-policy" ]]; then
+    push_policy=$(tr -d '[:space:]' <"$workspace/.ralph/push-policy")
+  fi
+  local push_guidance
+  case "$push_policy" in
+    never)
+      push_guidance="**Push policy: never.** Do **not** run \`git push\` at any point during the loop. Commits stay on the local branch until the operator merges them into the base branch manually. Pushing is pure cost: the pre-push hook typically re-runs lint/build/test-coverage work that the gate wrapper already ran before the commit, and a short-lived locally-merged branch has no remote consumers. If you find yourself reaching for \`git push\`, **stop and skip it.**"
+      ;;
+    per-commit)
+      push_guidance="**Push policy: per-commit.** Run \`git push\` immediately after every successful \`git commit\`. The project's workflow depends on remote visibility of every commit (CI triggers, collaborator review, or remote backup)."
+      ;;
+    per-3-commits)
+      push_guidance="**Push policy: per-3-commits.** Run \`git push\` after every ~3 commits. This is the legacy batching behavior for projects where pre-push hooks are cheap and some batching reduces noise."
+      ;;
+    phase-close)
+      push_guidance="**Push policy: phase-close.** Do **not** push after individual task commits. Run \`git push\` once at phase completion, after the phase-close gate passes."
+      ;;
+    completion-only)
+      push_guidance="**Push policy: completion-only.** Do **not** push during the loop. When you are ready to emit \`<promise>ALL_TASKS_DONE</promise>\`, run \`git push\` once, then emit the sigil."
+      ;;
+    *)
+      echo "⚠️  Unknown push policy '$push_policy' in .ralph/push-policy; falling back to 'never'." >&2
+      push_policy="never"
+      push_guidance="**Push policy: never** (fallback — the value in \`.ralph/push-policy\` was not recognized). Do **not** run \`git push\` during the loop."
+      ;;
+  esac
+
   local task_file="$spec_dir/tasks.md"
   local plan_file="$spec_dir/plan.md"
   local spec_file="$spec_dir/spec.md"
@@ -208,6 +244,7 @@ resolve_prompt_spec() {
     FINAL_CHECK_COMMAND "$final_check_command" \
     GATE_RUN "$gate_run_cmd" \
     RALPH_PLUGIN_ROOT "$plugin_root" \
+    PUSH_GUIDANCE "$push_guidance" \
     TASK_FILE "$task_file" \
     PLAN_FILE "$plan_file" \
     SPEC_FILE "$spec_file"); then

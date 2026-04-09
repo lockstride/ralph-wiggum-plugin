@@ -134,7 +134,7 @@ After every task in the current phase is checked:
    - If the **last task's gate was the final gate** (the final task of the phase was risky and self-gated), the phase is already verified — **skip the redundant run**. Running it again would just burn minutes.
 2. If you ran the phase gate and it failed: the phase is not complete. **Diagnose via `.ralph/gates/final-latest.log` — do not re-run the gate to "see more."** Use the `Read` and `Grep` tools against that file (see Failure diagnosis protocol above). Check commits from this iteration (`git log --oneline -10`, `git show HEAD`, `git show HEAD~1`) and fix the regression in this same iteration before moving on. Re-run the final gate **exactly once** after the fix. Never mark a phase complete with a red final check.
 3. When the gate is green, commit any residual changes with `git commit -m "[ralph][speckit][phase-N] <phase title> complete"`. If there are no residual changes, skip this commit — every task already committed its own work.
-4. Push if you have ≥ 2 unpushed commits: `git push`.
+4. Apply the push policy defined in the Git Protocol section (rule 7 below). Do **not** assume pushing is desired — many projects treat feature branches as local-only. If the policy is `never`, skip this step entirely.
 
 ## Zero-baseline assumption (critical)
 
@@ -153,7 +153,7 @@ After every task in the current phase is checked:
 4. Commit after every completed task (not at the end of the phase). Each commit is a checkpoint the next iteration can resume from.
 5. Never include `Co-authored-by` trailers. The commit message format is exactly `[ralph][speckit] T### <task title>`.
 6. Never use `--amend`, `--force`, `reset --hard`, or any destructive git operation. If something went wrong, make a new commit that fixes it.
-7. Push after every ~3 commits.
+7. {{PUSH_GUIDANCE}} The policy is resolved from the breadcrumb file `.ralph/push-policy` at iteration start; if you disagree with it, do not override it from inside the loop — surface the disagreement in `.ralph/errors.log` and let the operator adjust the breadcrumb between iterations.
 
 ## Naming hygiene (hard rules — read carefully)
 
