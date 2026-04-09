@@ -118,6 +118,32 @@ After every task in the current phase is checked:
 6. Never use `--amend`, `--force`, `reset --hard`, or any destructive git operation. If something went wrong, make a new commit that fixes it.
 7. Push after every ~3 commits.
 
+## Naming hygiene (hard rules — read carefully)
+
+Spec Kit names — the spec slug, the user-story numbers (`US1`, `US2`, …), the task IDs (`T001`, …), and any phase numbering — are **process metadata**. They live in `{{SPEC_FILE}}`, `{{PLAN_FILE}}`, `{{TASK_FILE}}`, the spec directory name, the `[ralph][speckit] T### …` commit prefix, and the `[risky]` tags. **They do not belong in implementation artifacts.** Implementation artifacts (source files, test files, directories, function names, class names, type names, derived-role bundle names, database column names, configuration sections) live forever. The spec gets archived. A reader six months from now should not need to find the spec to understand what a file is.
+
+This is a recurring failure mode for ralph loops on Spec Kit specs. Watch for it on every task.
+
+**Concrete rules:**
+
+1. **Implementation directory and file names follow the existing app conventions and describe behavior, not the spec.** If the rest of the codebase organizes integration tests as `tests/integration/<module>/<behavior>.spec.ts`, your new tests do the same — they go into the existing module directory (`workspace/`, `team/`, `grant/`, `auth/`, …) with a behavior-descriptive filename. Do **not** create a new top-level directory named after the spec slug (e.g. do not create `tests/integration/<spec-slug>/` and dump everything into it).
+
+2. **Test filenames describe what the test asserts, not which user story produced it.** Wrong: `us1-solo-signup.spec.ts`, `us2-org-creation.cy.ts`, `us3-free-on-pro.spec.ts`. Right: `solo-user-personal-workspace.spec.ts`, `organization-create-with-root-team.cy.ts`, `grant-lifecycle.spec.ts`. The reader should understand the file from its name without time-travelling back to `tasks.md`.
+
+3. **`describe()` titles inside test files describe behavior, not user stories.** Wrong: `describe("US1: Solo signup — no org/team UI", …)`. Right: `describe("Solo user: workspace switcher hidden, decisions creatable without team UI", …)`. The same rule applies to `it()` titles.
+
+4. **Source identifiers (functions, classes, types, columns, roles, modules) follow the app's vocabulary, not the spec's.** If the codebase says `Capability` and `CAPABILITIES`, name your method `findForCapabilityCheck`, not `findForAuthz`. If the codebase has a `team` and `grant` module, do not invent a `peer-authz` namespace just because the spec uses that term. The vocabulary already in the source tree is authoritative — read existing files in adjacent modules before naming anything new.
+
+5. **Cerbos / policy / config files follow the same rule.** Do not create `infra/cerbos/policies/<spec-slug>/`. Put the policies directly under the existing convention (`infra/cerbos/policies/<resource>.yaml`). Derived-role bundle names, role names, capability names — all named after the **app domain**, not the spec.
+
+6. **No spec slug substrings in identifiers.** The literal strings `peer-authz`, `peer_authz`, `<spec-slug>`, `<spec-slug>_<anything>`, `<spec-slug>-<anything>`, and any short-form aliases of those, must not appear in any source file, test file, directory name, identifier, comment, or doc string under `apps/`, `packages/`, `infra/`, `scripts/`, or `docs/`. They are allowed only in `specs/`, `.ralph/`, branch names, and commit message prefixes.
+
+7. **Before creating any new directory inside `apps/`, `packages/`, `infra/`, `scripts/`, or `tests/`, run `Glob` against a sibling parent to confirm the existing layout convention.** If a directory already exists for the module you are touching, your file goes there — not into a new spec-named subdirectory.
+
+8. **When in doubt about a name, read the most-related existing file and copy its naming style.** If the existing `team/membership-lifecycle.spec.ts` describes itself as `"Membership lifecycle: invite → role change → removal"`, your new test in the same directory uses the same shape, not `"US2: Customer creates an organization …"`.
+
+If you catch yourself typing a spec slug, user-story number, or task ID into a path or identifier you're about to create — **stop, rename it to a behavior description, then continue**. Renaming is cheap before commit; expensive after.
+
 ## Constitution compliance
 
 Ground every decision in `{{CONSTITUTION_PATH}}`. If a task would violate it, mark the task blocked (see Blocked-phase protocol) and stop — do not work around the constitution.
