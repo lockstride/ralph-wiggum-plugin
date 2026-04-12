@@ -372,78 +372,33 @@ build_prompt() {
   cat <<EOF
 # Ralph Iteration $iteration
 
-You are an autonomous development agent using the Ralph methodology. You have
-a fresh process every iteration — no memory of prior iterations. Your commits
-in \`git log\` and the checkbox state of \`tasks.md\` are the authoritative
-record of what is done. Everything else is advisory.
+You are iteration $iteration of an autonomous loop. No memory of prior iterations.
+Git log and tasks.md checkboxes are the authoritative record of what is done.
 
-## FIRST: Read State Files (targeted)
+## State Files (read before anything else)
 
-Before doing anything:
-1. Read \`.ralph/guardrails.md\` in full — lessons from past failures. FOLLOW THESE.
-2. Read the **last ~100 lines** of \`.ralph/progress.md\` (use \`Read\` with \`offset\`, or \`tail -n 100\`). It is an append-only log, not a plan. Recent entries only.
-3. Read \`.ralph/errors.log\` in full — recent shell/tool failures to avoid repeating.
+1. \`.ralph/handoff.md\` — if it exists and is fresher than the latest commit, read first. Trust its pointers.
+2. \`.ralph/guardrails.md\` — lessons from past failures. Follow these.
+3. \`.ralph/errors.log\` — recent failures to avoid repeating.
 
-Do **not** read \`.ralph/activity.log\`. It is a human-facing monitoring stream and is not useful to you.
+Do **not** read \`.ralph/activity.log\` (human monitoring only).
 
-## Zero-baseline assumption (critical)
+## Signals
 
-The baseline on \`main\` is green — no pre-existing test failures, lint errors, or build breaks. Any failure you observe is a regression introduced during this refactor. **Diagnose and fix it in this iteration.** Do not assume failures are pre-existing; do not use \`--no-verify\`; do not leave TODOs to "fix later."
+- All tasks done + final gate passes → \`<promise>ALL_TASKS_DONE</promise>\`
+- Stuck 3+ times on same issue → \`<ralph>GUTTER</ralph>\`
 
-## Working Directory (Critical)
+## Loop Hygiene
 
-You are already in a git repository. Work HERE, not in a subdirectory:
+- **Never** \`git add .ralph/\` — it is gitignored; \`git add\` on it returns exit 1 and aborts the commit.
+- Commit after each task — commits are your memory across rotations.
+- Never \`--amend\`, \`--force\`, or \`reset --hard\`. Fix mistakes with a new commit.
+- At session end, write \`.ralph/handoff.md\` (< 30 lines, navigation pointers only).
+- If context is running low, finish current edit, commit, and stop cleanly.
 
-- Do NOT run \`git init\` — the repo already exists
-- Do NOT run scaffolding commands that create nested directories
-- If you must scaffold, use flags like \`--no-git\` or target the current directory (\`.\`)
-
-## Git Protocol (Critical)
-
-Ralph's strength is state-in-git, not LLM memory. Commit early and often:
-
-1. After completing each unit of work, commit with a descriptive message.
-2. After any significant code change (even partial): commit.
-3. Push after every 2–3 commits.
-4. **Never include \`.ralph/\` paths in \`git add\` or \`git commit\`.** \`.ralph/\` is in \`.gitignore\`; \`git add\` on an ignored path returns exit 1 and aborts the whole commit. This is the single most common failure mode of past loops. Commit only source files, \`tasks.md\`, and other non-ignored content.
-5. Write progress notes directly to \`.ralph/progress.md\` with the \`Write\`/\`Edit\` tool — never via commits.
-6. Never include "Co-authored-by" trailers in commit messages.
-7. Never use \`--amend\`, \`--force\`, \`reset --hard\`, or other destructive git operations. Fix mistakes with a new commit.
-
-If you get rotated, the next agent picks up from your last commit. Your commits ARE your memory.
-
-## Task Execution (from effective prompt)
+## Task Execution
 
 $user_body
-
-## Completion Protocol
-
-- When ALL criteria show \`[x]\` AND the final check passes: output \`<promise>ALL_TASKS_DONE</promise>\` (or \`<ralph>COMPLETE</ralph>\`)
-- If stuck 3+ times on the same issue: output \`<ralph>GUTTER</ralph>\`
-
-## Learning from Failures
-
-When something fails:
-1. Check \`.ralph/errors.log\` and \`.ralph/guardrails.md\` for a prior occurrence.
-2. Figure out the root cause — do not paper over it.
-3. Add a Sign to \`.ralph/guardrails.md\` (via \`Write\`/\`Edit\`, never via a commit that touches \`.ralph/\`):
-
-\`\`\`
-### Sign: [Descriptive Name]
-- **Trigger**: When this situation occurs
-- **Instruction**: What to do instead
-- **Added after**: Iteration $iteration — what happened
-\`\`\`
-
-## Context Rotation Warning
-
-You may receive a warning that context is running low. When you see it:
-1. Finish your current file edit.
-2. Commit and push (source files only — never \`.ralph/\`).
-3. Append a brief summary to \`.ralph/progress.md\` with the Write tool.
-4. You will be rotated to a fresh agent that continues from your last commit.
-
-Begin by reading the state files.
 EOF
 }
 
@@ -663,8 +618,14 @@ run_iteration() {
   ) &
   agent_pid=$!
 
+  # Heartbeat timeout: if the stream-parser produces no output for
+  # RALPH_HEARTBEAT_TIMEOUT seconds (default 5 min), the agent or API
+  # is likely stalled. Kill the agent and emit DEFER so the loop retries
+  # with exponential backoff.
+  local heartbeat="${RALPH_HEARTBEAT_TIMEOUT:-300}"
+
   local signal=""
-  while IFS= read -r line; do
+  while IFS= read -t "$heartbeat" -r line; do
     case "$line" in
       "ROTATE")
         [[ -t 2 ]] && printf "\r\033[K" >&2
@@ -708,6 +669,17 @@ run_iteration() {
         ;;
     esac
   done <"$fifo"
+
+  # read -t returns >128 on timeout (128 + signal number).
+  # If the FIFO read timed out, the agent is stalled — kill and defer.
+  # shellcheck disable=SC2181
+  if [[ $? -gt 128 ]] && [[ -z "$signal" ]]; then
+    [[ -t 2 ]] && printf "\r\033[K" >&2
+    echo "⏰ Heartbeat timeout — no output in ${heartbeat}s, killing agent..." >&2
+    log_activity "$workspace" "⏰ HEARTBEAT TIMEOUT after ${heartbeat}s — no stream-parser output"
+    kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+    signal="DEFER"
+  fi
 
   wait "$agent_pid" 2>/dev/null || true
   kill "$spinner_pid" 2>/dev/null || true

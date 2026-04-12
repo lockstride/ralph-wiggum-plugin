@@ -103,15 +103,43 @@ _log_activity "🧪 GATE start label=$label cmd=$(printf '%q ' "$@")"
 
 start_epoch=$(date +%s)
 
+# Gate timeout: kill hung commands (e.g. wedged nx daemon) instead of
+# waiting forever. Default 5 minutes; override via RALPH_GATE_TIMEOUT.
+gate_timeout="${RALPH_GATE_TIMEOUT:-300}"
+
+# Resolve the timeout command portably (GNU timeout on Linux,
+# gtimeout via coreutils on macOS, or a shell-based fallback).
+_timeout_cmd=""
+if command -v timeout >/dev/null 2>&1; then
+  _timeout_cmd="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  _timeout_cmd="gtimeout"
+fi
+
 # Execute the command with stderr merged into stdout, tee into the log
 # file (append, since we already wrote the header), and let pipefail
 # surface the real command exit code via PIPESTATUS.
+# The timeout wrapper returns 124 when the command is killed.
+# If neither timeout nor gtimeout is available, run without a timeout
+# (degraded but functional — install coreutils for full support).
 set +e
 set -o pipefail
-"$@" 2>&1 | tee -a "$log_file"
+if [[ -n "$_timeout_cmd" ]]; then
+  "$_timeout_cmd" "$gate_timeout" "$@" 2>&1 | tee -a "$log_file"
+else
+  "$@" 2>&1 | tee -a "$log_file"
+fi
 cmd_status=${PIPESTATUS[0]}
 set +o pipefail
 set -e
+
+# Report timeout clearly so the agent can take corrective action
+# (e.g. restart a stuck daemon) instead of re-running blindly.
+if [[ $cmd_status -eq 124 ]]; then
+  printf '\n⏰ Gate timed out after %ss (RALPH_GATE_TIMEOUT=%s)\n' \
+    "$gate_timeout" "$gate_timeout" | tee -a "$log_file"
+  _log_activity "🧪 GATE TIMEOUT label=$label after ${gate_timeout}s"
+fi
 
 end_epoch=$(date +%s)
 duration=$((end_epoch - start_epoch))

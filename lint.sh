@@ -53,8 +53,22 @@ else
   errors=1
 fi
 
+# Run bats tests if available
+if command -v bats >/dev/null 2>&1; then
+  if compgen -G "$REPO_ROOT/tests/*.bats" >/dev/null 2>&1; then
+    echo "bats: running tests..."
+    if ! bats "$REPO_ROOT"/tests/*.bats; then
+      errors=1
+    fi
+    echo ""
+  fi
+else
+  echo "⚠️  bats not installed — skipping tests (brew install bats-core)"
+  echo ""
+fi
+
 if [[ "$errors" -ne 0 ]]; then
-  echo "Lint issues found. Run ./lint.sh --fix to auto-format."
+  echo "Lint or test issues found. Run ./lint.sh --fix to auto-format."
   exit 1
 else
   echo "All checks passed."

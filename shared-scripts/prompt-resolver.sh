@@ -118,6 +118,113 @@ resolve_prompt_file() {
   _write_effective_prompt "$workspace" "$(cat "$path")"
 }
 
+# Generate a loop-adapted prompt from speckit.implement.md using the
+# adaptation guide. Writes the result + hash to the spec directory
+# and commits both files.
+#
+# Args:
+#   $1 — workspace path
+#   $2 — spec directory (e.g., $workspace/specs/my-spec)
+#   $3 — path to speckit.implement.md
+#   $4 — sha256 hash of speckit.implement.md
+#   $5 — output path for generated prompt
+#   $6 — output path for hash file
+#   $7 — templates directory
+_generate_ralph_prompt() {
+  local workspace="$1"
+  local spec_dir="$2"
+  local speckit_implement="$3"
+  local current_hash="$4"
+  local ralph_prompt="$5"
+  local ralph_hash_file="$6"
+  local templates_dir="$7"
+
+  local guide="$templates_dir/speckit-adaptation-guide.md"
+  if [[ ! -f "$guide" ]]; then
+    echo "  ❌ Adaptation guide not found: $guide" >&2
+    return 1
+  fi
+
+  local skill_content
+  skill_content=$(cat "$speckit_implement")
+
+  local guide_content
+  guide_content=$(cat "$guide")
+
+  # Build the generation prompt: guide + skill → adapted prompt
+  local gen_prompt
+  gen_prompt=$(
+    cat <<GENPROMPT
+You are transforming a speckit.implement.md slash command into a loop-compatible
+prompt for an unattended Ralph development loop.
+
+## Adaptation Guide
+
+$guide_content
+
+## Current speckit.implement.md
+
+$skill_content
+
+## Instructions
+
+Apply the transformation rules from the guide to the current speckit.implement.md.
+Use the example output in the guide as a structural reference — match its format,
+section structure, and level of detail.
+
+Output ONLY the adapted prompt content (markdown). Do not include any preamble,
+explanation, or commentary. Keep the output under 120 lines. Preserve all
+{{PLACEHOLDER}} variables exactly as written — they will be substituted later.
+GENPROMPT
+  )
+
+  # Determine which CLI to use for generation. Prefer claude (fast, local).
+  local gen_cli="claude"
+  if ! command -v "$gen_cli" >/dev/null 2>&1; then
+    echo "  ❌ $gen_cli CLI not found — cannot generate prompt" >&2
+    return 1
+  fi
+
+  echo "  ⚙ Generating loop prompt via $gen_cli (sonnet, low effort)..." >&2
+
+  local generated
+  if ! generated=$(echo "$gen_prompt" | $gen_cli -p \
+    --model sonnet \
+    --effort low \
+    --output-format text \
+    --dangerously-skip-permissions 2>/dev/null); then
+    echo "  ❌ Prompt generation failed (exit $?)" >&2
+    return 1
+  fi
+
+  # Validate output is not empty and is reasonable length
+  local line_count
+  line_count=$(echo "$generated" | wc -l | tr -d ' ')
+  if [[ $line_count -lt 10 ]]; then
+    echo "  ❌ Generated prompt too short ($line_count lines)" >&2
+    return 1
+  fi
+  if [[ $line_count -gt 150 ]]; then
+    echo "  ⚠️  Generated prompt is $line_count lines (target: ≤120)" >&2
+  fi
+
+  # Write the generated prompt and hash
+  printf '%s\n' "$generated" >"$ralph_prompt"
+  printf '%s\n' "$current_hash" >"$ralph_hash_file"
+
+  # Commit the generated files so they're version-controlled and reviewable
+  (
+    cd "$workspace" || return 1
+    local rel_prompt="${ralph_prompt#"$workspace/"}"
+    local rel_hash="${ralph_hash_file#"$workspace/"}"
+    git add "$rel_prompt" "$rel_hash" 2>/dev/null || true
+    git commit -q -m "ralph: generate loop prompt from speckit.implement ${current_hash:0:8}" 2>/dev/null || true
+  )
+
+  echo "  ✓ Generated prompt ($line_count lines) → $ralph_prompt" >&2
+  return 0
+}
+
 # Mode 3: Spec Kit spec dir (most-recent by mtime, or user-supplied)
 #
 # Resolution:
@@ -218,7 +325,6 @@ resolve_prompt_spec() {
 
   local templates_dir
   templates_dir=$(_default_templates_dir)
-  local template="$templates_dir/speckit-prompt.md"
 
   # Resolve the gate-runner wrapper. The plugin ships gate-run.sh next to
   # this script; we substitute an absolute command the agent can invoke
@@ -234,6 +340,58 @@ resolve_prompt_spec() {
   # Ensure .ralph/gates exists before the first iteration so gate-run.sh
   # (and anything else writing there) has a home. Cheap and idempotent.
   mkdir -p "$workspace/.ralph/gates"
+
+  # =========================================================================
+  # Prompt generation from speckit.implement.md (preferred path)
+  #
+  # If the project has .claude/commands/speckit.implement.md, generate the
+  # loop prompt from it using the adaptation guide. The generated prompt is
+  # cached at <spec_dir>/ralph-prompt.md with a hash for cache invalidation.
+  #
+  # Falls back to the built-in speckit-prompt.md template if:
+  #   - speckit.implement.md does not exist
+  #   - generation is explicitly skipped (RALPH_SKIP_GENERATION=1)
+  # =========================================================================
+
+  local speckit_implement="$workspace/.claude/commands/speckit.implement.md"
+  local ralph_prompt="$spec_dir/ralph-prompt.md"
+  local ralph_hash_file="$spec_dir/.ralph-prompt-hash"
+  local use_generated=false
+
+  if [[ -f "$speckit_implement" ]] && [[ "${RALPH_SKIP_GENERATION:-}" != "1" ]]; then
+    local current_hash
+    current_hash=$(shasum -a 256 "$speckit_implement" | cut -d' ' -f1)
+
+    if [[ -f "$ralph_prompt" ]] && [[ -f "$ralph_hash_file" ]]; then
+      local stored_hash
+      stored_hash=$(cat "$ralph_hash_file")
+      if [[ "$current_hash" == "$stored_hash" ]]; then
+        echo "  ✓ Using cached prompt (hash match)" >&2
+        use_generated=true
+      else
+        echo "  ↻ speckit.implement.md changed — regenerating prompt..." >&2
+      fi
+    else
+      echo "  ⚙ No cached prompt — generating from speckit.implement.md..." >&2
+    fi
+
+    if [[ "$use_generated" != "true" ]]; then
+      if _generate_ralph_prompt "$workspace" "$spec_dir" "$speckit_implement" \
+        "$current_hash" "$ralph_prompt" "$ralph_hash_file" "$templates_dir"; then
+        use_generated=true
+      else
+        echo "  ⚠️  Prompt generation failed — falling back to built-in template" >&2
+      fi
+    fi
+  fi
+
+  # Resolve the template to render: either generated or built-in fallback
+  local template
+  if [[ "$use_generated" == "true" ]]; then
+    template="$ralph_prompt"
+  else
+    template="$templates_dir/speckit-prompt.md"
+  fi
 
   local rendered
   if ! rendered=$(_render_template "$template" \

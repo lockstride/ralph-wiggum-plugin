@@ -156,10 +156,31 @@ Your commits are your durable memory. Ralph commits frequently during each itera
 If you use [Spec Kit](https://github.com/github/spec-kit), pick `--spec` and Ralph will:
 
 1. Find the most-recent `specs/*` dir by mtime (or the one you name).
-2. Render `shared-references/templates/speckit-prompt.md` with `{{SPEC_DIR}}`, `{{CONSTITUTION_PATH}}`, `{{TEST_COMMAND}}`, `{{TASK_FILE}}`, `{{PLAN_FILE}}`, and `{{SPEC_FILE}}` substituted.
-3. Enforce the Spec Kit read order (constitution → spec → plan → tasks), one task per iteration, checklist gates, and the `<promise>ALL_TASKS_DONE</promise>` completion sigil (verified against the real checkbox state — no hallucinated promises).
+2. **Generate a loop-adapted prompt** from your project's `speckit.implement.md` (see below), or fall back to the built-in template if that command file doesn't exist.
+3. Substitute `{{SPEC_DIR}}`, `{{CONSTITUTION_PATH}}`, `{{TASK_FILE}}`, `{{PLAN_FILE}}`, `{{SPEC_FILE}}`, and gate commands into the prompt.
+4. Enforce one phase per iteration, checklist gates, and the `<promise>ALL_TASKS_DONE</promise>` completion sigil (verified against the real checkbox state — no hallucinated promises).
 
 The default basic check command is `pnpm basic-check`. Override by creating `.ralph/basic-check-command` in your repo. The default final check command is `pnpm all-check`, overridable via `.ralph/final-check-command`.
+
+### Prompt generation
+
+When your project has `.claude/commands/speckit.implement.md` (installed by Spec Kit), Ralph **generates the loop prompt from it** instead of using a static template. This keeps the loop prompt in sync with your version of Spec Kit as it evolves.
+
+The generation uses a durable adaptation guide (`shared-references/templates/speckit-adaptation-guide.md`) that transforms the interactive skill into an unattended loop prompt — stripping user prompts, one-time setup, and hooks, while adding iteration handoff, gate wrappers, commit-per-task protocol, and completion signals.
+
+The generated prompt is cached at `<spec_dir>/ralph-prompt.md` with a hash at `<spec_dir>/.ralph-prompt-hash`. It only regenerates when `speckit.implement.md` changes (hash mismatch). Both files are committed to git so you can review and edit the prompt before or during the loop.
+
+Set `RALPH_SKIP_GENERATION=1` to force use of the built-in template instead.
+
+## Watchdogs
+
+Ralph includes three watchdogs to prevent the loop from hanging indefinitely:
+
+| Watchdog | Env var | Default | What it does |
+|----------|---------|---------|--------------|
+| **Heartbeat timeout** | `RALPH_HEARTBEAT_TIMEOUT` | 300s | If the stream parser produces no output for this long, kills the agent and retries via DEFER with exponential backoff. Catches API stalls and rate-limit hangs. |
+| **Gate timeout** | `RALPH_GATE_TIMEOUT` | 300s | If a gate command (e.g. `pnpm all-check`) doesn't finish within this time, kills it and returns exit 124. Catches hung nx daemons and build processes. Requires `timeout` (Linux) or `gtimeout` (macOS via `brew install coreutils`). |
+| **Read-without-write stall** | `RALPH_MAX_READS_WITHOUT_WRITE` | 25 | If the agent executes this many consecutive Read/Shell operations without any Write/Edit, emits GUTTER. Catches diagnostic loops where the model reads file after file without making progress. |
 
 ## Signals the loop understands
 
@@ -181,9 +202,22 @@ Install the linting and formatting tools:
 brew install shellcheck shfmt
 ```
 
+### Testing
+
+Behavioral tests use [bats-core](https://github.com/bats-core/bats-core):
+
+```
+brew install bats-core
+bats tests/
+```
+
+Tests cover gate-run.sh (timeout, exit codes, log retention), stream-parser.sh (signal detection, stall patterns), prompt-resolver.sh (caching, hash checks, fallbacks), and build_prompt framing.
+
+`./lint.sh` runs tests automatically if bats is installed.
+
 ### Linting & formatting
 
-Run checks across all shell scripts:
+Run checks (and tests) across all shell scripts:
 
 ```
 ./lint.sh
@@ -206,6 +240,15 @@ git config core.hooksPath .githooks
 Commits that introduce lint or formatting issues will be blocked. Bypass with `git commit --no-verify` if needed.
 
 ## Changelog
+
+### 0.2.0
+
+- **Prompt generation from speckit.implement.md.** When the project has `.claude/commands/speckit.implement.md`, the loop prompt is generated from it using an adaptation guide + hand-tuned exemplar, instead of a static 232-line template. The generated prompt is cached at `<spec_dir>/ralph-prompt.md` and only regenerates when `speckit.implement.md` changes (hash-based invalidation). Falls back to the built-in template for projects without Spec Kit commands.
+- **Trimmed framing prompt.** `build_prompt()` reduced from ~85 lines to ~25 lines. Removed competing instruction sets (naming hygiene, gate invocation contract, Signs/guardrails, zero-baseline duplication, working directory constraints) that overlapped with the generated prompt and caused cognitive overload.
+- **Heartbeat timeout.** If the stream parser produces no output for `RALPH_HEARTBEAT_TIMEOUT` seconds (default 300), the agent is killed and retried via DEFER with exponential backoff. Catches hour-long API stalls.
+- **Gate timeout.** Gate commands are wrapped with `timeout` / `gtimeout` (default `RALPH_GATE_TIMEOUT=300`). Catches hung nx daemons and build processes that previously blocked the loop for 30+ minutes.
+- **Read-without-write stall detection.** New gutter pattern: if the agent executes `RALPH_MAX_READS_WITHOUT_WRITE` (default 25) consecutive Read/Shell operations without any Write/Edit, GUTTER is emitted. Catches degenerate diagnostic loops.
+- **Test infrastructure.** Added behavioral tests using bats-core (30 tests across gate-run, stream-parser, prompt-resolver, and ralph-common). `./lint.sh` runs tests automatically.
 
 ### 0.1.10
 

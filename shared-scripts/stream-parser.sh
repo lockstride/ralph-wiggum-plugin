@@ -48,6 +48,12 @@ FAILURES_FILE=$(mktemp)
 WRITES_FILE=$(mktemp)
 trap 'rm -f "$FAILURES_FILE" "$WRITES_FILE"' EXIT
 
+# Read-without-write stall detection: if the agent executes N consecutive
+# read/shell operations without any write, it is likely stuck in a
+# diagnostic loop (reading file after file without making progress).
+CONSECUTIVE_READS=0
+MAX_READS_WITHOUT_WRITE="${RALPH_MAX_READS_WITHOUT_WRITE:-25}"
+
 get_health_emoji() {
   local tokens=$1
   local pct=$((tokens * 100 / ROTATE_THRESHOLD))
@@ -214,6 +220,7 @@ track_shell_failure() {
 # session and the run-loop's `signal` variable never clears once set.
 reset_failure_counters_on_task_boundary() {
   : >"$FAILURES_FILE"
+  CONSECUTIVE_READS=0
   # Tell run_iteration to clear any latched GUTTER/WARN signals. The
   # consumer treats RECOVER as "the bad thing is over; keep going".
   echo "RECOVER" 2>/dev/null || true
@@ -305,12 +312,16 @@ process_line() {
           BYTES_READ=$((BYTES_READ + bytes))
           local kb=$((bytes / 1024))
           log_activity "READ $path (${lines} lines, ~${kb}KB)"
+          # Read-without-write stall: increment counter
+          CONSECUTIVE_READS=$((CONSECUTIVE_READS + 1))
           ;;
         Write)
           BYTES_WRITTEN=$((BYTES_WRITTEN + bytes))
           local kb=$((bytes / 1024))
           log_activity "WRITE $path (${lines} lines, ${kb}KB)"
           track_file_write "$path"
+          # Write resets the read-without-write counter
+          CONSECUTIVE_READS=0
           ;;
         Shell)
           SHELL_OUTPUT_CHARS=$((SHELL_OUTPUT_CHARS + bytes))
@@ -359,6 +370,21 @@ process_line() {
           ASSISTANT_CHARS=$((ASSISTANT_CHARS + bytes))
           ;;
       esac
+
+      # Read-without-write stall: Shell also counts as a non-write op
+      # (already tracked in Read case above; Shell increments here).
+      if [[ "$name" == "Shell" ]]; then
+        CONSECUTIVE_READS=$((CONSECUTIVE_READS + 1))
+      fi
+
+      # Check read-without-write stall threshold
+      if [[ $CONSECUTIVE_READS -ge $MAX_READS_WITHOUT_WRITE ]]; then
+        log_error "🚨 READ-WITHOUT-WRITE STALL: $CONSECUTIVE_READS consecutive reads/shells without a write"
+        log_activity "🚨 Read-without-write stall: $CONSECUTIVE_READS ops without a write"
+        CONSECUTIVE_READS=0
+        echo "GUTTER" 2>/dev/null || true
+      fi
+
       check_gutter
       ;;
 

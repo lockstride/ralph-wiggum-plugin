@@ -1,0 +1,85 @@
+#!/usr/bin/env bats
+# Behavioral tests for gate-run.sh
+#
+# Tests verify observable behavior (exit codes, log files, activity log
+# entries) — not implementation details.
+
+load test_helper
+
+setup() {
+  create_mock_workspace
+  cd "$MOCK_WORKSPACE" || fail "cannot cd to workspace"
+}
+
+teardown() {
+  rm -rf "$MOCK_WORKSPACE"
+}
+
+@test "passes through exit code 0 for successful command" {
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic true
+  [ "$status" -eq 0 ]
+}
+
+@test "passes through non-zero exit code for failing command" {
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic false
+  [ "$status" -eq 1 ]
+}
+
+@test "creates log file and latest symlink" {
+  bash "$SCRIPTS_DIR/gate-run.sh" basic echo "hello gate" || true
+
+  # latest log should exist
+  [ -e "$MOCK_WORKSPACE/.ralph/gates/basic-latest.log" ]
+
+  # latest log should contain the command output
+  grep -q "hello gate" "$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
+}
+
+@test "writes header with label and command in log file" {
+  bash "$SCRIPTS_DIR/gate-run.sh" basic echo "test output" || true
+
+  local log="$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
+  grep -q "gate-run label=basic" "$log"
+  grep -q "cmd:.*echo" "$log"
+}
+
+@test "rejects invalid label with exit 64" {
+  run bash "$SCRIPTS_DIR/gate-run.sh" bogus true
+  [ "$status" -eq 64 ]
+}
+
+@test "times out on hung command and returns exit 124" {
+  RALPH_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" basic sleep 30
+  [ "$status" -eq 124 ]
+}
+
+@test "writes timeout message to log on timeout" {
+  RALPH_GATE_TIMEOUT=2 bash "$SCRIPTS_DIR/gate-run.sh" basic sleep 30 || true
+
+  local log="$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
+  grep -q "timed out" "$log"
+}
+
+@test "logs gate start and end to activity log" {
+  touch "$MOCK_WORKSPACE/.ralph/activity.log"
+  bash "$SCRIPTS_DIR/gate-run.sh" basic echo "test" || true
+
+  grep -q "GATE start" "$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -q "GATE end" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "retains only RALPH_GATE_KEEP logs" {
+  export RALPH_GATE_KEEP=2
+
+  # Run 4 gates
+  for i in 1 2 3 4; do
+    bash "$SCRIPTS_DIR/gate-run.sh" basic echo "run $i" || true
+    sleep 1  # ensure distinct timestamps
+  done
+
+  # Count timestamped log files (exclude -latest.log)
+  local count
+  count=$(find "$MOCK_WORKSPACE/.ralph/gates" -name "basic-*.log" \
+    ! -name "basic-latest.log" -type f | wc -l | tr -d ' ')
+  [ "$count" -eq 2 ]
+}
