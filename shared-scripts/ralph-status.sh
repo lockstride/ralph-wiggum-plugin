@@ -30,6 +30,9 @@ handoff="$ralph_dir/handoff.md"
 if [[ ! -d "$ralph_dir" ]]; then
   echo "ralph-status: no .ralph/ directory at $workspace"
   echo "(this worktree has not been initialized for ralph)"
+  echo ""
+  echo "Tip: pass a fragment to target a different worktree, e.g."
+  echo "  ralph-status 172552    # resolves to worktree path containing '172552'"
   exit 0
 fi
 
@@ -114,7 +117,11 @@ if [[ -d "$gates_dir" ]]; then
   printf '\n● persisted gate logs:\n'
   # Collect non-latest log files, sorted by mtime ascending, and show the
   # last five. Avoid `ls | grep` (SC2010) by using `find` + `sort`.
-  mapfile -t _gate_logs < <(
+  # macOS ships bash 3.2 which lacks `mapfile`; use a portable read loop.
+  _gate_logs=()
+  while IFS= read -r _line; do
+    _gate_logs+=("$_line")
+  done < <(
     find "$gates_dir" -maxdepth 1 -type f -name '*.log' \
       ! -name '*-latest.log' -print0 2>/dev/null |
       xargs -0 -n1 stat -f '%m %N' 2>/dev/null |
