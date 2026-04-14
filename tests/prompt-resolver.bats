@@ -99,6 +99,29 @@ PROMPT
   grep -q "tasks.md" "$MOCK_WORKSPACE/.ralph/task-file-path"
 }
 
+@test "discovers speckit at .claude/skills/speckit-implement/SKILL.md" {
+  create_mock_speckit_implement_skill
+
+  # Pre-populate cache matching the skill file so we hit cache-hit path
+  local hash
+  hash=$(shasum -a 256 "$MOCK_WORKSPACE/.claude/skills/speckit-implement/SKILL.md" | cut -d' ' -f1)
+  cat > "$MOCK_SPEC_DIR/ralph-prompt.md" <<'PROMPT'
+# Cached Skill Prompt
+{{TASK_FILE}}
+PROMPT
+  echo "$hash" > "$MOCK_SPEC_DIR/.ralph-prompt-hash"
+  (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "add cache")
+
+  local out
+  out=$(resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" 2>&1)
+
+  # Cache hit message should appear — confirms skill file was discovered
+  echo "$out" | grep -q "hash match"
+
+  # Effective prompt should contain the cached content
+  grep -q "Cached Skill Prompt" "$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+}
+
 @test "logs prompt resolution to activity.log when log_activity available" {
   create_mock_speckit_implement
 

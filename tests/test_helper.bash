@@ -94,3 +94,27 @@ SKILL
     git commit -q -m "add speckit.implement"
   )
 }
+
+# Create a mock speckit-implement skill (alternate location)
+create_mock_speckit_implement_skill() {
+  mkdir -p "$MOCK_WORKSPACE/.claude/skills/speckit-implement"
+  cat > "$MOCK_WORKSPACE/.claude/skills/speckit-implement/SKILL.md" <<'SKILL'
+---
+name: "speckit-implement"
+description: Execute implementation tasks
+---
+
+## Outline
+
+1. Read tasks.md
+2. Execute tasks phase by phase
+3. Mark completed tasks as [X]
+4. Validate completion
+SKILL
+
+  (
+    cd "$MOCK_WORKSPACE" || exit 1
+    git add .claude/
+    git commit -q -m "add speckit-implement skill"
+  )
+}

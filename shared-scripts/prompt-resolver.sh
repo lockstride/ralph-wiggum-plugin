@@ -366,12 +366,25 @@ resolve_prompt_spec() {
   #   - generation is explicitly skipped (RALPH_SKIP_GENERATION=1)
   # =========================================================================
 
-  local speckit_implement="$workspace/.claude/commands/speckit.implement.md"
+  # speckit.implement may live as a slash command or as a skill. Check both.
+  local speckit_implement=""
+  local speckit_candidates=(
+    "$workspace/.claude/commands/speckit.implement.md"
+    "$workspace/.claude/skills/speckit-implement/SKILL.md"
+    "$workspace/.claude/skills/speckit.implement/SKILL.md"
+  )
+  for candidate in "${speckit_candidates[@]}"; do
+    if [[ -f "$candidate" ]]; then
+      speckit_implement="$candidate"
+      break
+    fi
+  done
+
   local ralph_prompt="$spec_dir/ralph-prompt.md"
   local ralph_hash_file="$spec_dir/.ralph-prompt-hash"
   local use_generated=false
 
-  if [[ -f "$speckit_implement" ]] && [[ "${RALPH_SKIP_GENERATION:-}" != "1" ]]; then
+  if [[ -n "$speckit_implement" ]] && [[ "${RALPH_SKIP_GENERATION:-}" != "1" ]]; then
     local current_hash
     current_hash=$(shasum -a 256 "$speckit_implement" | cut -d' ' -f1)
 
