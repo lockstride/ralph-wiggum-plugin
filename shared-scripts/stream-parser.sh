@@ -11,11 +11,16 @@
 #     | ./stream-parser.sh /path/to/workspace [iteration]
 #
 # Emits on stdout (one per line):
-#   ROTATE   — token threshold reached, stop and rotate context
-#   WARN     — approaching limit, agent should wrap up
-#   GUTTER   — stuck pattern detected (2× same failure, 5× file thrash)
-#   COMPLETE — agent emitted <ralph>COMPLETE</ralph>
-#   DEFER    — retryable API/network error, back off and retry
+#   ROTATE          — token threshold reached, stop and rotate context
+#   WARN            — approaching limit, agent should wrap up
+#   RECOVER_ATTEMPT — recoverable stuck pattern hit (2× same shell fail or
+#                     5× file thrash) for the FIRST time this iteration.
+#                     Loop kills agent, prepends .ralph/recovery-hint.md
+#                     to the next iteration prompt, retries (0.3.0).
+#   GUTTER          — stuck pattern detected after recovery already used,
+#                     OR agent self-signal, OR non-retryable API error.
+#   COMPLETE        — agent emitted <ralph>COMPLETE</ralph>
+#   DEFER           — retryable API/network error, back off and retry
 #
 # Writes to .ralph/:
 #   activity.log — all operations with context health emoji
@@ -47,6 +52,13 @@ RATE_LIMITED=0
 FAILURES_FILE=$(mktemp)
 WRITES_FILE=$(mktemp)
 trap 'rm -f "$FAILURES_FILE" "$WRITES_FILE"' EXIT
+
+# 0.3.0: Active-recovery state. The first recoverable stuck pattern in an
+# iteration emits RECOVER_ATTEMPT (not GUTTER); subsequent stuck patterns
+# in the same iteration emit GUTTER as before. The loop's per-invocation
+# budget caps total recovery attempts across iterations.
+RECOVERY_ATTEMPTED=0
+RECOVERY_HINT_FILE="$RALPH_DIR/recovery-hint.md"
 
 # Read-without-write stall detection: if the agent executes N consecutive
 # read/shell operations without any write, it is a smell worth logging —
@@ -189,6 +201,46 @@ check_gutter() {
   fi
 }
 
+# 0.3.0: Recovery-hint helpers. Each writes a trigger-specific block to
+# .ralph/recovery-hint.md, which build_prompt() prepends to the next
+# iteration's framing prompt and deletes (consume-once).
+_write_recovery_hint_shell() {
+  local cmd="$1"
+  local exit_code="$2"
+  cat >"$RECOVERY_HINT_FILE" <<EOF
+## Recovery Hint from Prior Iteration
+
+Your prior iteration ran the following command twice with the same exit code (\`${exit_code}\`) before being killed by the recovery system:
+
+\`\`\`
+${cmd}
+\`\`\`
+
+- **Do not retry that exact command** — it will fail the same way.
+- Read the persisted output of the failing run before trying anything else.
+- Diagnose the root cause: missing dependency, wrong directory, gate misconfiguration, or an environment assumption that does not hold.
+- If the command is a gate, the failing log is at \`.ralph/gates/<label>-latest.log\`.
+
+This hint will not appear again — you have one shot to recover before the loop escalates to GUTTER.
+EOF
+}
+
+_write_recovery_hint_thrash() {
+  local path="$1"
+  local count="$2"
+  cat >"$RECOVERY_HINT_FILE" <<EOF
+## Recovery Hint from Prior Iteration
+
+Your prior iteration rewrote \`${path}\` ${count} times within 10 minutes before being killed by the recovery system.
+
+- **Stop editing that file in this iteration** until you understand why prior edits did not settle.
+- Run \`git diff HEAD -- ${path}\` and read your own changes carefully.
+- Consider that the failing test or symptom may originate elsewhere — repeatedly rewriting the same file is a strong sign you are debugging the wrong layer.
+
+This hint will not appear again — you have one shot to recover before the loop escalates to GUTTER.
+EOF
+}
+
 track_shell_failure() {
   local cmd="$1"
   local exit_code="$2"
@@ -206,9 +258,21 @@ track_shell_failure() {
     # 0.1.16: the counter is reset to zero on any successful `git commit`
     # (task boundary) via reset_failure_counters_on_task_boundary, so this
     # counts failures within the current task, not the whole session.
+    # 0.3.0: First trip in an iteration emits RECOVER_ATTEMPT (the loop
+    # kills the agent and re-spawns it with a recovery hint prepended).
+    # Second trip in the same iteration falls through to GUTTER — the
+    # agent already had its one chance.
     if [[ $count -ge 2 ]]; then
-      log_error "⚠️ GUTTER: same command failed ${count}x"
-      echo "GUTTER" 2>/dev/null || true
+      if [[ $RECOVERY_ATTEMPTED -eq 0 ]]; then
+        _write_recovery_hint_shell "$cmd" "$exit_code"
+        log_error "🔁 RECOVERABLE STUCK PATTERN: same command failed ${count}x — emitting RECOVER_ATTEMPT"
+        log_activity "🔁 Recoverable stuck pattern (shell-fail ${count}x): $cmd"
+        RECOVERY_ATTEMPTED=1
+        echo "RECOVER_ATTEMPT" 2>/dev/null || true
+      else
+        log_error "⚠️ GUTTER: same command failed ${count}x (recovery already used this iteration)"
+        echo "GUTTER" 2>/dev/null || true
+      fi
     fi
   fi
 }
@@ -242,8 +306,19 @@ track_file_write() {
     END { print count+0 }
   ' "$WRITES_FILE")
   if [[ $count -ge 5 ]]; then
-    log_error "⚠️ THRASHING: $path written ${count}x in 10 min"
-    echo "GUTTER" 2>/dev/null || true
+    log_error "THRASHING: $path written ${count}x in 10 min"
+    # 0.3.0: First trip in an iteration emits RECOVER_ATTEMPT; second
+    # trip falls through to GUTTER. See track_shell_failure for rationale.
+    if [[ $RECOVERY_ATTEMPTED -eq 0 ]]; then
+      _write_recovery_hint_thrash "$path" "$count"
+      log_error "🔁 RECOVERABLE STUCK PATTERN: file thrash on $path — emitting RECOVER_ATTEMPT"
+      log_activity "🔁 Recoverable stuck pattern (thrash ${count}x): $path"
+      RECOVERY_ATTEMPTED=1
+      echo "RECOVER_ATTEMPT" 2>/dev/null || true
+    else
+      log_error "⚠️ GUTTER: file thrash on $path (recovery already used this iteration)"
+      echo "GUTTER" 2>/dev/null || true
+    fi
   fi
 }
 

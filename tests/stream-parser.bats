@@ -66,7 +66,7 @@ tool_result_json() {
   echo "$output" | grep -q "WARN"
 }
 
-@test "emits GUTTER on same shell command failing twice" {
+@test "first identical-shell-fail-2x emits RECOVER_ATTEMPT (not GUTTER) and writes hint (0.3.0)" {
   local events=""
   events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm basic-check")
   events+=$'\n'
@@ -75,10 +75,42 @@ tool_result_json() {
 
   local output
   output=$(run_parser "$events")
-  echo "$output" | grep -q "GUTTER"
+  # First trip: RECOVER_ATTEMPT, NOT GUTTER
+  echo "$output" | grep -q "RECOVER_ATTEMPT"
+  if echo "$output" | grep -q "^GUTTER$"; then
+    fail "First stuck-shell trip should emit RECOVER_ATTEMPT, not GUTTER (0.3.0)"
+  fi
+  # Hint file written with command + exit code
+  [ -f "$MOCK_WORKSPACE/.ralph/recovery-hint.md" ]
+  grep -q "Recovery Hint from Prior Iteration" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
+  grep -q "pnpm basic-check" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
+  grep -q "exit code (\`1\`)" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
+  # Errors/activity log mention recoverable pattern
+  grep -q "RECOVERABLE STUCK PATTERN" "$MOCK_WORKSPACE/.ralph/errors.log"
 }
 
-@test "emits GUTTER on file thrash (5 writes to same file in 10 min)" {
+@test "second stuck pattern in same iteration falls through to GUTTER (0.3.0)" {
+  # First failure 2x → RECOVER_ATTEMPT (consumes the recovery slot)
+  # Second failure 2x (different command, same iteration) → GUTTER
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm a")
+  events+=$'\n'
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm a")
+  events+=$'\n'
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm b")
+  events+=$'\n'
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm b")
+  events+=$'\n'
+
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "RECOVER_ATTEMPT"
+  echo "$output" | grep -q "^GUTTER$"
+  # Errors log records the budget-exhausted GUTTER reason
+  grep -q "recovery already used this iteration" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "first file thrash emits RECOVER_ATTEMPT (not GUTTER) and writes hint (0.3.0)" {
   local events=""
   for i in $(seq 1 5); do
     events+=$(tool_result_json "Write" 50 5 0 "/tmp/same-file.ts")
@@ -87,7 +119,33 @@ tool_result_json() {
 
   local output
   output=$(run_parser "$events")
-  echo "$output" | grep -q "GUTTER"
+  echo "$output" | grep -q "RECOVER_ATTEMPT"
+  if echo "$output" | grep -q "^GUTTER$"; then
+    fail "First file-thrash trip should emit RECOVER_ATTEMPT, not GUTTER (0.3.0)"
+  fi
+  # Hint file written with thrashed path
+  [ -f "$MOCK_WORKSPACE/.ralph/recovery-hint.md" ]
+  grep -q "Recovery Hint from Prior Iteration" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
+  grep -q "/tmp/same-file.ts" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
+  grep -q "5 times within 10 minutes" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
+}
+
+@test "thrash followed by repeat shell-fail in same iteration: RECOVER_ATTEMPT then GUTTER (0.3.0)" {
+  # Thrash consumes the recovery slot; subsequent stuck shell-fail goes to GUTTER.
+  local events=""
+  for i in $(seq 1 5); do
+    events+=$(tool_result_json "Write" 50 5 0 "/tmp/thrashed.ts")
+    events+=$'\n'
+  done
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm test")
+  events+=$'\n'
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm test")
+  events+=$'\n'
+
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "RECOVER_ATTEMPT"
+  echo "$output" | grep -q "^GUTTER$"
 }
 
 @test "logs read-without-write stall but does not emit GUTTER (0.2.4)" {

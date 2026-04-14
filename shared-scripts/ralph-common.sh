@@ -369,9 +369,23 @@ build_prompt() {
     user_body=$(cat "$user_prompt_file")
   fi
 
+  # 0.3.0: Active-recovery hint. If the prior iteration tripped a
+  # recoverable stuck pattern (same shell-fail 2x, file thrash 5x), the
+  # stream-parser wrote a hint to .ralph/recovery-hint.md and the loop
+  # killed/restarted the agent. Prepend the hint here and delete the file
+  # — recovery hints are consume-once. Subsequent iterations without a
+  # hint produce a normal prompt.
+  local hint_file="$workspace/.ralph/recovery-hint.md"
+  local hint_block=""
+  if [[ -f "$hint_file" ]]; then
+    hint_block=$(cat "$hint_file")
+    rm -f "$hint_file"
+    hint_block=$'\n'"$hint_block"$'\n'
+  fi
+
   cat <<EOF
 # Ralph Iteration $iteration
-
+$hint_block
 You are iteration $iteration of an autonomous loop. No memory of prior iterations.
 Git log and tasks.md checkboxes are the authoritative record of what is done.
 
@@ -643,6 +657,18 @@ run_iteration() {
         echo "🚨 Gutter detected — agent may be stuck..." >&2
         signal="GUTTER"
         ;;
+      "RECOVER_ATTEMPT")
+        # 0.3.0: Recoverable stuck pattern hit (first time this iteration).
+        # The stream-parser has written a recovery hint to
+        # .ralph/recovery-hint.md. Kill the agent so the loop can re-spawn
+        # it with the hint prepended to the framing prompt. The loop's
+        # per-invocation budget decides whether to honour or escalate.
+        [[ -t 2 ]] && printf "\r\033[K" >&2
+        echo "🔁 Recovery attempt — killing agent and re-running with hint..." >&2
+        kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+        signal="RECOVER_ATTEMPT"
+        break
+        ;;
       "RECOVER")
         # 0.1.16: Emitted by stream-parser on a successful `git commit`
         # (task boundary). Clears any latched GUTTER so a transient
@@ -726,6 +752,11 @@ run_ralph_loop() {
   local stall_count=0         # DEFER/rate-limit consecutive count (threshold 10)
   local zero_progress_count=0 # natural-end with zero task delta (threshold 3)
   local DEFER_COUNT=0
+  # 0.3.0: Active-recovery budget. Each RECOVER_ATTEMPT signal from the
+  # stream-parser (recoverable stuck pattern detected) consumes one slot.
+  # When exhausted, subsequent RECOVER_ATTEMPT signals escalate to GUTTER.
+  local RECOVERY_ATTEMPTS=0
+  local MAX_RECOVERY_ATTEMPTS="${RALPH_MAX_RECOVERY_ATTEMPTS:-2}"
 
   while [[ $iteration -le $MAX_ITERATIONS ]]; do
     local pre_counts
@@ -820,6 +851,30 @@ run_ralph_loop() {
         echo "🚨 Gutter detected. Check .ralph/errors.log for details."
         _write_postmortem "$workspace" "gutter"
         return 1
+        ;;
+      "RECOVER_ATTEMPT")
+        # 0.3.0: Stream-parser hit a recoverable stuck pattern and wrote
+        # a hint to .ralph/recovery-hint.md. Restart the iteration with
+        # the hint prepended (build_prompt consumes the file). If the
+        # per-loop budget is exhausted, escalate to GUTTER instead.
+        if [[ $RECOVERY_ATTEMPTS -lt $MAX_RECOVERY_ATTEMPTS ]]; then
+          RECOVERY_ATTEMPTS=$((RECOVERY_ATTEMPTS + 1))
+          log_activity "$workspace" "ITERATION $iteration END — 🔁 RECOVERY ATTEMPT $RECOVERY_ATTEMPTS/$MAX_RECOVERY_ATTEMPTS$task_suffix"
+          log_progress "$workspace" "**Session $iteration ended** — 🔁 RECOVERY ATTEMPT $RECOVERY_ATTEMPTS/$MAX_RECOVERY_ATTEMPTS"
+          echo "🔁 Recovery attempt $RECOVERY_ATTEMPTS of $MAX_RECOVERY_ATTEMPTS — restarting iteration with hint..."
+          # Do NOT bump stall_count/zero_progress_count — recovery is its
+          # own budget, separate from natural-end and DEFER counters.
+          iteration=$((iteration + 1))
+          session_id=""
+        else
+          log_activity "$workspace" "ITERATION $iteration END — 🚨 GUTTER (recovery budget exhausted: $MAX_RECOVERY_ATTEMPTS attempts)$task_suffix"
+          log_progress "$workspace" "**Session $iteration ended** — 🚨 GUTTER (recovery budget exhausted)"
+          echo "🚨 Recovery budget exhausted ($MAX_RECOVERY_ATTEMPTS attempts) — escalating to GUTTER."
+          # Discard any leftover hint so the next ralph invocation starts clean.
+          rm -f "$workspace/.ralph/recovery-hint.md" 2>/dev/null || true
+          _write_postmortem "$workspace" "gutter"
+          return 1
+        fi
         ;;
       "DEFER")
         # DEFER = API/network transient error (rate limit, 429, etc.).

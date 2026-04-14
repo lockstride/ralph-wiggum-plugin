@@ -209,6 +209,7 @@ Operators inspecting loop progress use these files — keep them clean and infor
 - `.ralph/errors.log` — longer explanations for blocked tasks or structural problems the operator needs to resolve.
 - `.ralph/progress.md` — narrative session/iteration summary.
 - `.ralph/guardrails.md` — lessons learned from prior failures. Add a new Sign here whenever you encounter a repeat-failure pattern.
+- `.ralph/recovery-hint.md` — transient breadcrumb written by the loop when the prior iteration tripped a recoverable stuck pattern (same shell command failed twice, or the same file was rewritten 5× in 10 min). If a `## Recovery Hint from Prior Iteration` section appears at the very top of this prompt, it came from this file and **is authoritative steering** — the prior run was killed mid-flight; do not repeat what it just tried. The hint is consumed once and deleted; you will not see it again.
 
 If you would normally tell the operator "I'll paste the failing output below," instead tell them "see `.ralph/gates/<label>-latest.log`" — they already have it.
 
