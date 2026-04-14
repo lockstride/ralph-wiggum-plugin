@@ -49,10 +49,14 @@ WRITES_FILE=$(mktemp)
 trap 'rm -f "$FAILURES_FILE" "$WRITES_FILE"' EXIT
 
 # Read-without-write stall detection: if the agent executes N consecutive
-# read/shell operations without any write, it is likely stuck in a
-# diagnostic loop (reading file after file without making progress).
+# read/shell operations without any write, it is a smell worth logging —
+# but it is NOT evidence of stuckness on its own. 1M-context models
+# legitimately read 25-40 files up-front on foundational phases with no
+# handoff.md. The stall is surfaced to errors.log + activity.log for
+# operator visibility, but does NOT emit a GUTTER signal (0.2.4). Real
+# stuckness is caught by the shell-failure and thrashing heuristics.
 CONSECUTIVE_READS=0
-MAX_READS_WITHOUT_WRITE="${RALPH_MAX_READS_WITHOUT_WRITE:-25}"
+MAX_READS_WITHOUT_WRITE="${RALPH_MAX_READS_WITHOUT_WRITE:-40}"
 
 get_health_emoji() {
   local tokens=$1
@@ -377,12 +381,16 @@ process_line() {
         CONSECUTIVE_READS=$((CONSECUTIVE_READS + 1))
       fi
 
-      # Check read-without-write stall threshold
+      # Check read-without-write stall threshold.
+      # 0.2.4: Downgraded from GUTTER to a logged-only observation. A
+      # stall is a smell (worth surfacing to the operator for diagnosis)
+      # but not evidence of stuckness on its own. Real stuckness comes
+      # from repeated identical shell failures or file thrashing, which
+      # are handled elsewhere.
       if [[ $CONSECUTIVE_READS -ge $MAX_READS_WITHOUT_WRITE ]]; then
-        log_error "🚨 READ-WITHOUT-WRITE STALL: $CONSECUTIVE_READS consecutive reads/shells without a write"
-        log_activity "🚨 Read-without-write stall: $CONSECUTIVE_READS ops without a write"
+        log_error "⚠️ READ-WITHOUT-WRITE STALL: $CONSECUTIVE_READS consecutive reads/shells without a write (informational only)"
+        log_activity "⚠️ Read-without-write stall: $CONSECUTIVE_READS ops without a write"
         CONSECUTIVE_READS=0
-        echo "GUTTER" 2>/dev/null || true
       fi
 
       check_gutter

@@ -90,7 +90,7 @@ tool_result_json() {
   echo "$output" | grep -q "GUTTER"
 }
 
-@test "emits GUTTER on read-without-write stall" {
+@test "logs read-without-write stall but does not emit GUTTER (0.2.4)" {
   export RALPH_MAX_READS_WITHOUT_WRITE=5  # low threshold for testing
 
   local events=""
@@ -101,7 +101,13 @@ tool_result_json() {
 
   local output
   output=$(run_parser "$events")
-  echo "$output" | grep -q "GUTTER"
+  # Stall is logged for visibility...
+  grep -q "READ-WITHOUT-WRITE STALL" "$MOCK_WORKSPACE/.ralph/errors.log"
+  grep -q "Read-without-write stall" "$MOCK_WORKSPACE/.ralph/activity.log"
+  # ...but does NOT emit GUTTER. It is a smell, not evidence of stuckness.
+  if echo "$output" | grep -q "GUTTER"; then
+    fail "Stall should not emit GUTTER as of 0.2.4; it logs only"
+  fi
 }
 
 @test "resets read-without-write counter on Write" {
@@ -120,15 +126,11 @@ tool_result_json() {
     events+=$'\n'
   done
 
-  local output
-  output=$(run_parser "$events")
-  # Should NOT contain GUTTER from read-without-write
-  # (may contain WARN/ROTATE from token accounting — that's fine)
-  if echo "$output" | grep -q "GUTTER"; then
-    # Check activity log to confirm it's from read-without-write (not another source)
-    if grep -q "Read-without-write" "$MOCK_WORKSPACE/.ralph/activity.log"; then
-      fail "GUTTER emitted for read-without-write despite Write in between"
-    fi
+  run_parser "$events" >/dev/null
+  # The stall log line should not appear — the Write reset the counter
+  # before either 5-read streak hit the threshold.
+  if grep -q "READ-WITHOUT-WRITE STALL" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+    fail "Stall logged despite Write in between reads"
   fi
 }
 
@@ -173,7 +175,7 @@ tool_result_json() {
   events+=$(tool_result_json "Read" 10 5 0 "/tmp/file3.ts")
   events+=$'\n'
 
-  local output
-  output=$(run_parser "$events")
-  echo "$output" | grep -q "GUTTER"
+  run_parser "$events" >/dev/null
+  # 5 non-write ops should hit the stall threshold and log it (0.2.4: logged, not GUTTER)
+  grep -q "READ-WITHOUT-WRITE STALL" "$MOCK_WORKSPACE/.ralph/errors.log"
 }

@@ -33,9 +33,10 @@ This is the single most load-bearing rule in this prompt. Past iterations wasted
    If you catch yourself writing any of these on a gate command, **stop and rewrite it as the bare `{{GATE_RUN}} <label> <cmd>` form.** The in-context summary will be sufficient; the full log is on disk for targeted `grep` via the `Read` tool (see "Failure diagnosis protocol" below).
 
 3. **Gate re-run budget.**
-   - **Per task: at most one gate run** (the one before commit). If it passes, commit and advance.
+   - **Per task: at most one gate run** (the one before commit). If it passes, commit and advance — **do not re-run the gate to "verify it's still green."** A green gate is authoritative; re-running it burns 1–5 minutes per run for zero information.
    - **Per phase close: at most one final-gate run.** The phase-completion protocol below tells you when to run it.
    - If a gate fails, you are allowed **one** additional run **after** making a code change. Re-running the same gate twice in a row without any edits in between is forbidden — it will produce the same failure and waste ~1–5 minutes per run. Read the persisted log instead (see below).
+   - **Never run a gate "to be safe" before starting a task.** `main` is green (see Zero-baseline assumption); the prior iteration's final commit was also green. A pre-emptive gate run before you've made any edits is pure waste.
 
 4. **Failure diagnosis protocol** — when a gate exits non-zero:
    1. **Do not re-run the gate.** The summary you already saw, plus the full log at `.ralph/gates/<label>-latest.log`, contains everything you need.
@@ -148,7 +149,7 @@ After every task in the current phase is checked:
 ## Git Protocol (hard rules)
 
 1. **Stage files by exact path only.** Every `git add` call MUST list explicit file paths, e.g. `git add packages/utils/src/capabilities.ts apps/api/tests/unit/utils/capabilities.spec.ts`. **Never** use `git add .`, `git add -A`, `git add <directory>`, or any glob. Before every commit, run `git status` and verify the staged list matches exactly the files you edited or created for this task. If you see files you did not touch — especially untracked files in directories you weren't working in — **they are orphans from a prior iteration or a user stash, not yours**. Do not stage them. Do not commit them. If you're not sure whether a file is yours, `git diff --cached <file>` and check: if you don't recognize the content, `git reset HEAD <file>` to unstage and leave it untracked.
-2. **Never `git add .ralph/…`**. `.ralph/` is gitignored and `git add` on ignored paths fails with exit 1, aborting the whole commit. Commit only source files, `tasks.md`, and other non-ignored content.
+2. **Never `git add` any path matched by `.gitignore`.** This includes `.ralph/`, generated source directories (e.g. `packages/*/generated/`, `dist/`, `build/`, Prisma client output), dependency caches, and anything else the project deliberately excludes. `git add` on an ignored path fails with exit 1 and aborts the whole commit. If you are unsure whether a path is ignored, run `git check-ignore <path>` first. Commit only source files, `tasks.md`, and other non-ignored content.
 3. Write progress notes **directly** to `.ralph/progress.md` with the `Write`/`Edit` tool. Never via commits.
 4. Commit after every completed task (not at the end of the phase). Each commit is a checkpoint the next iteration can resume from.
 5. Never include `Co-authored-by` trailers. The commit message format is exactly `[ralph][speckit] T### <task title>`.
