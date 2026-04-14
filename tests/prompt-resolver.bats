@@ -99,6 +99,41 @@ PROMPT
   grep -q "tasks.md" "$MOCK_WORKSPACE/.ralph/task-file-path"
 }
 
+@test "logs prompt resolution to activity.log when log_activity available" {
+  create_mock_speckit_implement
+
+  # Pre-populate cache so we hit the hash-match path
+  local hash
+  hash=$(shasum -a 256 "$MOCK_WORKSPACE/.claude/commands/speckit.implement.md" | cut -d' ' -f1)
+  cat > "$MOCK_SPEC_DIR/ralph-prompt.md" <<'PROMPT'
+# Cached Prompt
+{{TASK_FILE}}
+PROMPT
+  echo "$hash" > "$MOCK_SPEC_DIR/.ralph-prompt-hash"
+  (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "add cache")
+
+  # Source ralph-common.sh so log_activity is defined
+  source "$SCRIPTS_DIR/ralph-common.sh"
+
+  # Create activity.log header (as init_ralph_dir would)
+  echo "# Activity Log" > "$MOCK_WORKSPACE/.ralph/activity.log"
+
+  resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" >/dev/null 2>&1
+
+  # Should have logged the cache hit to activity.log
+  grep -q "PROMPT.*cached prompt" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "no activity log writes in standalone mode without log_activity" {
+  # prompt-resolver.sh is sourced but ralph-common.sh is NOT — _pr_log is a no-op
+  echo "# Activity Log" > "$MOCK_WORKSPACE/.ralph/activity.log"
+
+  resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" >/dev/null 2>&1
+
+  # activity.log should only have the header — no PROMPT lines
+  ! grep -q "PROMPT" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
 @test "cached prompt preserves placeholders for later substitution" {
   create_mock_speckit_implement
 

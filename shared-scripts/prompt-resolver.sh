@@ -31,6 +31,15 @@ set -euo pipefail
 
 _PR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Log to activity.log when log_activity is available (sourced via ralph-common.sh).
+# No-op in standalone mode where log_activity is not defined.
+_pr_log() {
+  local workspace="$1" message="$2"
+  if declare -f log_activity >/dev/null 2>&1; then
+    log_activity "$workspace" "$message"
+  fi
+}
+
 # Default template lookup path:
 #   1. $RALPH_TEMPLATES_DIR
 #   2. Plugin layout: ../shared-references/templates
@@ -186,6 +195,7 @@ GENPROMPT
   fi
 
   echo "  ⚙ Generating loop prompt via $gen_cli (sonnet, low effort)..." >&2
+  _pr_log "$workspace" "PROMPT generating loop prompt via $gen_cli (sonnet, low effort)..."
 
   local generated
   if ! generated=$(echo "$gen_prompt" | $gen_cli -p \
@@ -194,6 +204,7 @@ GENPROMPT
     --output-format text \
     --dangerously-skip-permissions 2>/dev/null); then
     echo "  ❌ Prompt generation failed (exit $?)" >&2
+    _pr_log "$workspace" "PROMPT ❌ generation failed"
     return 1
   fi
 
@@ -213,6 +224,7 @@ GENPROMPT
   printf '%s\n' "$current_hash" >"$ralph_hash_file"
 
   # Commit the generated files so they're version-controlled and reviewable
+  _pr_log "$workspace" "PROMPT committing generated prompt ($line_count lines)"
   (
     cd "$workspace" || return 1
     local rel_prompt="${ralph_prompt#"$workspace/"}"
@@ -222,6 +234,7 @@ GENPROMPT
   )
 
   echo "  ✓ Generated prompt ($line_count lines) → $ralph_prompt" >&2
+  _pr_log "$workspace" "PROMPT ✓ generated prompt ($line_count lines)"
   return 0
 }
 
@@ -367,12 +380,15 @@ resolve_prompt_spec() {
       stored_hash=$(cat "$ralph_hash_file")
       if [[ "$current_hash" == "$stored_hash" ]]; then
         echo "  ✓ Using cached prompt (hash match)" >&2
+        _pr_log "$workspace" "PROMPT ✓ using cached prompt (hash match)"
         use_generated=true
       else
         echo "  ↻ speckit.implement.md changed — regenerating prompt..." >&2
+        _pr_log "$workspace" "PROMPT speckit.implement.md changed — regenerating..."
       fi
     else
       echo "  ⚙ No cached prompt — generating from speckit.implement.md..." >&2
+      _pr_log "$workspace" "PROMPT no cached prompt — generating from speckit.implement.md..."
     fi
 
     if [[ "$use_generated" != "true" ]]; then
