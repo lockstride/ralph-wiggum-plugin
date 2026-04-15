@@ -161,9 +161,16 @@ fi
 # -----------------------------------------------------------------------------
 
 # List matching timestamped logs in reverse-chronological order and delete
-# anything beyond $keep. Use find + sort to stay portable.
+# anything beyond $keep. Portable across bash 3.2 (macOS /bin/bash) —
+# `mapfile` is bash-4+ only, so we use a read-loop instead. Any user
+# invoking gate-run.sh under system bash on macOS hit a silent
+# `mapfile: command not found` + set -e abort prior to 0.3.4, which
+# skipped retention AND the GATE-end activity-log line.
 if [[ "$keep" -gt 0 ]]; then
-  mapfile -t _old_logs < <(
+  _old_logs=()
+  while IFS= read -r _line; do
+    [[ -n "$_line" ]] && _old_logs+=("$_line")
+  done < <(
     find "$gates_dir" -maxdepth 1 -type f -name "${label}-*.log" \
       ! -name "${label}-latest.log" 2>/dev/null |
       sort -r
