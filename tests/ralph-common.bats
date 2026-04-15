@@ -119,3 +119,34 @@ EOF
     fail "build_prompt should not include a Recovery Hint section when no hint file exists"
   fi
 }
+
+# ---------------------------------------------------------------------------
+# _classify_heartbeat_exit — heartbeat loop exit classifier (0.3.1)
+# ---------------------------------------------------------------------------
+
+@test "_classify_heartbeat_exit: non-empty signal always wins (0.3.1)" {
+  # Even if read returned a timeout or EOF, a caller-set signal is
+  # authoritative — honour it.
+  [ "$(_classify_heartbeat_exit 0 COMPLETE)" = "signalled" ]
+  [ "$(_classify_heartbeat_exit 1 ROTATE)" = "signalled" ]
+  [ "$(_classify_heartbeat_exit 142 DEFER)" = "signalled" ]
+}
+
+@test "_classify_heartbeat_exit: rc>128 with empty signal → timeout (0.3.1)" {
+  # read -t returns 128+signal-number on timeout; bash typically uses
+  # SIGALRM-ish values in the 129..142 range.
+  [ "$(_classify_heartbeat_exit 142 '')" = "timeout" ]
+  [ "$(_classify_heartbeat_exit 129 '')" = "timeout" ]
+}
+
+@test "_classify_heartbeat_exit: rc=1 with empty signal → parser_died (0.3.1)" {
+  # EOF on the FIFO — the parser/jq pipeline exited. Pre-0.3.1 this was
+  # silently treated as a clean natural end and the loop hung on `wait`.
+  [ "$(_classify_heartbeat_exit 1 '')" = "parser_died"  ]
+}
+
+@test "_classify_heartbeat_exit: rc=0 with empty signal → parser_died (0.3.1)" {
+  # Defensive: any non-timeout, non-signalled exit routes to parser_died
+  # so the loop cannot silently block on `wait`.
+  [ "$(_classify_heartbeat_exit 0 '')" = "parser_died" ]
+}

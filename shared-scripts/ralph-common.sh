@@ -556,6 +556,36 @@ _write_postmortem() {
 # ITERATION RUNNER
 # =============================================================================
 
+# Classify how the heartbeat read loop exited.
+#
+# Emits one of the following tokens on stdout:
+#   signalled    — the loop caller set a terminal signal (break/set), honour it
+#   timeout      — read -t expired with no parser output (agent stalled)
+#   parser_died  — FIFO hit EOF: the jq|stream-parser pipeline exited while
+#                  the agent subshell is presumably still alive. Pre-0.3.1
+#                  this was silently treated as a clean natural end, which
+#                  let wedged agents hang indefinitely on `wait` — see the
+#                  hang-investigation note in CHANGELOG.
+#
+# Args:
+#   $1 — exit status captured immediately after `done <"$fifo"`
+#   $2 — current signal string (may be empty)
+_classify_heartbeat_exit() {
+  local rc="$1"
+  local signal="$2"
+  if [[ -n "$signal" ]]; then
+    echo "signalled"
+    return
+  fi
+  # read -t returns >128 on timeout (128 + signal number).
+  if [[ "$rc" -gt 128 ]]; then
+    echo "timeout"
+    return
+  fi
+  # Any other non-zero (typically 1) means EOF on the FIFO.
+  echo "parser_died"
+}
+
 # Run a single agent iteration. Returns the final signal on stdout
 # (ROTATE / GUTTER / COMPLETE / DEFER / empty).
 run_iteration() {
@@ -695,19 +725,50 @@ run_iteration() {
         ;;
     esac
   done <"$fifo"
-
-  # read -t returns >128 on timeout (128 + signal number).
-  # If the FIFO read timed out, the agent is stalled — kill and defer.
   # shellcheck disable=SC2181
-  if [[ $? -gt 128 ]] && [[ -z "$signal" ]]; then
-    [[ -t 2 ]] && printf "\r\033[K" >&2
-    echo "⏰ Heartbeat timeout — no output in ${heartbeat}s, killing agent..." >&2
-    log_activity "$workspace" "⏰ HEARTBEAT TIMEOUT after ${heartbeat}s — no stream-parser output"
-    kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
-    signal="DEFER"
-  fi
+  local _read_rc=$?
 
+  local exit_class
+  exit_class=$(_classify_heartbeat_exit "$_read_rc" "$signal")
+  case "$exit_class" in
+    timeout)
+      [[ -t 2 ]] && printf "\r\033[K" >&2
+      echo "⏰ Heartbeat timeout — no output in ${heartbeat}s, killing agent..." >&2
+      log_activity "$workspace" "⏰ HEARTBEAT TIMEOUT after ${heartbeat}s — no stream-parser output"
+      kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+      signal="DEFER"
+      ;;
+    parser_died)
+      # 0.3.1: jq|stream-parser pipeline exited while the agent subshell
+      # is still presumed alive. The FIFO hit EOF, not a timeout, so the
+      # pre-0.3.1 code treated this as a clean natural end and blocked
+      # forever on `wait "$agent_pid"`. Kill the agent and defer.
+      [[ -t 2 ]] && printf "\r\033[K" >&2
+      echo "💥 Parser pipeline exited unexpectedly — killing agent and deferring..." >&2
+      log_activity "$workspace" "💥 PARSER EXIT — pipeline died while agent still running (rc=$_read_rc)"
+      kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+      signal="DEFER"
+      ;;
+  esac
+
+  # Wall-clock cap on `wait`: if the agent subshell does not exit within
+  # RALPH_WAIT_TIMEOUT seconds after we've either signalled or detected a
+  # parser/timeout condition, force-kill with SIGKILL. Prevents the loop
+  # from hanging on a wedged CLI whose pipe peer is already dead (the
+  # exact failure mode that motivated the 0.3.1 fix).
+  local wait_timeout="${RALPH_WAIT_TIMEOUT:-60}"
+  (
+    sleep "$wait_timeout"
+    if kill -0 "$agent_pid" 2>/dev/null; then
+      log_activity "$workspace" "⏰ WAIT TIMEOUT — force-killing agent after ${wait_timeout}s"
+      kill -9 -- -"$agent_pid" 2>/dev/null || kill -9 "$agent_pid" 2>/dev/null || true
+    fi
+  ) &
+  local _wait_killer_pid=$!
   wait "$agent_pid" 2>/dev/null || true
+  kill "$_wait_killer_pid" 2>/dev/null || true
+  wait "$_wait_killer_pid" 2>/dev/null || true
+
   kill "$spinner_pid" 2>/dev/null || true
   wait "$spinner_pid" 2>/dev/null || true
   [[ -t 2 ]] && printf "\r\033[K" >&2
