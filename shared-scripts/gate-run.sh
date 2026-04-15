@@ -104,8 +104,26 @@ _log_activity "🧪 GATE start label=$label cmd=$(printf '%q ' "$@")"
 start_epoch=$(date +%s)
 
 # Gate timeout: kill hung commands (e.g. wedged nx daemon) instead of
-# waiting forever. Default 5 minutes; override via RALPH_GATE_TIMEOUT.
-gate_timeout="${RALPH_GATE_TIMEOUT:-300}"
+# waiting forever.
+#
+# 0.3.5: Per-label defaults. Final gates (pnpm all-check, full E2E suites)
+# are empirically 3–5× slower than basic gates (lint + unit tests). A
+# single 300 s default caused chronic timeouts on final gates, forcing
+# agents to misread "exit 124" as a test failure when the gate simply
+# hadn't finished. Env vars cascade:
+#
+#   RALPH_FINAL_GATE_TIMEOUT  → used when label=final  (default 900)
+#   RALPH_BASIC_GATE_TIMEOUT  → used when label=basic  (default 300)
+#   RALPH_GATE_TIMEOUT        → blanket override for any label (no default;
+#                                takes precedence over the per-label vars
+#                                when set, for backward compat)
+if [[ -n "${RALPH_GATE_TIMEOUT:-}" ]]; then
+  gate_timeout="$RALPH_GATE_TIMEOUT"
+elif [[ "$label" == "final" ]]; then
+  gate_timeout="${RALPH_FINAL_GATE_TIMEOUT:-900}"
+else
+  gate_timeout="${RALPH_BASIC_GATE_TIMEOUT:-300}"
+fi
 
 # Resolve the timeout command portably (GNU timeout on Linux,
 # gtimeout via coreutils on macOS, or a shell-based fallback).

@@ -68,6 +68,40 @@ teardown() {
   grep -q "GATE end" "$MOCK_WORKSPACE/.ralph/activity.log"
 }
 
+# ---------------------------------------------------------------------------
+# Per-label gate timeout (0.3.5)
+# ---------------------------------------------------------------------------
+
+@test "basic gate uses RALPH_BASIC_GATE_TIMEOUT default (0.3.5)" {
+  # Default basic timeout is 300 s — a 2 s sleep should pass
+  RALPH_BASIC_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" basic sleep 30
+  [ "$status" -eq 124 ]
+}
+
+@test "final gate uses RALPH_FINAL_GATE_TIMEOUT default (0.3.5)" {
+  # Default final timeout is 900 s — override to 2 s so it hits timeout
+  RALPH_FINAL_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" final sleep 30
+  [ "$status" -eq 124 ]
+}
+
+@test "RALPH_GATE_TIMEOUT overrides per-label defaults (0.3.5)" {
+  # Even though final default is 900, the blanket override takes precedence
+  RALPH_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" final sleep 30
+  [ "$status" -eq 124 ]
+}
+
+@test "custom label falls through to basic default (0.3.5)" {
+  # Labels other than 'final' get the basic default
+  RALPH_BASIC_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" e2e sleep 30
+  [ "$status" -eq 124 ]
+}
+
+@test "writes exit breadcrumb for final gate (0.3.3+)" {
+  bash "$SCRIPTS_DIR/gate-run.sh" final echo "done" || true
+  [ -f "$MOCK_WORKSPACE/.ralph/gates/final-latest.exit" ]
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gates/final-latest.exit")" = "0" ]
+}
+
 @test "retains only RALPH_GATE_KEEP logs" {
   export RALPH_GATE_KEEP=2
 
