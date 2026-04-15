@@ -559,13 +559,14 @@ _write_postmortem() {
 # Classify how the heartbeat read loop exited.
 #
 # Emits one of the following tokens on stdout:
-#   signalled    — the loop caller set a terminal signal (break/set), honour it
-#   timeout      — read -t expired with no parser output (agent stalled)
-#   parser_died  — FIFO hit EOF: the jq|stream-parser pipeline exited while
-#                  the agent subshell is presumably still alive. Pre-0.3.1
-#                  this was silently treated as a clean natural end, which
-#                  let wedged agents hang indefinitely on `wait` — see the
-#                  hang-investigation note in CHANGELOG.
+#   signalled  — the loop caller set a terminal signal (break/set), honour it
+#   timeout    — read -t expired with no parser output (agent stalled)
+#   eof        — FIFO hit EOF; could be a clean natural end OR a wedged
+#                agent whose parser/jq pipeline crashed independently.
+#                Caller must probe agent-pid liveness to disambiguate
+#                (see _probe_agent_liveness). Prior to 0.3.2 this was
+#                unconditionally treated as a parser crash and DEFERred,
+#                which mis-classified every normal iteration end.
 #
 # Args:
 #   $1 — exit status captured immediately after `done <"$fifo"`
@@ -582,8 +583,37 @@ _classify_heartbeat_exit() {
     echo "timeout"
     return
   fi
-  # Any other non-zero (typically 1) means EOF on the FIFO.
-  echo "parser_died"
+  # Any other non-zero (typically 1) or zero means EOF on the FIFO.
+  echo "eof"
+}
+
+# Probe whether the agent subshell is still alive after a grace window.
+#
+# Disambiguates between two EOF-on-FIFO cases:
+#   - Clean natural end: claude CLI exited normally (model finished its
+#     turn with no queued tool calls), so jq and stream-parser EOFed in
+#     turn. The subshell is exiting or already gone.
+#   - Wedged agent: the parser/jq pipeline crashed but the claude CLI is
+#     still running (e.g., blocked on a pipe write with no reader).
+#
+# Returns "hang" if the pid is still alive after grace_sec, else "clean".
+# The grace loop polls once per second so clean exits return promptly.
+#
+# Args:
+#   $1 — agent pid to probe
+#   $2 — grace window in seconds (default 5)
+_probe_agent_liveness() {
+  local pid="$1"
+  local grace_sec="${2:-5}"
+  local deadline=$((SECONDS + grace_sec))
+  while [[ $SECONDS -lt $deadline ]] && kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "hang"
+  else
+    echo "clean"
+  fi
 }
 
 # Run a single agent iteration. Returns the final signal on stdout
@@ -738,16 +768,26 @@ run_iteration() {
       kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
       signal="DEFER"
       ;;
-    parser_died)
-      # 0.3.1: jq|stream-parser pipeline exited while the agent subshell
-      # is still presumed alive. The FIFO hit EOF, not a timeout, so the
-      # pre-0.3.1 code treated this as a clean natural end and blocked
-      # forever on `wait "$agent_pid"`. Kill the agent and defer.
-      [[ -t 2 ]] && printf "\r\033[K" >&2
-      echo "💥 Parser pipeline exited unexpectedly — killing agent and deferring..." >&2
-      log_activity "$workspace" "💥 PARSER EXIT — pipeline died while agent still running (rc=$_read_rc)"
-      kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
-      signal="DEFER"
+    eof)
+      # 0.3.2: FIFO hit EOF. Disambiguate clean natural end from wedged
+      # agent. Most iterations end naturally — claude CLI exits when the
+      # model finishes its turn, jq/parser EOF in turn, and we fall
+      # through to the `*)` natural-end branch in the main loop. Only
+      # when the agent is still alive after a short grace window does
+      # this indicate the 0.3.1-investigated hang (parser/jq crashed
+      # independently) — then kill and DEFER.
+      local grace_sec="${RALPH_EOF_GRACE:-5}"
+      local liveness
+      liveness=$(_probe_agent_liveness "$agent_pid" "$grace_sec")
+      if [[ "$liveness" == "hang" ]]; then
+        [[ -t 2 ]] && printf "\r\033[K" >&2
+        echo "💥 Parser pipeline exited while agent still running — killing and deferring..." >&2
+        log_activity "$workspace" "💥 PARSER EXIT — pipeline died while agent still running (rc=$_read_rc, grace=${grace_sec}s)"
+        kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+        signal="DEFER"
+      fi
+      # else: clean natural end — leave signal="" so the main loop's
+      # `*)` branch increments the iteration as it did pre-0.3.1.
       ;;
   esac
 
