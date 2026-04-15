@@ -203,4 +203,10 @@ rel_latest="${latest_link#"$workspace"/}"
 
 _log_activity "🧪 GATE end label=$label exit=$cmd_status duration=${duration}s log=$rel_latest"
 
+# 0.3.3: Breadcrumb file consumed by the loop's COMPLETE guard. Single
+# decimal integer, no newline. Present one-per-label at
+# .ralph/gates/<label>-latest.exit. The most recently-modified file
+# across all labels represents the last gate the agent ran.
+printf '%s' "$cmd_status" >"$gates_dir/$label-latest.exit"
+
 exit "$cmd_status"

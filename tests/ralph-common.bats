@@ -26,7 +26,7 @@ teardown() {
   rm -rf "$MOCK_WORKSPACE"
 }
 
-@test "build_prompt framing is under 30 lines (excluding user body)" {
+@test "build_prompt framing is under 35 lines (excluding user body)" {
   local output
   output=$(build_prompt "$MOCK_WORKSPACE" 1)
 
@@ -34,8 +34,22 @@ teardown() {
   local framing_lines
   framing_lines=$(echo "$output" | sed '/^## Task Execution$/,$d' | wc -l | tr -d ' ')
 
-  # Framing should be concise — under 30 lines
-  [ "$framing_lines" -le 30 ]
+  # Framing should be concise — under 35 lines (0.3.3 added Completion Bar).
+  [ "$framing_lines" -le 35 ]
+}
+
+@test "build_prompt includes Completion Bar (0.3.3)" {
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+
+  echo "$output" | grep -q "Completion Bar"
+  echo "$output" | grep -qi "pre-existing failure.*never"
+  # Completion Bar must appear BEFORE State Files — it's the first rule.
+  echo "$output" | awk '
+    /## Completion Bar/ { saw_cb=1 }
+    /## State Files/    { if (saw_cb) ok=1 }
+    END { exit ok ? 0 : 1 }
+  '
 }
 
 @test "build_prompt includes required sections" {
@@ -186,4 +200,63 @@ EOF
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   [ "$result" = "hang" ]
+}
+
+# ---------------------------------------------------------------------------
+# Completion Bar guard — refuse COMPLETE when a gate is red (0.3.3)
+# ---------------------------------------------------------------------------
+
+@test "_most_recent_gate_exit: no gates dir → empty (0.3.3)" {
+  rm -rf "$MOCK_WORKSPACE/.ralph/gates"
+  [ -z "$(_most_recent_gate_exit "$MOCK_WORKSPACE")" ]
+}
+
+@test "_most_recent_gate_exit: no *-latest.exit files → empty (0.3.3)" {
+  # gates dir exists but no breadcrumbs yet (older plugin, or no runs)
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  [ -z "$(_most_recent_gate_exit "$MOCK_WORKSPACE")" ]
+}
+
+@test "_most_recent_gate_exit: returns the most-recently-written breadcrumb (0.3.3)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf '1'  >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
+  # Space them in time so mtime ordering is unambiguous
+  sleep 1
+  printf '0'  >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  [ "$(_most_recent_gate_exit "$MOCK_WORKSPACE")" = "0" ]
+
+  # Now the basic gate is the more recent one, and it was red
+  sleep 1
+  printf '42' >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
+  [ "$(_most_recent_gate_exit "$MOCK_WORKSPACE")" = "42" ]
+}
+
+@test "_complete_allowed: no breadcrumbs → allow (backward compat) (0.3.3)" {
+  # Projects that haven't run a gate (or are on older plugin state) must
+  # not regress — allow COMPLETE to proceed.
+  rm -rf "$MOCK_WORKSPACE/.ralph/gates"
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: green gate → allow (0.3.3)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf '0' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: red gate → block (0.3.3)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf '124' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: most recent is what matters, even if older gate was green (0.3.3)" {
+  # Exactly the user's failure mode: basic-check passes, but final-check
+  # (run later) fails. The agent marks all boxes [x] anyway. Guard must
+  # block on the more-recent red gate.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf '0'   >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
+  sleep 1
+  printf '124' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
 }

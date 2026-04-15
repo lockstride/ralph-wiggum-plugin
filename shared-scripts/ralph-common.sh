@@ -389,6 +389,12 @@ $hint_block
 You are iteration $iteration of an autonomous loop. No memory of prior iterations.
 Git log and tasks.md checkboxes are the authoritative record of what is done.
 
+## Completion Bar (hard — read before anything else)
+
+- A task/phase is NOT complete until its verification gate exits 0. No exceptions.
+- "Pre-existing failure" is NEVER a reason to mark a task [x], emit a completion signal, or commit. If a check fails, fix it. If you cannot fix it, emit \`<ralph>GUTTER</ralph>\` with root cause in \`.ralph/errors.log\` — NEVER mark [x] around it.
+- Before flipping \`[ ]\` → \`[x]\`, self-check: did the gate for this task exit 0 in THIS iteration?
+
 ## State Files (read before anything else)
 
 1. \`.ralph/handoff.md\` — if it exists and is fresher than the latest commit, read first. Trust its pointers.
@@ -825,6 +831,54 @@ run_iteration() {
 }
 
 # =============================================================================
+# COMPLETE GUARD (0.3.3)
+# =============================================================================
+#
+# When every checkbox in tasks.md is [x], the main loop used to treat that as
+# authoritative and return 0. That let an agent "complete" a feature while
+# the most recent gate was still red — the exact "pre-existing failure" bunt
+# behaviour we want to prevent. These helpers inspect the gate-run.sh exit
+# breadcrumbs (`.ralph/gates/<label>-latest.exit`, a single decimal integer
+# written by gate-run.sh as of 0.3.3) and report whether the most recently
+# run gate is green.
+#
+# Project-agnostic: if no exit breadcrumbs exist (no gates run yet, or an
+# older plugin produced the .ralph state), the guard falls back to "allow
+# COMPLETE" — backward-compatible, no regression risk.
+
+# Emit the exit code from the most-recently-modified
+# `.ralph/gates/*-latest.exit` file. Empty string if no such file exists.
+_most_recent_gate_exit() {
+  local workspace="$1"
+  local dir="$workspace/.ralph/gates"
+  [[ -d "$dir" ]] || return 0
+  local latest=""
+  local f
+  # Portable mtime comparison via bash -nt; avoids the SC2012 ls pitfall
+  # and works on both GNU and BSD userspace (macOS).
+  for f in "$dir"/*-latest.exit; do
+    [[ -f "$f" ]] || continue
+    if [[ -z "$latest" ]] || [[ "$f" -nt "$latest" ]]; then
+      latest="$f"
+    fi
+  done
+  [[ -n "$latest" ]] || return 0
+  cat "$latest" 2>/dev/null
+}
+
+# Return 0 if the main loop is allowed to honour a tasks-complete /
+# COMPLETE signal, non-zero if it should be blocked (most recent gate was
+# red). The fallback case (no gate breadcrumbs) returns 0 so projects that
+# don't yet use gate-run.sh or that ran before 0.3.3 aren't regressed.
+_complete_allowed() {
+  local workspace="$1"
+  local exit_code
+  exit_code=$(_most_recent_gate_exit "$workspace")
+  [[ -z "$exit_code" ]] && return 0
+  [[ "$exit_code" == "0" ]]
+}
+
+# =============================================================================
 # MAIN LOOP
 # =============================================================================
 
@@ -898,6 +952,27 @@ run_ralph_loop() {
     fi
 
     if [[ "$task_status" == "COMPLETE" ]]; then
+      # 0.3.3 Completion Bar guard: refuse to exit the loop with a red gate,
+      # even if every checkbox is [x]. Forces the agent to fix verification
+      # failures rather than marking around them.
+      if ! _complete_allowed "$workspace"; then
+        local _last_exit
+        _last_exit=$(_most_recent_gate_exit "$workspace")
+        log_activity "$workspace" "🛑 COMPLETE BLOCKED — all tasks checked but most recent gate exited $_last_exit. Agent must get the gate to green (or escalate via <ralph>GUTTER</ralph>) before the loop can exit.$task_suffix"
+        log_progress "$workspace" "**Session $iteration ended** — 🛑 COMPLETE BLOCKED (gate red, exit=$_last_exit)"
+        echo "🛑 Checkboxes all [x] but most recent gate exited $_last_exit — not honouring COMPLETE. Continuing..."
+        # Reset stall/zero-progress counters — a red-gate block is not an
+        # API hiccup, and work may have progressed this iteration.
+        stall_count=0
+        DEFER_COUNT=0
+        # zero_progress_count deliberately unchanged; repeated blocked
+        # iterations with zero forward motion should still trip the
+        # natural-end stall detection below.
+        iteration=$((iteration + 1))
+        sleep 2
+        continue
+      fi
+
       log_activity "$workspace" "ITERATION $iteration END — ✅ COMPLETE$task_suffix"
       log_progress "$workspace" "**Session $iteration ended** — ✅ TASK COMPLETE"
       echo ""
@@ -923,6 +998,21 @@ run_ralph_loop() {
     case "$signal" in
       "COMPLETE")
         if [[ "$task_status" == "COMPLETE" || "$task_status" == "NO_TASKS" || "$task_status" == "NO_TASK_FILE" ]]; then
+          # 0.3.3 Completion Bar guard — same check as the task-status
+          # path above. An agent-emitted <promise>ALL_TASKS_DONE</promise>
+          # does not override a red final gate.
+          if ! _complete_allowed "$workspace"; then
+            local _last_exit
+            _last_exit=$(_most_recent_gate_exit "$workspace")
+            log_activity "$workspace" "🛑 COMPLETE BLOCKED — agent signaled COMPLETE but most recent gate exited $_last_exit.$task_suffix"
+            log_progress "$workspace" "**Session $iteration ended** — 🛑 COMPLETE BLOCKED (agent signaled; gate red, exit=$_last_exit)"
+            echo "🛑 Agent signaled COMPLETE but most recent gate exited $_last_exit — not honouring. Continuing..."
+            stall_count=0
+            DEFER_COUNT=0
+            iteration=$((iteration + 1))
+            session_id=""
+            continue
+          fi
           log_activity "$workspace" "ITERATION $iteration END — ✅ COMPLETE$task_suffix"
           log_progress "$workspace" "**Session $iteration ended** — ✅ TASK COMPLETE (agent signaled)"
           return 0

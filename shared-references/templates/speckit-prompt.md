@@ -17,6 +17,18 @@ Assume you are running unattended in a clean worktree on a 1M-context model.
 
 Every task runs **exactly one** of these gates before commit — never both, never neither. `{{FINAL_CHECK_COMMAND}}` is a strict superset of `{{BASIC_CHECK_COMMAND}}`, so when you run the final check you have already satisfied the basic check.
 
+## Zero-baseline assumption (read before anything else)
+
+`main` is green. There are **no** pre-existing test failures, lint errors, or build breaks. Any failure you observe in `{{BASIC_CHECK_COMMAND}}` or `{{FINAL_CHECK_COMMAND}}` is a regression introduced by the in-progress refactor — yours or an earlier iteration's. **You must fix it in this iteration.** The following are forbidden — they are why this section is at the top:
+
+- **Do not** assume failures are "pre-existing" and ignore them.
+- **Do not** mark a task or phase complete while tests are red.
+- **Do not** emit `<promise>ALL_TASKS_DONE</promise>` with a red final gate.
+- **Do not** bypass with `--no-verify`, `--skip-tests`, or similar.
+- **Do not** leave TODO comments to "fix later." Fix now.
+
+If you genuinely believe a failure is unrelated to your task and structurally impossible to fix from this iteration, write the evidence and your reasoning to `.ralph/errors.log` and emit `<ralph>GUTTER</ralph>`. **A human must decide — not you.** Marking a task `[x]` around a red gate is a protocol violation; the loop's completion guard will refuse to exit even if you do, so you will just waste an iteration.
+
 ## Gate invocation contract (hard rules — read carefully)
 
 This is the single most load-bearing rule in this prompt. Past iterations wasted hours by piping gate output through `grep`/`tail`, which hides non-zero exit codes and forces you to re-run expensive checks just to see more output. **The wrapper fixes both problems for you.** Use it, and do nothing else.
@@ -122,7 +134,7 @@ For each unchecked task in the phase, in order:
    - **Always via `{{GATE_RUN}}`.** Bare `{{BASIC_CHECK_COMMAND}}` or `{{FINAL_CHECK_COMMAND}}` invocations are forbidden — see the Gate invocation contract above.
 4. **Pre-commit gate** — the chosen gate **must pass before you commit** (wrapper exit code 0). If it fails, you caused the failure — diagnose via the persisted log per the Failure diagnosis protocol, fix, and re-run the same gate **exactly once**. Do not `git add` or `git commit` with a red gate. Do not commit and amend; fix first, commit once. Track in your own notes which gate you ran — the phase-completion protocol below uses this to skip a redundant run.
 5. **Checklist gate** — scan `{{SPEC_DIR}}/checklists/` for unchecked items that block this task. If any exist, flag them in `.ralph/errors.log` and stop (do not mark complete).
-6. **Mark complete** — edit `{{TASK_FILE}}` and change `[ ]` → `[x]` for this task.
+6. **Mark complete** — edit `{{TASK_FILE}}` and change `[ ]` → `[x]` for this task. Before you do, **self-check the zero-baseline rule**: did the gate you ran for this task exit 0 in **this** iteration? If not — if any test is red, any lint failed, any type error remains — **do not flip the checkbox**. Fix the failure or escalate via `<ralph>GUTTER</ralph>`. "Unrelated" / "pre-existing" failures are never a valid excuse; see the Zero-baseline assumption above.
 7. **Commit** — `git commit -m "[ralph][speckit] T### <task title>"`. Use the real task ID and title. Stage only the files you touched for this task (see Git Protocol below — **never use `git add .` / `git add -A` / `git add <directory>`**).
 8. **Continue** to the next task in the same phase. Do not stop until the phase is complete or you are genuinely blocked.
 
@@ -136,15 +148,6 @@ After every task in the current phase is checked:
 2. If you ran the phase gate and it failed: the phase is not complete. **Diagnose via `.ralph/gates/final-latest.log` — do not re-run the gate to "see more."** Use the `Read` and `Grep` tools against that file (see Failure diagnosis protocol above). Check commits from this iteration (`git log --oneline -10`, `git show HEAD`, `git show HEAD~1`) and fix the regression in this same iteration before moving on. Re-run the final gate **exactly once** after the fix. Never mark a phase complete with a red final check.
 3. When the gate is green, commit any residual changes with `git commit -m "[ralph][speckit][phase-N] <phase title> complete"`. If there are no residual changes, skip this commit — every task already committed its own work.
 4. Apply the push policy defined in the Git Protocol section (rule 7 below). Do **not** assume pushing is desired — many projects treat feature branches as local-only. If the policy is `never`, skip this step entirely.
-
-## Zero-baseline assumption (critical)
-
-`main` is green. There are **no** pre-existing test failures, lint errors, or build breaks. Any failure you observe in `{{BASIC_CHECK_COMMAND}}` or `{{FINAL_CHECK_COMMAND}}` is a regression introduced by the in-progress refactor — yours or an earlier iteration's. **You must fix it in this iteration.** Do not:
-
-- Assume failures are "pre-existing" and ignore them.
-- Mark a task or phase complete while tests are red.
-- Use `--no-verify`, `--skip-tests`, or any other bypass.
-- Leave TODO comments to "fix later." Fix now.
 
 ## Git Protocol (hard rules)
 
