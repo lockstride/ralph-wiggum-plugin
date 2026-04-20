@@ -48,6 +48,37 @@ teardown() {
   [ "$status" -eq 64 ]
 }
 
+@test "--help prints usage and exits 0" {
+  run bash "$SCRIPTS_DIR/gate-run.sh" --help
+  [ "$status" -eq 0 ]
+  # Covers the label enum, env-var surface, and agent-protocol hook — these
+  # are the load-bearing pieces an agent needs to discover cold.
+  [[ "$output" == *"USAGE"* ]]
+  [[ "$output" == *"LABELS"* ]]
+  [[ "$output" == *"basic"* ]]
+  [[ "$output" == *"final"* ]]
+  [[ "$output" == *"RALPH_GATE_TIMEOUT"* ]]
+  [[ "$output" == *"AGENT PROTOCOL"* ]]
+}
+
+@test "-h prints usage and exits 0 (short form)" {
+  run bash "$SCRIPTS_DIR/gate-run.sh" -h
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"USAGE"* ]]
+}
+
+@test "missing args hint points at --help" {
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"--help"* ]]
+}
+
+@test "invalid label hint points at --help" {
+  run bash "$SCRIPTS_DIR/gate-run.sh" bogus true
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"--help"* ]]
+}
+
 @test "times out on hung command and returns exit 124" {
   RALPH_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" basic sleep 30
   [ "$status" -eq 124 ]

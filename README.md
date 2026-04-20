@@ -23,6 +23,34 @@ There is no "inside Claude Code" vs "inside Cursor" distinction for the loop its
 
 The Claude Code plugin wrapping — the `/ralph` slash command, the plugin manifest — is only a discoverability convenience for Claude Code users. The slash command itself does nothing except print the same one-liner shell command you would run directly. Cursor users (or anyone else) can and should skip it.
 
+## Gate runner (`gate-run.sh`)
+
+The single most load-bearing utility in this plugin is **`shared-scripts/gate-run.sh`** — a project-agnostic wrapper you invoke instead of running `pnpm test`, `cargo test`, or any other verification command bare. It exists because agents (and humans) otherwise burn minutes re-running the same gate to see more output, or accidentally swallow exit codes through pipes. The wrapper:
+
+- Tees the full combined stream to `.ralph/gates/<label>-<ts>.log` (and a `-latest.log` pointer) so failures can be diagnosed via targeted reads, not re-runs.
+- Prints a bounded summary: header, `tail -n 60`, and up to 80 line-numbered matches for common failure signatures (vitest / jest / cypress / tsc / eslint / nestjs / generic stack traces).
+- Exits with the real command status via `PIPESTATUS` (`pipefail`-safe).
+- Enforces per-label timeouts (`basic`/`final`/`e2e`/`lint`/`custom`) to catch hung daemons instead of waiting forever.
+- Writes a single-decimal exit breadcrumb to `.ralph/gates/<label>-latest.exit` that the loop's completion guard consults — a red gate blocks `<promise>ALL_TASKS_DONE</promise>` even if every checkbox is flipped.
+
+**Usage — never pipe, never redirect:**
+
+```bash
+bash .claude/ralph-scripts/gate-run.sh basic pnpm basic-check
+bash .claude/ralph-scripts/gate-run.sh final pnpm all-check
+bash .claude/ralph-scripts/gate-run.sh e2e   pnpm test-e2e:local
+```
+
+**Full help** (env vars, exit codes, label enum, failure patterns):
+
+```bash
+bash .claude/ralph-scripts/gate-run.sh --help
+```
+
+**Agent protocol in one paragraph.** Run every gate via the wrapper. If the summary ends with `exit=0`, commit and move on — do not re-read the log. If it ends with `exit=N≠0`, **do not re-run the gate**; open `.ralph/gates/<label>-latest.log` with your `Read`/`Grep` tool (it's the full output, unfiltered), fix the smallest thing that could be wrong, then re-run **once**. Re-running the same gate twice in a row without any edits in between is pure waste.
+
+See **[`docs/gate-run.md`](docs/gate-run.md)** for the complete spec: label enum, environment variables, failure-pattern regex, what it does and does not catch (Rust / Go / Python / Ruby notes), portability caveats, and the full agent protocol. Inside the Ralph loop, `build_prompt()` already injects a compact version of the protocol into every iteration prompt — the doc is the reference you (or a future coding agent) reach for when the inline reminders are not enough.
+
 ## ⚠️ Blast radius
 
 Ralph runs the agent **with all tool approvals pre-granted** — `--dangerously-skip-permissions` for `claude`, `--force` for `cursor-agent`. This is intentional: the loop runs unattended and cannot pause for permission prompts.
@@ -240,6 +268,16 @@ git config core.hooksPath .githooks
 Commits that introduce lint or formatting issues will be blocked. Bypass with `git commit --no-verify` if needed.
 
 ## Changelog
+
+### 0.3.6
+
+- **Gate runner documentation + discoverability.** Agents running the loop frequently didn't use `gate-run.sh` or didn't know where to find its persisted logs, leading to expensive re-runs on every failure. This release closes the discovery gap:
+  - New **`--help` / `-h` flag** on `gate-run.sh` that prints the full surface (usage, labels, exit codes, env vars, failure-pattern coverage, agent protocol). First-line cold discovery from any shell.
+  - New **[`docs/gate-run.md`](docs/gate-run.md)** — standalone reference covering labels, environment variables, failure-signature regex (with an explicit "what it won't catch" table for Rust / Go / Python / Ruby), portability notes, and the full agent protocol.
+  - New **first-class "Gate runner" section in the README**, moved above the fold (between "How it runs" and "Blast radius") so anyone skimming the project learns the tool exists and why.
+  - `build_prompt()` now **auto-injects a compact `## Gate Runner` section** into every non-Spec-Kit iteration prompt when `gate-run.sh` is installed next to it. Previously only Spec Kit mode surfaced the wrapper — custom-prompt and `PROMPT.md` loops had no gate awareness and agents would run bare commands. The block renders conditionally so older installs or standalone setups without the wrapper are not misled.
+  - Usage-error messages (missing args, invalid label) now point at `--help` so cold discovery works even from a typo.
+  - `AGENTS.md` gains a "Gate runner" subsection documenting the three-way contract (`docs/gate-run.md` ↔ `--help` ↔ `build_prompt()`) and the completion-guard breadcrumb format that must stay stable.
 
 ### 0.2.0
 

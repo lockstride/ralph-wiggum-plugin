@@ -68,7 +68,7 @@ Emergency bypass is `--no-verify`, but this should be rare and justified in the 
 
 The prompt sent to the agent has two layers:
 
-1. **Framing** (`build_prompt()` in `ralph-common.sh`, ~25 lines) — iteration awareness, state file reading, signals, loop hygiene. Keep this under 30 lines.
+1. **Framing** (`build_prompt()` in `ralph-common.sh`, ~25 lines of non-conditional content) — iteration awareness, state file reading, signals, loop hygiene, gate-runner pointer. Keep this under ~40 lines including the conditional `## Gate Runner` block. Longer framing crowds out the user's task body and hurts warm-up every iteration.
 2. **Body** (`.ralph/effective-prompt.md`) — the task execution instructions. In Spec Kit mode, this is generated from `speckit.implement.md` via the adaptation guide.
 
 Key rules:
@@ -76,6 +76,16 @@ Key rules:
 - Generated prompts should stay under 120 lines
 - Never duplicate guidance that belongs in the project's constitution (naming conventions, architecture rules, etc.)
 - The framing and body should not have competing instruction sets — if both cover the same topic (git protocol, error handling), keep it in one place only
+
+## Gate runner (`shared-scripts/gate-run.sh`)
+
+First-class utility — treat changes to it with the same care as `ralph-common.sh`. The wrapper is what makes failure diagnosis in the loop tractable: it persists full output to `.ralph/gates/<label>-latest.log`, prints a bounded summary, and exits with the real command status.
+
+- **User-facing reference:** [`docs/gate-run.md`](docs/gate-run.md) — labels, env vars, exit codes, failure patterns, what it does and does not catch, agent protocol.
+- **Inline help:** `bash shared-scripts/gate-run.sh --help`. Keep the `_print_help()` block in sync with `docs/gate-run.md` and the header doc-comment. If you change behavior, update all three.
+- **Loop integration:** `build_prompt()` in `ralph-common.sh` auto-detects the wrapper sitting next to it and injects a compact `## Gate Runner` section into every iteration prompt. Spec-Kit mode also surfaces it via the `{{GATE_RUN}}` placeholder in `shared-references/templates/speckit-prompt.md`. Both paths should stay consistent.
+- **Completion guard dependency:** `_complete_allowed()` reads `.ralph/gates/<label>-latest.exit` to refuse `<promise>ALL_TASKS_DONE</promise>` when the most recent gate was red. Do not change the breadcrumb format (single decimal, no newline) without updating that guard.
+- **Tests:** `tests/gate-run.bats`. Any behavioral change — exit codes, log layout, breadcrumb format, env-var semantics — must ship with a bats test.
 
 ## Shell conventions
 

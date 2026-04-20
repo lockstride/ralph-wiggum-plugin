@@ -26,7 +26,7 @@ teardown() {
   rm -rf "$MOCK_WORKSPACE"
 }
 
-@test "build_prompt framing is under 35 lines (excluding user body)" {
+@test "build_prompt framing is under 55 lines (excluding user body)" {
   local output
   output=$(build_prompt "$MOCK_WORKSPACE" 1)
 
@@ -34,8 +34,13 @@ teardown() {
   local framing_lines
   framing_lines=$(echo "$output" | sed '/^## Task Execution$/,$d' | wc -l | tr -d ' ')
 
-  # Framing should be concise — under 35 lines (0.3.3 added Completion Bar).
-  [ "$framing_lines" -le 35 ]
+  # Framing should be concise. History:
+  #   0.3.3 added Completion Bar          (cap was 35)
+  #   0.3.6 added Gate Runner section     (cap bumped to 55)
+  # The Gate Runner block only renders when gate-run.sh exists next to
+  # ralph-common.sh (it does in-tree). If it ever needs to grow further,
+  # update this cap AND AGENTS.md §Prompt Architecture in the same commit.
+  [ "$framing_lines" -le 55 ]
 }
 
 @test "build_prompt includes Completion Bar (0.3.3)" {
@@ -60,6 +65,50 @@ teardown() {
   echo "$output" | grep -q "Signals"
   echo "$output" | grep -q "Loop Hygiene"
   echo "$output" | grep -q "Task Execution"
+}
+
+@test "build_prompt includes Gate Runner section when gate-run.sh is present (0.3.6)" {
+  # gate-run.sh ships in-tree next to ralph-common.sh, so the block renders
+  # under the normal test setup. This was the 0.3.6 fix for agents who ran
+  # bare commands and re-ran on every failure instead of reading the log.
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+
+  echo "$output" | grep -q "## Gate Runner"
+  # The three load-bearing pieces of the protocol:
+  echo "$output" | grep -q "Never pipe"
+  echo "$output" | grep -qE "\.ralph/gates/<label>-latest\.log"
+  echo "$output" | grep -qE "do NOT re-run"
+  # Points at --help so agents can self-discover the full surface:
+  echo "$output" | grep -q -- "--help"
+}
+
+@test "build_prompt omits Gate Runner section when gate-run.sh is absent (0.3.6)" {
+  # Simulate a degraded install where gate-run.sh is missing. The block
+  # must not render (it would mislead the agent about a tool it can't call).
+  # We copy ralph-common.sh to a temp dir without gate-run.sh, source it
+  # from there, and call build_prompt.
+  local tmp
+  tmp=$(mktemp -d "$BATS_TMPDIR/rb-no-gate.XXXXXX")
+  cp "$SCRIPTS_DIR/agent-adapter.sh" "$tmp/"
+  cp "$SCRIPTS_DIR/ralph-common.sh" "$tmp/"
+  # NOTE: deliberately do NOT copy gate-run.sh
+
+  local output
+  output=$(
+    bash -c "
+      source '$tmp/agent-adapter.sh'
+      source '$tmp/ralph-common.sh'
+      build_prompt '$MOCK_WORKSPACE' 1
+    "
+  )
+
+  if echo "$output" | grep -q "## Gate Runner"; then
+    rm -rf "$tmp"
+    fail "Gate Runner section must not appear when gate-run.sh is absent"
+  fi
+
+  rm -rf "$tmp"
 }
 
 @test "build_prompt does NOT include removed verbose sections" {

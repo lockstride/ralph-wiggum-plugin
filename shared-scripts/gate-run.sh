@@ -36,12 +36,94 @@
 set -euo pipefail
 
 # -----------------------------------------------------------------------------
+# Help / usage
+# -----------------------------------------------------------------------------
+
+_print_help() {
+  cat <<'HELP'
+gate-run.sh — wrapper for verification gates (tests, lint, build, etc.)
+
+USAGE
+  gate-run.sh <label> <cmd> [args...]
+  gate-run.sh -h | --help
+
+WHY
+  A gate command run bare makes diagnosis expensive: pipes hide exit codes,
+  large output blows past your terminal scrollback (or an agent's context
+  window), and a re-run is needed to see more of the failure. This wrapper
+  fixes that in one step:
+    • Tees the command's combined stdout/stderr to .ralph/gates/<label>-<ts>.log
+    • Prints a bounded summary (header + tail + failure-pattern matches)
+    • Exits with the real command status via PIPESTATUS (pipefail-safe)
+    • Writes an exit-code breadcrumb at .ralph/gates/<label>-latest.exit
+    • Maintains a .ralph/gates/<label>-latest.log pointer for quick reading
+
+LABELS (fixed set — pick the closest match; use 'custom' for anything else)
+  basic   Fast pre-commit gate (format, lint, unit tests). Default timeout 300 s.
+  final   Full verification gate (basic + integration/E2E). Default timeout 900 s.
+  e2e     Targeted E2E / browser / container suite. Default timeout 300 s.
+  lint    Lint-only or type-check-only runs. Default timeout 300 s.
+  custom  Anything that does not fit the four above. Default timeout 300 s.
+
+EXAMPLES
+  gate-run.sh basic pnpm basic-check
+  gate-run.sh final pnpm all-check
+  gate-run.sh e2e   pnpm test-e2e:local
+  gate-run.sh lint  pnpm lint:check
+
+EXIT CODES
+  0       The wrapped command exited 0.
+  N≠0     The wrapped command exited N. Passed through verbatim.
+  64      Usage error (missing args, invalid label).
+  124     The command exceeded its timeout (GNU/BSD 'timeout' convention).
+
+ENVIRONMENT
+  RALPH_WORKSPACE       Workspace root (default: $PWD). Logs land under
+                        $RALPH_WORKSPACE/.ralph/gates/.
+  RALPH_GATES_DIR       Full override for the log directory
+                        (default: $RALPH_WORKSPACE/.ralph/gates).
+  RALPH_GATE_KEEP       Per-label log retention count (default 10).
+  RALPH_GATE_TAIL       Lines of tail included in the summary (default 60).
+  RALPH_GATE_FAIL_HEAD  Failure-match lines in the summary (default 80).
+  RALPH_GATE_TIMEOUT    Blanket timeout override (seconds) for any label.
+                        Takes precedence over the per-label vars below.
+  RALPH_FINAL_GATE_TIMEOUT  Timeout for label=final   (default 900).
+  RALPH_BASIC_GATE_TIMEOUT  Timeout for every other label (default 300).
+
+FAILURE-PATTERN MATCHING
+  On completion the wrapper greps the log for common failure signatures
+  (vitest / jest / cypress / tsc / eslint / nestjs / generic stack traces)
+  and prints up to RALPH_GATE_FAIL_HEAD line-numbered matches. This helps
+  an agent find the failing site without re-running the gate. The regex is
+  line-anchored and Node/TS-biased today; non-Node ecosystems may want to
+  wrap this script or tail the full log directly.
+
+AGENT PROTOCOL (also documented in docs/gate-run.md)
+  1. Run every gate via this wrapper — never bare, never piped, never
+     redirected. Piping hides exit codes and makes you re-run to see more.
+  2. When a gate fails: do NOT re-run it. Read .ralph/gates/<label>-latest.log
+     with offset/limit reads or targeted grep, fix the smallest thing, then
+     re-run once.
+  3. When a gate passes: do NOT re-read the log. The summary already printed
+     everything you need. Commit and move on.
+
+See docs/gate-run.md for the full specification.
+HELP
+}
+
+# -----------------------------------------------------------------------------
 # Argument validation
 # -----------------------------------------------------------------------------
+
+if [[ $# -eq 1 ]] && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  _print_help
+  exit 0
+fi
 
 if [[ $# -lt 2 ]]; then
   echo "usage: gate-run.sh <label> <cmd> [args...]" >&2
   echo "  <label> in: basic | final | e2e | lint | custom" >&2
+  echo "  run 'gate-run.sh --help' for details" >&2
   exit 64
 fi
 
@@ -52,6 +134,7 @@ case "$label" in
   basic | final | e2e | lint | custom) ;;
   *)
     echo "gate-run.sh: invalid label '$label' (expected basic|final|e2e|lint|custom)" >&2
+    echo "  run 'gate-run.sh --help' for details" >&2
     exit 64
     ;;
 esac

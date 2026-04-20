@@ -383,6 +383,43 @@ build_prompt() {
     hint_block=$'\n'"$hint_block"$'\n'
   fi
 
+  # 0.3.6: Surface gate-run.sh in the non-speckit framing. Speckit-mode
+  # prompts get a dedicated gate-invocation contract from speckit-prompt.md,
+  # but custom-prompt and PROMPT.md loops had no gate awareness at all —
+  # agents would run bare `pnpm test` and re-run on every failure to see
+  # more output. The pointer below is a minimal hook: the full protocol
+  # lives in docs/gate-run.md + `gate-run.sh --help`. Only rendered when
+  # the wrapper is actually installed next to this script, so projects on
+  # older plugin versions or standalone setups without it are not misled.
+  local _rc_script_dir
+  _rc_script_dir="$(dirname "${BASH_SOURCE[0]}")"
+  local gate_run_path="$_rc_script_dir/gate-run.sh"
+  local gate_block=""
+  if [[ -f "$gate_run_path" ]]; then
+    local gate_run_cmd="bash $gate_run_path"
+    gate_block=$(
+      cat <<GATE_EOF
+
+## Gate Runner (read before running any verification command)
+
+Run every test / lint / build via the wrapper \`$gate_run_cmd <label> <cmd>\`:
+
+- **Labels** (pick the closest fit): \`basic\` \`final\` \`e2e\` \`lint\` \`custom\`
+- **Never pipe, redirect, or filter the gate command.** The wrapper already
+  prints a bounded summary and persists the full log. Piping (\`| grep\`,
+  \`| tail\`, \`> /tmp/…\`) hides the exit code and forces an expensive re-run.
+- **On failure:** do NOT re-run the gate. Read the persisted log at
+  \`.ralph/gates/<label>-latest.log\` with targeted \`Read\` offsets or \`Grep\`,
+  fix the smallest thing, then re-run once. Exit code lives at
+  \`.ralph/gates/<label>-latest.exit\` (breadcrumb file).
+- **On success:** do NOT re-read the log. The summary you already saw is
+  authoritative. Commit and move on.
+- Run \`$gate_run_cmd --help\` from your shell tool if you need the full
+  contract (env vars, exit codes, failure-pattern matching, timeouts).
+GATE_EOF
+    )
+  fi
+
   cat <<EOF
 # Ralph Iteration $iteration
 $hint_block
@@ -415,6 +452,7 @@ Do **not** read \`.ralph/activity.log\` (human monitoring only).
 - Never \`--amend\`, \`--force\`, or \`reset --hard\`. Fix mistakes with a new commit.
 - At session end, write \`.ralph/handoff.md\` (< 30 lines, navigation pointers only).
 - If context is running low, finish current edit, commit, and stop cleanly.
+$gate_block
 
 ## Task Execution
 
