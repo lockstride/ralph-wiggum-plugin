@@ -17,7 +17,7 @@ execution. They are stable across versions of speckit.implement.md.
 6. **Keep the execution outline**: Preserve context loading (step 3), task parsing (step 5), phase-by-phase execution (steps 6-7), progress tracking (step 8), and completion validation (step 9). These are the core logic.
 7. **Add iteration handoff**: Read `.ralph/handoff.md` at session start (if it exists and is fresh). Write it at session end (< 30 lines, navigation pointers only).
 8. **Add gate wrapper**: All test/check commands must use `{{GATE_RUN}}` wrapper. Basic gate: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`. Final gate: `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`. Never pipe or redirect gate output.
-9. **Add commit-per-task**: Commit after each completed task with `[ralph][speckit] T### <title>`. Stage files by explicit path only — never `git add .` or `git add -A`.
+9. **Add commit-per-task**: Commit after each completed task using Conventional Commits: `<type>(<scope>): <description> (T###)`. Types: feat / fix / refactor / test / chore / docs. Scope matches the project's `git log --oneline` convention. Stage files by explicit path only — never `git add .` or `git add -A`. Never include `Co-authored-by` or other agent-identifying footers.
 10. **Add completion signal**: `<promise>ALL_TASKS_DONE</promise>` when all tasks checked AND final gate passes.
 11. **Add stuck signal**: `<ralph>GUTTER</ralph>` if stuck 3+ times on the same issue.
 12. **Preserve `{{PLACEHOLDER}}` variables**: Keep `{{TASK_FILE}}`, `{{PLAN_FILE}}`, `{{SPEC_FILE}}`, `{{CONSTITUTION_PATH}}`, `{{GATE_RUN}}`, `{{BASIC_CHECK_COMMAND}}`, `{{FINAL_CHECK_COMMAND}}` as-is — the loop substitutes them later.
@@ -96,16 +96,16 @@ read it first. Trust its file pointers and architectural facts.
 5. **For each unchecked task:**
    a. Read only the files the task references
    b. Follow TDD: write failing test first, then implementation
-   c. Run the appropriate gate via `{{GATE_RUN}}`:
-      - Final gate for risky changes (module wiring, auth, DB schema, barrel exports)
-      - Basic gate for everything else
+   c. Run exactly ONE gate via `{{GATE_RUN}}` — never basic-then-final on the same code. The final gate is a strict superset of basic:
+      - **Final gate** if the task touches risky areas (module wiring, auth, DB schema, barrel exports) OR this is the last unchecked task in the current phase
+      - **Basic gate** otherwise (pure unit tests, in-memory logic, docs, type-only changes, self-contained refactors that aren't the last task in the phase)
       - Never pipe or redirect gate output — the wrapper handles logging
    d. If gate fails: read `.ralph/gates/<label>-latest.log` to diagnose. Fix and re-run. You have a 3-try budget per task before emitting `<ralph>GUTTER</ralph>`; a single failure is a normal debug step, not a stuck pattern.
    e. Mark task `[x]` in `{{TASK_FILE}}`
-   f. Commit: `git add <explicit file paths> && git commit -m "[ralph][speckit] T### <title>"`
+   f. Commit: `git add <explicit file paths> && git commit -m "<type>(<scope>): <description> (T###)"` using Conventional Commits (feat / fix / refactor / test / chore / docs). No `Co-authored-by` or other agent-identifying footers.
    g. Check `.ralph/stop-requested` — if it exists, yield cleanly (no new task); otherwise continue to the next unchecked task (across phase boundaries as needed).
 
-6. **Phase-boundary verification**: When every task in the current phase is `[x]`, run the final gate if the last task only ran the basic gate. Commit any residual changes. Then **advance into the next phase in the same iteration** — do not hand off to a fresh iteration just because the phase is done.
+6. **Phase-boundary verification**: When every task in the current phase is `[x]`, the last task already ran the final gate (per step 5c) and that IS the phase verification — do not run a second gate here. Commit any residual changes. Then **advance into the next phase in the same iteration** — do not hand off to a fresh iteration just because the phase is done.
 
 7. **Progress tracking**:
    - Mark completed tasks as `[x]` in `{{TASK_FILE}}`

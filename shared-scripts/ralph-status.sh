@@ -12,6 +12,12 @@
 #
 # All output is plain text on stdout. Exit code is always 0 unless the
 # given workspace does not exist.
+#
+# 0.4.1 layout: sections separated by uppercase labels + blank lines; iteration
+# derived from activity.log (the loop's internal counter is not persisted to
+# .ralph/.iteration); gate history collapsed to start+end pairs; recent
+# activity filtered to meaningful events (commits, gates, iteration
+# transitions) rather than every Read/TOKENS line.
 
 set -euo pipefail
 
@@ -37,6 +43,30 @@ if [[ ! -d "$ralph_dir" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+
+# Find the byte offset of the most recent ITERATION START line. Everything
+# after that line is "this session." Returns "" if no ITERATION START found,
+# which callers interpret as "whole log."
+_find_session_start() {
+  if [[ ! -f "$activity_log" ]]; then
+    echo ""
+    return
+  fi
+  # awk handles the file in one pass and is faster than grep + cut. We want
+  # the line number of the most recent match; awk scans forward then prints
+  # at END so no post-processing is needed.
+  awk '/ITERATION [0-9.]+ START/ { line=NR } END { if (line) print line }' \
+    "$activity_log"
+}
+
+# Emit a section header with consistent spacing.
+_section() {
+  printf '\n%s\n' "$1"
+}
+
+# -----------------------------------------------------------------------------
 # Header
 # -----------------------------------------------------------------------------
 
@@ -46,141 +76,211 @@ printf '   workspace: %s\n' "$workspace"
 printf '═══════════════════════════════════════════════════════════════════\n'
 
 # -----------------------------------------------------------------------------
-# Process state
+# STATUS — the headline a glance should give: running? iteration? progress?
 # -----------------------------------------------------------------------------
 
+_section 'STATUS'
+
+# Driver process state
 if pgrep -f "ralph-setup.sh.*$workspace" >/dev/null 2>&1 ||
   pgrep -f "stream-parser.sh $workspace" >/dev/null 2>&1; then
-  printf '\n● driver: RUNNING\n'
-  # shellcheck disable=SC2009
-  # ps + grep is intentional here: we need elapsed time + the workspace
-  # path argument, neither of which pgrep -a returns in a single call.
-  ps -ax -o pid,etime,command 2>/dev/null |
-    grep -E "ralph-setup|stream-parser" |
-    grep "$workspace" |
-    grep -v grep |
-    head -3 |
-    awk '{printf "    pid=%-7s elapsed=%-12s %s\n", $1, $2, $3}'
+  # Grab the ralph-setup or stream-parser PID + elapsed time. Using ps + grep
+  # (SC2009 accepted) because pgrep doesn't emit elapsed time.
+  _driver_row=$(
+    # shellcheck disable=SC2009
+    ps -ax -o pid=,etime=,command= 2>/dev/null |
+      grep -E "ralph-setup|stream-parser" |
+      grep "$workspace" |
+      grep -v grep |
+      head -1 |
+      awk '{printf "pid=%s elapsed=%s", $1, $2}'
+  )
+  printf '  driver:    ● RUNNING  %s\n' "${_driver_row:-(pid lookup failed)}"
 else
-  printf '\n○ driver: not running\n'
+  printf '  driver:    ○ not running\n'
 fi
 
-# -----------------------------------------------------------------------------
-# Iteration counter, task progress
-# -----------------------------------------------------------------------------
+# Iteration + retry — read from activity.log since the loop's internal
+# counter isn't persisted (known gap, captured in 0.4.1 TODO).
+if [[ -f "$activity_log" ]]; then
+  _last_iter=$(awk '/ITERATION [0-9.]+ START/ { m=$0 } END { if (m) print m }' "$activity_log" |
+    sed -E 's/.*ITERATION ([0-9.]+) START.*/\1/')
+  if [[ -n "$_last_iter" ]]; then
+    printf '  iteration: %s\n' "$_last_iter"
+  else
+    printf '  iteration: (none started yet)\n'
+  fi
+fi
 
-iteration=0
-[[ -f "$ralph_dir/.iteration" ]] && iteration=$(cat "$ralph_dir/.iteration")
-printf '\n● iteration: %s\n' "$iteration"
-
+# Task progress + next unchecked task
 if [[ -f "$task_file_path" ]]; then
   task_file=$(cat "$task_file_path")
   if [[ -f "$task_file" ]]; then
     total=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[(x| )\]' "$task_file" 2>/dev/null || echo 0)
     done_count=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[x\]' "$task_file" 2>/dev/null || echo 0)
     remaining=$((total - done_count))
-    printf '● tasks:     %s / %s complete (%s remaining)\n' "$done_count" "$total" "$remaining"
+    printf '  tasks:     %s / %s complete (%s remaining)\n' "$done_count" "$total" "$remaining"
 
     next_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | head -1 || true)
     if [[ -n "$next_task" ]]; then
-      printf '● next:      %s\n' "$(echo "$next_task" | sed 's/^[0-9]*://' | sed 's/^[[:space:]]*[-*][[:space:]]*\[ \][[:space:]]*//' | cut -c1-100)"
+      _next_text=$(echo "$next_task" |
+        sed 's/^[0-9]*://' |
+        sed 's/^[[:space:]]*[-*][[:space:]]*\[ \][[:space:]]*//' |
+        cut -c1-90)
+      printf '  next:      %s\n' "$_next_text"
+    fi
+  fi
+fi
+
+# Token usage
+if [[ -f "$activity_log" ]]; then
+  _last_tokens=$(awk '/TOKENS:/ { m=$0 } END { if (m) print m }' "$activity_log" |
+    sed -E 's/.*TOKENS: ([0-9]+) \/ ([0-9]+) \(([0-9]+%)\).*/\1 \/ \2 (\3)/')
+  if [[ -n "$_last_tokens" ]]; then
+    printf '  tokens:    %s\n' "$_last_tokens"
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# GATES — collapse start+end pairs into one pass/fail line per run,
+#         session-scoped so the count reflects THIS iteration only.
+# -----------------------------------------------------------------------------
+
+session_start_line=$(_find_session_start)
+
+if [[ -f "$activity_log" ]]; then
+  _section 'GATES (this session)'
+  _gate_slice=$(
+    if [[ -n "$session_start_line" ]]; then
+      tail -n +"$session_start_line" "$activity_log"
+    else
+      cat "$activity_log"
+    fi
+  )
+
+  # Collapse start + end pairs into a single line. The stream-parser always
+  # emits `🧪 GATE start label=… cmd=…` immediately before `🧪 GATE end
+  # label=… exit=N duration=Ns log=…` for the matching run, so a simple
+  # awk state machine pairs them.
+  _gate_pairs=$(
+    echo "$_gate_slice" |
+      awk '
+        /🧪 GATE start/ {
+          start_ts = substr($0, 2, 8)
+          match($0, /label=[^ ]+/); start_label = substr($0, RSTART+6, RLENGTH-6)
+          next
+        }
+        /🧪 GATE end/ {
+          end_ts = substr($0, 2, 8)
+          match($0, /label=[^ ]+/); end_label = substr($0, RSTART+6, RLENGTH-6)
+          match($0, /exit=[0-9]+/);  exit_code = substr($0, RSTART+5, RLENGTH-5)
+          match($0, /duration=[0-9]+s/); duration = substr($0, RSTART+9, RLENGTH-10)
+          sym = (exit_code == 0) ? "✔" : "✘"
+          # Orphan end without a matching start falls back to "?" for start.
+          if (!start_ts) { start_ts = "?" }
+          printf "  %s %-6s %ss  %s → %s  exit=%s\n", sym, end_label, duration, start_ts, end_ts, exit_code
+          start_ts = ""; start_label = ""
+        }
+      '
+  )
+
+  if [[ -n "$_gate_pairs" ]]; then
+    # Show the last 5 pairs so the banner doesn't dominate the screen.
+    echo "$_gate_pairs" | tail -5
+    _total=$(echo "$_gate_pairs" | grep -c .)
+    _pass=$(echo "$_gate_pairs" | grep -c '^[[:space:]]*✔' || true)
+    _fail=$(echo "$_gate_pairs" | grep -c '^[[:space:]]*✘' || true)
+    printf '  summary:   %s pass / %s fail (%s total this session)\n' \
+      "$_pass" "$_fail" "$_total"
+  else
+    # No gate events yet in this session.
+    if [[ -n "$session_start_line" ]]; then
+      echo "  (no gates run yet in this iteration)"
+    else
+      echo "  (no ITERATION START marker found; session scoping unavailable)"
     fi
   fi
 fi
 
 # -----------------------------------------------------------------------------
-# Gate state — count runs in current activity.log session
-# -----------------------------------------------------------------------------
-
-if [[ -f "$activity_log" ]]; then
-  printf '\n● gates this session:\n'
-  # Find the most recent "Session N started" line and count GATE events after it
-  session_start_line=$(grep -n "Session .* started" "$activity_log" 2>/dev/null | tail -1 | cut -d: -f1 || echo 1)
-  if [[ -z "$session_start_line" ]]; then
-    session_start_line=1
-  fi
-  tail -n +"$session_start_line" "$activity_log" 2>/dev/null |
-    grep -E "🧪 GATE (start|end)" |
-    tail -10 |
-    sed 's/^/    /'
-
-  pass=$(tail -n +"$session_start_line" "$activity_log" 2>/dev/null | grep -cE "GATE end .*exit=0" || true)
-  fail=$(tail -n +"$session_start_line" "$activity_log" 2>/dev/null | grep -cE "GATE end .*exit=[1-9]" || true)
-  printf '    summary: %s pass / %s fail (this session)\n' "$pass" "$fail"
-fi
-
-# -----------------------------------------------------------------------------
-# Most recent persisted gate logs
-# -----------------------------------------------------------------------------
-
-if [[ -d "$gates_dir" ]]; then
-  printf '\n● persisted gate logs:\n'
-  # Collect non-latest log files, sorted by mtime ascending, and show the
-  # last five. Avoid `ls | grep` (SC2010) by using `find` + `sort`.
-  # macOS ships bash 3.2 which lacks `mapfile`; use a portable read loop.
-  _gate_logs=()
-  while IFS= read -r _line; do
-    _gate_logs+=("$_line")
-  done < <(
-    find "$gates_dir" -maxdepth 1 -type f -name '*.log' \
-      ! -name '*-latest.log' -print0 2>/dev/null |
-      xargs -0 -n1 stat -f '%m %N' 2>/dev/null |
-      sort -n |
-      tail -5 |
-      cut -d' ' -f2-
-  )
-  for f in "${_gate_logs[@]}"; do
-    [[ -n "$f" ]] || continue
-    size=$(wc -c <"$f" 2>/dev/null | tr -d ' ')
-    printf '    %s (%s bytes)\n' "$(basename "$f")" "$size"
-  done
-fi
-
-# -----------------------------------------------------------------------------
-# Token usage (most recent reading from activity.log)
-# -----------------------------------------------------------------------------
-
-if [[ -f "$activity_log" ]]; then
-  last_tokens=$(grep "TOKENS:" "$activity_log" 2>/dev/null | tail -1 | sed 's/.*TOKENS: //' || true)
-  if [[ -n "$last_tokens" ]]; then
-    printf '\n● tokens:    %s\n' "$last_tokens"
-  fi
-fi
-
-# -----------------------------------------------------------------------------
-# Git state
+# GIT — branch, tip, and dirty state (collapsed to "clean" when nothing dirty)
 # -----------------------------------------------------------------------------
 
 if git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  printf '\n● git:\n'
+  _section 'GIT'
   branch=$(git -C "$workspace" branch --show-current 2>/dev/null || echo "(detached)")
   tip=$(git -C "$workspace" log --oneline -1 2>/dev/null || true)
   staged=$(git -C "$workspace" diff --cached --numstat 2>/dev/null | wc -l | tr -d ' ')
   unstaged=$(git -C "$workspace" diff --numstat 2>/dev/null | wc -l | tr -d ' ')
   untracked=$(git -C "$workspace" ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')
-  printf '    branch:    %s\n' "$branch"
-  printf '    tip:       %s\n' "$tip"
-  printf '    staged:    %s files\n' "$staged"
-  printf '    unstaged:  %s files\n' "$unstaged"
-  printf '    untracked: %s files\n' "$untracked"
+  printf '  branch:    %s\n' "$branch"
+  printf '  tip:       %s\n' "${tip:-(no commits)}"
+  if [[ "$staged" -eq 0 && "$unstaged" -eq 0 && "$untracked" -eq 0 ]]; then
+    printf '  state:     clean\n'
+  else
+    printf '  state:     %s staged, %s unstaged, %s untracked\n' \
+      "$staged" "$unstaged" "$untracked"
+  fi
 fi
 
 # -----------------------------------------------------------------------------
-# Most recent activity (last 8 lines for a glance)
+# RECENT — meaningful events only (commits, gate starts/ends, iteration
+#          transitions, parser signals). Skips TOKENS/READ noise that
+#          dominates activity.log and makes state changes hard to spot.
 # -----------------------------------------------------------------------------
 
 if [[ -f "$activity_log" ]]; then
-  printf '\n● recent activity (last 8 lines):\n'
-  tail -8 "$activity_log" | sed 's/^/    /'
+  _section 'RECENT (meaningful events, last 8)'
+  # Pattern list kept narrow on purpose — every pattern here is either a
+  # state transition or a decision point. Expand only if it would answer
+  # "what is the loop doing right now?" without re-reading the raw log.
+  _recent=$(grep -E 'COMMIT|🧪 GATE|ITERATION [0-9.]+ (START|END)|PARSER EXIT|HEARTBEAT TIMEOUT|RECOVER_ATTEMPT|GUTTER|DEFERRED|ORPHAN|PIPELINE DRAIN|STOP_REQUESTED|ROTATE' \
+    "$activity_log" 2>/dev/null |
+    grep -vE 'test -f .*stop-requested|cat .*handoff\.md|READ .*handoff\.md' |
+    tail -8 || true)
+  if [[ -n "$_recent" ]]; then
+    # shellcheck disable=SC2001 # sed needed: parameter expansion ${_recent//^/  }
+    # can't anchor to line-start in bash 3.2 without a loop; sed is clearer here.
+    echo "$_recent" | sed 's/^/  /'
+  else
+    echo "  (no meaningful events yet)"
+  fi
 fi
 
 # -----------------------------------------------------------------------------
-# Handoff note from prior iteration (if present)
+# HANDOFF — navigation note the next iteration will read
 # -----------------------------------------------------------------------------
 
 if [[ -f "$handoff" ]]; then
-  printf '\n● handoff.md (from prior iteration):\n'
-  sed 's/^/    /' "$handoff"
+  _section 'HANDOFF (navigation note from prior iteration)'
+  sed 's/^/  /' "$handoff"
+fi
+
+# -----------------------------------------------------------------------------
+# GATE LOGS — compact listing (only if there are persisted logs to surface)
+# -----------------------------------------------------------------------------
+
+if [[ -d "$gates_dir" ]]; then
+  _gate_log_count=$(find "$gates_dir" -maxdepth 1 -type f -name '*.log' ! -name '*-latest.log' 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$_gate_log_count" -gt 0 ]]; then
+    _section "GATE LOGS (last 5 of $_gate_log_count persisted)"
+    # macOS bash 3.2 — portable read loop, no mapfile.
+    while IFS= read -r _f; do
+      [[ -n "$_f" ]] || continue
+      _size=$(wc -c <"$_f" 2>/dev/null | tr -d ' ')
+      # stat -f '%m' gives mtime on macOS; use ls -T for portable formatted
+      # timestamp if we need it later. For now size + basename is enough
+      # context for an operator to know which one to Read.
+      printf '  %s (%s bytes)\n' "$(basename "$_f")" "$_size"
+    done < <(
+      find "$gates_dir" -maxdepth 1 -type f -name '*.log' \
+        ! -name '*-latest.log' -print0 2>/dev/null |
+        xargs -0 -n1 stat -f '%m %N' 2>/dev/null |
+        sort -n |
+        tail -5 |
+        cut -d' ' -f2-
+    )
+  fi
 fi
 
 printf '\n═══════════════════════════════════════════════════════════════════\n'

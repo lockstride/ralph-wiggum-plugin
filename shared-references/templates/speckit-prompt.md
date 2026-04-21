@@ -81,7 +81,7 @@ This is the single most load-bearing rule in this prompt. Past iterations wasted
 6. **Post-gate-success protocol** — when a gate exits zero:
    - Your **next** tool call MUST be `git status` to see what is staged and what is dirty.
    - Your tool call after that MUST be `git add <explicit paths>` to stage the files you intended to commit (per the Git Protocol below — never `git add .`).
-   - Your tool call after that MUST be `git commit -m "[ralph][speckit] T### …"`.
+   - Your tool call after that MUST be `git commit -m "<type>(<scope>): <description> (T###)"` per the Commit Message Format section below.
    - Do **not** Read the gate log after a passing gate. Do **not** Grep the gate log. Do **not** `tail` / `wc` / `ls` the gate log. Do **not** run any other shell command between the passing gate and the commit. The wrapper has already printed every fact about the run that you need; the persisted log is only there for the failure-diagnosis path. Re-reading it after a green gate consumes tool calls and tokens for zero new information.
    - The single legitimate exception: if `git status` shows files modified that you did **not** intend to touch (orphans, IDE droppings, prior-iteration leftovers), surface them per the Git Protocol's orphan-handling rule before committing.
 
@@ -138,31 +138,31 @@ For each unchecked task, in order:
 1. **Understand** — read only the files the task references.
 2. **Implement** — make the minimum change. For test+implementation pairs, write the failing test first (TDD red), then the implementation (green), all in this task (red→green in one commit).
 3. **Gate selection** — decide which single gate covers this task, based on what you touched:
-   - **Run the final gate** (`{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`) if this task (or the task spec line itself, tagged `[risky]`) touches any of:
-     - Package barrel exports (`packages/*/src/index.ts`, `packages/*/index.ts`)
-     - Prisma schema (`*.prisma`), Prisma seed, or DB constraint/seed loaders
-     - NestJS module registration (`app.module.ts`, `imports:` arrays, new `*.module.ts` files wired into the app)
-     - App bootstrap / entrypoints (`main.ts`, server entrypoints, Nuxt/Vue app roots)
-     - `tsconfig.json` `include` / `exclude` / `paths`, or workspace-level `package.json` dependencies
-     - Authentication, authorization middleware, or request-context builders
-   - **Run the basic gate** (`{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`) otherwise — pure unit tests, in-memory logic, docs, type-only changes, self-contained refactors.
-   - **Never run both.** The final gate is a strict superset.
+   - **Run the final gate** (`{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`) if ANY of the following apply:
+     - This task (or the task spec line itself, tagged `[risky]`) touches any of:
+       - Package barrel exports (`packages/*/src/index.ts`, `packages/*/index.ts`)
+       - Prisma schema (`*.prisma`), Prisma seed, or DB constraint/seed loaders
+       - NestJS module registration (`app.module.ts`, `imports:` arrays, new `*.module.ts` files wired into the app)
+       - App bootstrap / entrypoints (`main.ts`, server entrypoints, Nuxt/Vue app roots)
+       - `tsconfig.json` `include` / `exclude` / `paths`, or workspace-level `package.json` dependencies
+       - Authentication, authorization middleware, or request-context builders
+     - **OR this task is the last unchecked task in the current phase.** The phase-close protocol below would otherwise force a basic-then-final sequence against effectively the same code. Upgrading the last task to final collapses that into one gate run. The final gate is a strict superset of basic, so this loses no coverage and saves the basic run entirely.
+   - **Run the basic gate** (`{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`) otherwise — pure unit tests, in-memory logic, docs, type-only changes, self-contained refactors, AND not the last task in the phase.
+   - **Never run both for the same code state.** The final gate is a strict superset — running basic first just burns the basic runtime for zero additional coverage.
    - **Always via `{{GATE_RUN}}`.** Bare `{{BASIC_CHECK_COMMAND}}` or `{{FINAL_CHECK_COMMAND}}` invocations are forbidden — see the Gate invocation contract above.
 4. **Pre-commit gate** — the chosen gate **must pass before you commit** (wrapper exit code 0). If it fails, you caused the failure — diagnose via the persisted log per the Failure diagnosis protocol, fix, and re-run the same gate **exactly once**. Do not `git add` or `git commit` with a red gate. Do not commit and amend; fix first, commit once. Track in your own notes which gate you ran — the phase-completion protocol below uses this to skip a redundant run.
 5. **Checklist gate** — scan `{{SPEC_DIR}}/checklists/` for unchecked items that block this task. If any exist, flag them in `.ralph/errors.log` and stop (do not mark complete).
 6. **Mark complete** — edit `{{TASK_FILE}}` and change `[ ]` → `[x]` for this task. Before you do, **self-check the zero-baseline rule**: did the gate you ran for this task exit 0 in **this** iteration? If not — if any test is red, any lint failed, any type error remains — **do not flip the checkbox**. Fix the failure or escalate via `<ralph>GUTTER</ralph>`. "Unrelated" / "pre-existing" failures are never a valid excuse; see the Zero-baseline assumption above.
-7. **Commit** — `git commit -m "[ralph][speckit] T### <task title>"`. Use the real task ID and title. Stage only the files you touched for this task (see Git Protocol below — **never use `git add .` / `git add -A` / `git add <directory>`**).
+7. **Commit** — `git commit -m "<type>(<scope>): <description> (T###)"` per the Commit Message Format section below. Stage only the files you touched for this task (see Git Protocol below — **never use `git add .` / `git add -A` / `git add <directory>`**).
 8. **Continue** to the next task. Do not stop at task boundaries, and do not stop at phase boundaries. Only stop when one of the preamble's stop conditions fires.
 
 ## Phase-boundary verification protocol
 
 When you reach the end of a phase (every task in it is `[x]`), before advancing to the next phase:
 
-1. **Decide whether the phase gate needs to run**:
-   - If the **last task's gate was the basic gate**, run `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}` now. The phase as a whole has not yet been verified at the full-gate level.
-   - If the **last task's gate was the final gate** (the final task of the phase was risky and self-gated), the phase is already verified — **skip the redundant run**. Running it again would just burn minutes.
-2. If you ran the phase gate and it failed: the phase is not complete. **Diagnose via `.ralph/gates/final-latest.log` — do not re-run the gate to "see more."** Use the `Read` and `Grep` tools against that file (see Failure diagnosis protocol above). Check commits from this iteration (`git log --oneline -10`, `git show HEAD`, `git show HEAD~1`) and fix the regression in this same iteration before moving on. Re-run the final gate **exactly once** after the fix. Never mark a phase complete with a red final check.
-3. When the gate is green, commit any residual changes with `git commit -m "[ralph][speckit][phase-N] <phase title> complete"`. If there are no residual changes, skip this commit — every task already committed its own work.
+1. **Verify the phase is covered by a green final gate.** Per the Gate Selection rule, the last unchecked task in the phase should have run the final gate already — that run IS the phase-close verification. Do NOT run a second gate here. If for any reason the last task somehow still ran the basic gate (edge cases: task file edited mid-iteration, task pattern unclear), only then run `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}` now. Otherwise the phase is already verified.
+2. If the phase's final gate ran red: the phase is not complete. **Diagnose via `.ralph/gates/final-latest.log` — do not re-run the gate to "see more."** Use the `Read` and `Grep` tools against that file (see Failure diagnosis protocol above). Check commits from this iteration (`git log --oneline -10`, `git show HEAD`, `git show HEAD~1`) and fix the regression in this same iteration before moving on. Re-run the final gate **exactly once** after the fix. Never mark a phase complete with a red final check.
+3. Commit any residual changes with `git commit -m "chore(phase-N): complete <phase title>"` per the Commit Message Format section below. If there are no residual changes, skip this commit — every task already committed its own work.
 4. Apply the push policy defined in the Git Protocol section (rule 7 below). Do **not** assume pushing is desired — many projects treat feature branches as local-only. If the policy is `never`, skip this step entirely.
 5. **Advance into the next phase in the same iteration.** The phase gate succeeded — there is no reason to hand off to a fresh iteration just because you finished a phase. Keep going until a preamble stop condition fires.
 
@@ -172,7 +172,7 @@ When you reach the end of a phase (every task in it is `[x]`), before advancing 
 2. **Never `git add` any path matched by `.gitignore`.** This includes `.ralph/`, generated source directories (e.g. `packages/*/generated/`, `dist/`, `build/`, Prisma client output), dependency caches, and anything else the project deliberately excludes. `git add` on an ignored path fails with exit 1 and aborts the whole commit. If you are unsure whether a path is ignored, run `git check-ignore <path>` first. Commit only source files, `tasks.md`, and other non-ignored content.
 3. Write progress notes **directly** to `.ralph/progress.md` with the `Write`/`Edit` tool. Never via commits.
 4. Commit after every completed task (not at the end of the phase). Each commit is a checkpoint the next iteration can resume from.
-5. Never include `Co-authored-by` trailers. The commit message format is exactly `[ralph][speckit] T### <task title>`.
+5. Never include `Co-authored-by` trailers or any other agent-identifying footer. Use the Commit Message Format section below.
 6. Never use `--amend`, `--force`, `reset --hard`, or any destructive git operation. If something went wrong, make a new commit that fixes it.
 7. {{PUSH_GUIDANCE}} The policy is resolved from the breadcrumb file `.ralph/push-policy` at iteration start; if you disagree with it, do not override it from inside the loop — surface the disagreement in `.ralph/errors.log` and let the operator adjust the breadcrumb between iterations.
 
@@ -235,7 +235,36 @@ If you would normally tell the operator "I'll paste the failing output below," i
 
 ## Commit message format
 
-`[ralph][speckit] T### <task title>` — T### is the real task ID from `{{TASK_FILE}}` (e.g. `T027`). Never use placeholders like `<description>` or `TODO`. Phase-completion commits use `[ralph][speckit][phase-N] <phase title> complete`.
+Use **Conventional Commits** (<https://www.conventionalcommits.org/>):
+
+```
+<type>(<scope>): <short description> (T###)
+```
+
+- **type** — one of `feat | fix | refactor | test | chore | docs | perf | build | ci | style`. Pick what the task actually does:
+  - `feat` — new user-visible capability
+  - `fix` — bug fix
+  - `refactor` — internal restructure without behaviour change
+  - `test` — test-only additions or changes
+  - `chore` — infra, tooling, deps, no source-code behaviour change
+  - `docs` — documentation
+- **scope** — the module most affected by the change, matching the project's existing convention (e.g. `auth`, `logto`, `api`, `webapp`, `prisma`). Look at recent `git log --oneline` to see the scopes this repo uses. Omit the parens if there's no sensible scope.
+- **short description** — imperative mood, lowercase start, no trailing period, ≤ 60 characters ideally.
+- **(T###)** — the real task ID from `{{TASK_FILE}}` in parentheses at the end of the subject line, e.g. `(T007)`. Keeps git log searchable by task without polluting the type/scope structure. Never use placeholders like `<description>` or `TODO`.
+
+Phase-completion commits use `chore(<phase-slug>): complete <phase title> (phase-N)` — e.g. `chore(us1): complete branded sign-in (phase-4)`.
+
+**No agent-identifying footers.** Never include `Co-authored-by`, `Signed-off-by` for an agent persona, or any other "generated with X" trailer. The commit is the change; metadata about who produced it lives in the PR description, not in git history.
+
+**Examples:**
+
+```
+feat(logto): add seedBranding to apply dMatrix branding via Management API (T006)
+fix(auth): correct SMTP default to empty strings for Mailpit (T003)
+refactor(logto): centralize SMTP_DEFAULTS constant (T003)
+test(logto): add unit coverage for empty-string SMTP auth (T003)
+chore(us1): complete branded sign-in (phase-4)
+```
 
 ## Working directory
 
