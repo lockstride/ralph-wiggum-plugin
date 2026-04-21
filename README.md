@@ -207,7 +207,7 @@ Ralph includes three watchdogs to prevent the loop from hanging indefinitely:
 | Watchdog | Env var | Default | What it does |
 |----------|---------|---------|--------------|
 | **Heartbeat timeout** | `RALPH_HEARTBEAT_TIMEOUT` | 300s | If the stream parser produces no output for this long, kills the agent and retries via DEFER with exponential backoff. Catches API stalls and rate-limit hangs. |
-| **Gate timeout** | `RALPH_GATE_TIMEOUT` (blanket) / `RALPH_BASIC_GATE_TIMEOUT` / `RALPH_FINAL_GATE_TIMEOUT` | 360s basic / 600s final | If a gate command (e.g. `pnpm all-check`) doesn't finish within this time, kills it and returns exit 124. Catches hung nx daemons and build processes. Requires `timeout` (Linux) or `gtimeout` (macOS via `brew install coreutils`). |
+| **Gate timeout** | `RALPH_GATE_TIMEOUT` (blanket) / `RALPH_BASIC_GATE_TIMEOUT` / `RALPH_FINAL_GATE_TIMEOUT` | 600s basic / 900s final | If a gate command (e.g. `pnpm all-check`) doesn't finish within this time, kills it and returns exit 124. Catches hung nx daemons and build processes. Requires `timeout` (Linux) or `gtimeout` (macOS via `brew install coreutils`). |
 | **Read-without-write stall** | `RALPH_MAX_READS_WITHOUT_WRITE` | 25 | If the agent executes this many consecutive Read/Shell operations without any Write/Edit, emits GUTTER. Catches diagnostic loops where the model reads file after file without making progress. |
 
 ## Signals the loop understands
@@ -284,7 +284,7 @@ Commits that introduce lint or formatting issues will be blocked. Bypass with `g
 - **Prompt generation from speckit.implement.md.** When the project has `.claude/commands/speckit.implement.md`, the loop prompt is generated from it using an adaptation guide + hand-tuned exemplar, instead of a static 232-line template. The generated prompt is cached at `<spec_dir>/ralph-prompt.md` and only regenerates when `speckit.implement.md` changes (hash-based invalidation). Falls back to the built-in template for projects without Spec Kit commands.
 - **Trimmed framing prompt.** `build_prompt()` reduced from ~85 lines to ~25 lines. Removed competing instruction sets (naming hygiene, gate invocation contract, Signs/guardrails, zero-baseline duplication, working directory constraints) that overlapped with the generated prompt and caused cognitive overload.
 - **Heartbeat timeout.** If the stream parser produces no output for `RALPH_HEARTBEAT_TIMEOUT` seconds (default 300), the agent is killed and retried via DEFER with exponential backoff. Catches hour-long API stalls.
-- **Gate timeout.** Gate commands are wrapped with `timeout` / `gtimeout`. Per-label defaults: basic/e2e/lint/custom=360s, final=600s (0.3.8). Catches hung nx daemons and build processes that previously blocked the loop for 30+ minutes.
+- **Gate timeout.** Gate commands are wrapped with `timeout` / `gtimeout`. Per-label defaults: basic/e2e/lint/custom=600s, final=900s (0.3.9). Catches hung nx daemons and build processes that previously blocked the loop for 30+ minutes.
 - **Read-without-write stall detection.** New gutter pattern: if the agent executes `RALPH_MAX_READS_WITHOUT_WRITE` (default 25) consecutive Read/Shell operations without any Write/Edit, GUTTER is emitted. Catches degenerate diagnostic loops.
 - **Test infrastructure.** Added behavioral tests using bats-core (30 tests across gate-run, stream-parser, prompt-resolver, and ralph-common). `./lint.sh` runs tests automatically.
 

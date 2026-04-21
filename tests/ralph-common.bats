@@ -374,6 +374,78 @@ EOF
   echo "$out" | grep -q "^jq=alive$"
 }
 
+# ---------------------------------------------------------------------------
+# Read-loop rc capture (0.3.9)
+# ---------------------------------------------------------------------------
+
+@test "while-read-rc: documents the bash gotcha (0.3.9)" {
+  # Regression anchor for the 0.3.9 false-positive PARSER EXIT fix.
+  # Per bash(1): "The exit status of the while and until commands is the
+  # exit status of the last command executed in list-2, or zero if none
+  # was executed." That means `while read; do :; done < fifo; rc=$?` ALWAYS
+  # reports rc=0, regardless of whether read EOF'd (1) or timed out (142).
+  # The pre-0.3.9 run_iteration used that broken idiom, which made the
+  # timeout branch of _classify_heartbeat_exit unreachable and caused
+  # every heartbeat-scale quiet period to surface as a PARSER EXIT.
+  #
+  # This test pins both halves of the story: the broken idiom masks the
+  # status, and the new explicit-break idiom preserves it.
+  local fifo
+  fifo=$(mktemp -u "$BATS_TMPDIR/rc-fifo.XXXXXX")
+  mkfifo "$fifo"
+
+  # Writer opens then closes without writing (FIFO EOF, no data).
+  ( exec 3>"$fifo"; exec 3>&- ) &
+  local writer1=$!
+
+  # Broken idiom — masks EOF as rc=0.
+  local bad_rc
+  while IFS= read -t 5 -r _line; do :; done <"$fifo"
+  bad_rc=$?
+  wait "$writer1" 2>/dev/null || true
+  [ "$bad_rc" -eq 0 ]
+
+  # Explicit-break idiom — preserves EOF rc=1.
+  ( exec 3>"$fifo"; exec 3>&- ) &
+  local writer2=$!
+  local good_rc=0
+  while :; do
+    IFS= read -t 5 -r _line || { good_rc=$?; break; }
+    :
+  done <"$fifo"
+  wait "$writer2" 2>/dev/null || true
+  [ "$good_rc" -eq 1 ]
+
+  rm -f "$fifo"
+}
+
+@test "while-read-rc: explicit-break captures timeout rc (0.3.9)" {
+  # Same idiom, timeout path. Writer holds the FIFO open but writes no
+  # data — read hits its -t timeout. The exact rc value differs by bash
+  # version (bash 5.x returns 128+SIGALRM = 142; bash 3.2 returns 1),
+  # so we only assert it is non-zero — the key invariant for the 0.3.9
+  # fix is that read's rc is *captured* rather than swallowed to 0 by
+  # the while loop's exit-status semantics.
+  local fifo
+  fifo=$(mktemp -u "$BATS_TMPDIR/rc-timeout-fifo.XXXXXX")
+  mkfifo "$fifo"
+
+  ( exec 3>"$fifo"; sleep 5 ) &
+  local writer=$!
+
+  local rc=0
+  while :; do
+    IFS= read -t 1 -r _line || { rc=$?; break; }
+    :
+  done <"$fifo"
+
+  kill "$writer" 2>/dev/null || true
+  wait "$writer" 2>/dev/null || true
+  rm -f "$fifo"
+
+  [ "$rc" -ne 0 ]
+}
+
 @test "_probe_pipeline_stages: detects a live stream-parser child by args (0.3.7)" {
   # A bash wrapper whose args contain "stream-parser.sh" should classify
   # as parser=alive even when comm is just "bash". Use a real pipe so the

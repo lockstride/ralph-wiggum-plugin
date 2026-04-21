@@ -634,7 +634,14 @@ _fmt_iter() {
 #
 # Emits one of the following tokens on stdout:
 #   signalled  — the loop caller set a terminal signal (break/set), honour it
-#   timeout    — read -t expired with no parser output (agent stalled)
+#   timeout    — read -t expired with no parser output (agent stalled).
+#                Only distinguishable on bash ≥ 4.0, where `read -t` returns
+#                128+SIGALRM (142) on timeout. On bash 3.2 (macOS /bin/bash)
+#                timeout and EOF both return 1, so the "timeout" label is
+#                never emitted there — both paths fall through to "eof",
+#                where the agent-liveness probe still dispatches correctly
+#                (agent-alive = treat as heartbeat-scale stall, agent-dead
+#                = natural end).
 #   eof        — FIFO hit EOF; could be a clean natural end OR a wedged
 #                agent whose parser/jq pipeline crashed independently.
 #                Caller must probe agent-pid liveness to disambiguate
@@ -642,8 +649,16 @@ _fmt_iter() {
 #                unconditionally treated as a parser crash and DEFERred,
 #                which mis-classified every normal iteration end.
 #
+# IMPORTANT (0.3.9): the caller must capture `read`'s actual exit status,
+# not the while-loop's. `while read; do :; done <fifo; rc=$?` silently
+# reports rc=0 because bash defines `while`'s exit as "the exit status of
+# the last command executed in list-2, or zero if none was executed" —
+# every case arm in the body returns 0, so the real EOF/timeout status
+# was being swallowed. See run_iteration's `|| { _read_rc=$?; break; }`
+# idiom for the correct capture.
+#
 # Args:
-#   $1 — exit status captured immediately after `done <"$fifo"`
+#   $1 — exit status of the most recent `read` call (NOT the while loop)
 #   $2 — current signal string (may be empty)
 _classify_heartbeat_exit() {
   local rc="$1"
@@ -652,7 +667,8 @@ _classify_heartbeat_exit() {
     echo "signalled"
     return
   fi
-  # read -t returns >128 on timeout (128 + signal number).
+  # read -t returns >128 on timeout in bash ≥ 4.0 (128+SIGALRM). Bash 3.2
+  # returns 1 for both EOF and timeout — see docstring note above.
   if [[ "$rc" -gt 128 ]]; then
     echo "timeout"
     return
@@ -865,7 +881,29 @@ run_iteration() {
   local heartbeat="${RALPH_HEARTBEAT_TIMEOUT:-300}"
 
   local signal=""
-  while IFS= read -t "$heartbeat" -r line; do
+  # 0.3.9: capture `read`'s ACTUAL exit status.
+  #
+  # The previous `while read; do ... done <"$fifo"; rc=$?` idiom looked
+  # right but was silently broken. Per bash(1): "The exit status of the
+  # while and until commands is the exit status of the last command
+  # executed in list-2, or zero if none was executed." Every case arm in
+  # the loop body ends in `;;` and returns 0, and a `case` with no match
+  # also returns 0 — so `$?` after `done` was always 0, never 1 (EOF) or
+  # 142 (timeout). That made the "timeout" branch in _classify_heartbeat_exit
+  # completely unreachable, routed every heartbeat-timeout through the
+  # "eof" branch, and caused false-positive PARSER EXIT events roughly
+  # every RALPH_HEARTBEAT_TIMEOUT seconds (5–6 min cadence in the field).
+  #
+  # The fix here makes `read`'s exit status observable: we break out of
+  # the loop explicitly when read returns non-zero, and stash the real
+  # rc in _read_rc at that moment. Now 1 is EOF, 142+ is timeout, and
+  # the classifier routes correctly.
+  local _read_rc=0
+  while :; do
+    IFS= read -t "$heartbeat" -r line || {
+      _read_rc=$?
+      break
+    }
     case "$line" in
       "ROTATE")
         [[ -t 2 ]] && printf "\r\033[K" >&2
@@ -921,8 +959,6 @@ run_iteration() {
         ;;
     esac
   done <"$fifo"
-  # shellcheck disable=SC2181
-  local _read_rc=$?
 
   local exit_class
   exit_class=$(_classify_heartbeat_exit "$_read_rc" "$signal")

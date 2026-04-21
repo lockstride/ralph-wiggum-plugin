@@ -104,34 +104,35 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 @test "basic gate uses RALPH_BASIC_GATE_TIMEOUT default (0.3.5)" {
-  # Default basic timeout is 360 s (0.3.8) — override to 2 s to trip it
+  # Default basic timeout is 600 s (0.3.9) — override to 2 s to trip it
   RALPH_BASIC_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" basic sleep 30
   [ "$status" -eq 124 ]
 }
 
 @test "final gate uses RALPH_FINAL_GATE_TIMEOUT default (0.3.5)" {
-  # Default final timeout is 600 s (0.3.8) — override to 2 s so it hits timeout
+  # Default final timeout is 900 s (0.3.9) — override to 2 s so it hits timeout
   RALPH_FINAL_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" final sleep 30
   [ "$status" -eq 124 ]
 }
 
 @test "RALPH_GATE_TIMEOUT overrides per-label defaults (0.3.5)" {
-  # Even though final default is 600, the blanket override takes precedence
+  # Even though final default is 900, the blanket override takes precedence
   RALPH_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" final sleep 30
   [ "$status" -eq 124 ]
 }
 
-@test "basic default timeout is 360s and final is 600s (0.3.8)" {
-  # Regression test for the 0.3.8 default re-target (basic 300→360,
-  # final 900→600 — 2× measured monorepo runtimes). Verifies the help
-  # text, the env-var documentation, and the live resolution all agree,
-  # so a future edit to just one site can't silently diverge.
-  grep -q 'Default timeout 360 s' "$SCRIPTS_DIR/gate-run.sh"
+@test "basic default timeout is 600s and final is 900s (0.3.9)" {
+  # Regression test for the 0.3.9 default re-target (basic 360→600,
+  # final 600→900 — sized for agent-mode red-state iterations where
+  # failing tests slow the gate ~2× over green-path clean runs).
+  # Verifies the help text, env-var docs, and live resolution all
+  # agree, so a future edit to just one site can't silently diverge.
   grep -q 'Default timeout 600 s' "$SCRIPTS_DIR/gate-run.sh"
-  grep -q 'RALPH_FINAL_GATE_TIMEOUT.*default 600' "$SCRIPTS_DIR/gate-run.sh"
-  grep -q 'RALPH_BASIC_GATE_TIMEOUT.*default 360' "$SCRIPTS_DIR/gate-run.sh"
-  grep -qE 'RALPH_FINAL_GATE_TIMEOUT:-600' "$SCRIPTS_DIR/gate-run.sh"
-  grep -qE 'RALPH_BASIC_GATE_TIMEOUT:-360' "$SCRIPTS_DIR/gate-run.sh"
+  grep -q 'Default timeout 900 s' "$SCRIPTS_DIR/gate-run.sh"
+  grep -q 'RALPH_FINAL_GATE_TIMEOUT.*default 900' "$SCRIPTS_DIR/gate-run.sh"
+  grep -q 'RALPH_BASIC_GATE_TIMEOUT.*default 600' "$SCRIPTS_DIR/gate-run.sh"
+  grep -qE 'RALPH_FINAL_GATE_TIMEOUT:-900' "$SCRIPTS_DIR/gate-run.sh"
+  grep -qE 'RALPH_BASIC_GATE_TIMEOUT:-600' "$SCRIPTS_DIR/gate-run.sh"
 }
 
 @test "custom label falls through to basic default (0.3.5)" {
