@@ -1,8 +1,24 @@
-# Ralph × Spec Kit: Phase-Level Implementation
+# Ralph × Spec Kit: Run-to-Completion Implementation
 
-You are executing a Spec Kit spec using the Ralph methodology. The unit of
-work for one iteration is an **entire Spec Kit phase**, not a single task.
-Assume you are running unattended in a clean worktree on a 1M-context model.
+You are executing a Spec Kit spec using the Ralph methodology. **Work every
+remaining unchecked task across every remaining phase in a single iteration.**
+Do not stop at phase boundaries. The loop handles context rotation, rate
+limits, and genuine stuck patterns for you — your job is to make forward
+progress continuously, commit after every completed task, and only yield
+when one of the following actually happens:
+
+- **`ALL_TASKS_DONE`** — every `[ ]` in `{{TASK_FILE}}` is now `[x]` and the
+  final gate is green. Emit `<promise>ALL_TASKS_DONE</promise>` and exit.
+- **Rotation** — the loop tells you a token threshold is imminent via a
+  `WARN` prompt injection. Wrap up the current commit and exit cleanly.
+- **Stop requested** — `.ralph/stop-requested` exists (operator or loop is
+  asking you to yield). Finish the current commit and exit cleanly.
+- **Genuinely blocked** — you've hit the Blocked-phase protocol's criteria.
+  Emit `<ralph>GUTTER</ralph>` and exit.
+
+Running unattended, assume a fresh worktree on whichever model size the
+loop selected — the rotation threshold is tuned to the model's context
+window, so you can work as long as you have useful work to do.
 
 ## Paths (resolved by the loop)
 
@@ -108,16 +124,16 @@ This is the fallback path used when `.ralph/handoff.md` is absent or invalid:
 
 Each iteration is a fresh process with no memory of prior iterations. Rely on `git log`, `tasks.md` checkboxes, the handoff file, and the current code state — **not** on a narrative of what you "already read."
 
-## One-phase-per-iteration rule (hard)
+## Run-to-completion rule (hard)
 
-- **Pick the next unchecked phase** in `{{TASK_FILE}}`. A "phase" is a `## Phase N: …` section (Setup, Foundational, or a single user story US1/US2/…).
-- **Work every unchecked task in that phase** within this iteration. Do not stop after a single task and do not skip to the next phase until every task in the current phase is checked and the phase gate is green.
-- If `{{TASK_FILE}}` contains ultra-fine-grained atomic TDD pairs (e.g. `Write failing test for X` followed by `Implement X`), **batch them**: write the failing test and the implementation in the same iteration, producing one commit per conceptual unit. Do not split those pairs across iterations.
-- If the entire phase is genuinely too large to fit in one iteration (rare — the 1M-context window can hold an entire user story), complete as many contiguous tasks as you can, commit your progress, and stop. The next iteration will pick up from your last commit.
+- **Start at the next unchecked task** in `{{TASK_FILE}}`. Respect phase ordering (Setup → Foundational → US1 → US2 → …) — do not skip ahead — but **do not stop at phase boundaries either**. When every task in a phase is `[x]` and its gate is green, advance into the next phase in the same iteration.
+- **Keep going** until one of the stop conditions in the preamble fires (ALL_TASKS_DONE, WARN/rotation, `.ralph/stop-requested`, or GUTTER). Commit after every task so any involuntary kill is recoverable from the last commit.
+- **Check `.ralph/stop-requested` after every commit.** If it exists, finish your current tool sequence (no new task), flush any dirty edits into a final commit if appropriate, emit no more tool calls, and exit. The operator or loop is asking you to yield cleanly.
+- If `{{TASK_FILE}}` contains ultra-fine-grained atomic TDD pairs (e.g. `Write failing test for X` followed by `Implement X`), **batch them**: write the failing test and the implementation together, producing one commit per conceptual unit. Do not split those pairs.
 
-## Task execution loop (inside a phase)
+## Task execution loop
 
-For each unchecked task in the phase, in order:
+For each unchecked task, in order:
 
 1. **Understand** — read only the files the task references.
 2. **Implement** — make the minimum change. For test+implementation pairs, write the failing test first (TDD red), then the implementation (green), all in this task (red→green in one commit).
@@ -136,11 +152,11 @@ For each unchecked task in the phase, in order:
 5. **Checklist gate** — scan `{{SPEC_DIR}}/checklists/` for unchecked items that block this task. If any exist, flag them in `.ralph/errors.log` and stop (do not mark complete).
 6. **Mark complete** — edit `{{TASK_FILE}}` and change `[ ]` → `[x]` for this task. Before you do, **self-check the zero-baseline rule**: did the gate you ran for this task exit 0 in **this** iteration? If not — if any test is red, any lint failed, any type error remains — **do not flip the checkbox**. Fix the failure or escalate via `<ralph>GUTTER</ralph>`. "Unrelated" / "pre-existing" failures are never a valid excuse; see the Zero-baseline assumption above.
 7. **Commit** — `git commit -m "[ralph][speckit] T### <task title>"`. Use the real task ID and title. Stage only the files you touched for this task (see Git Protocol below — **never use `git add .` / `git add -A` / `git add <directory>`**).
-8. **Continue** to the next task in the same phase. Do not stop until the phase is complete or you are genuinely blocked.
+8. **Continue** to the next task. Do not stop at task boundaries, and do not stop at phase boundaries. Only stop when one of the preamble's stop conditions fires.
 
-## Phase completion protocol
+## Phase-boundary verification protocol
 
-After every task in the current phase is checked:
+When you reach the end of a phase (every task in it is `[x]`), before advancing to the next phase:
 
 1. **Decide whether the phase gate needs to run**:
    - If the **last task's gate was the basic gate**, run `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}` now. The phase as a whole has not yet been verified at the full-gate level.
@@ -148,6 +164,7 @@ After every task in the current phase is checked:
 2. If you ran the phase gate and it failed: the phase is not complete. **Diagnose via `.ralph/gates/final-latest.log` — do not re-run the gate to "see more."** Use the `Read` and `Grep` tools against that file (see Failure diagnosis protocol above). Check commits from this iteration (`git log --oneline -10`, `git show HEAD`, `git show HEAD~1`) and fix the regression in this same iteration before moving on. Re-run the final gate **exactly once** after the fix. Never mark a phase complete with a red final check.
 3. When the gate is green, commit any residual changes with `git commit -m "[ralph][speckit][phase-N] <phase title> complete"`. If there are no residual changes, skip this commit — every task already committed its own work.
 4. Apply the push policy defined in the Git Protocol section (rule 7 below). Do **not** assume pushing is desired — many projects treat feature branches as local-only. If the policy is `never`, skip this step entirely.
+5. **Advance into the next phase in the same iteration.** The phase gate succeeded — there is no reason to hand off to a fresh iteration just because you finished a phase. Keep going until a preamble stop condition fires.
 
 ## Git Protocol (hard rules)
 
@@ -235,4 +252,4 @@ If a step fails, check `.ralph/errors.log` and `.ralph/guardrails.md` for a patt
 
 ---
 
-Begin by finding the next unchecked phase in `{{TASK_FILE}}` and working every task in that phase end-to-end.
+Begin by finding the next unchecked task in `{{TASK_FILE}}` and working task-by-task through every remaining unchecked task, across every remaining phase, until a preamble stop condition fires.

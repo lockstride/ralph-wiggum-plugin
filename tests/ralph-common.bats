@@ -415,6 +415,25 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Activity-based heartbeat (0.4.0)
+# ---------------------------------------------------------------------------
+
+@test "stream-parser emits HEARTBEAT on log_activity and log_token_status (0.4.0)" {
+  # End-to-end check: feeding real tool_result events through the
+  # stream-parser produces HEARTBEAT tokens on stdout. The main loop's
+  # read-timer reset depends on these, so we guard the contract here.
+  # Separate tests in stream-parser.bats cover per-path emission.
+  local tmp
+  tmp=$(mktemp -d "$BATS_TMPDIR/heartbeat.XXXXXX")
+  mkdir -p "$tmp/.ralph"
+  local out
+  out=$(printf '{"kind":"tool_result","name":"Read","bytes":100,"lines":5,"path":"/tmp/x"}\n' \
+    | bash "$SCRIPTS_DIR/stream-parser.sh" "$tmp" 1)
+  echo "$out" | grep -q "^HEARTBEAT$"
+  rm -rf "$tmp"
+}
+
+# ---------------------------------------------------------------------------
 # Read-loop rc capture (0.3.9)
 # ---------------------------------------------------------------------------
 

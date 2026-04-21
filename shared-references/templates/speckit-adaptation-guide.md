@@ -91,20 +91,21 @@ read it first. Trust its file pointers and architectural facts.
    - **REQUIRED**: Read `{{TASK_FILE}}` and `{{PLAN_FILE}}`
    - **IF EXISTS**: Read data-model.md, contracts/, research.md, quickstart.md
 
-4. **Find the next unchecked phase** in `{{TASK_FILE}}`. A phase is a `## Phase N:` section. Work every unchecked task in that phase before stopping.
+4. **Find the next unchecked task** in `{{TASK_FILE}}`. Respect phase ordering (Setup → Foundational → US1 → US2 → …), but **do not stop at phase boundaries**. Work every remaining unchecked task across every remaining phase in a single iteration. Only yield when `ALL_TASKS_DONE`, a rotation WARN, `.ralph/stop-requested`, or a GUTTER condition fires.
 
-5. **For each unchecked task in the phase:**
+5. **For each unchecked task:**
    a. Read only the files the task references
    b. Follow TDD: write failing test first, then implementation
    c. Run the appropriate gate via `{{GATE_RUN}}`:
       - Final gate for risky changes (module wiring, auth, DB schema, barrel exports)
       - Basic gate for everything else
       - Never pipe or redirect gate output — the wrapper handles logging
-   d. If gate fails: read `.ralph/gates/<label>-latest.log` to diagnose. Fix and re-run once. If still failing after two attempts, emit `<ralph>GUTTER</ralph>`
+   d. If gate fails: read `.ralph/gates/<label>-latest.log` to diagnose. Fix and re-run. You have a 3-try budget per task before emitting `<ralph>GUTTER</ralph>`; a single failure is a normal debug step, not a stuck pattern.
    e. Mark task `[x]` in `{{TASK_FILE}}`
    f. Commit: `git add <explicit file paths> && git commit -m "[ralph][speckit] T### <title>"`
+   g. Check `.ralph/stop-requested` — if it exists, yield cleanly (no new task); otherwise continue to the next unchecked task (across phase boundaries as needed).
 
-6. **Phase complete**: After all tasks in the phase are checked, run the final gate if the last task only ran the basic gate. Commit any residual changes.
+6. **Phase-boundary verification**: When every task in the current phase is `[x]`, run the final gate if the last task only ran the basic gate. Commit any residual changes. Then **advance into the next phase in the same iteration** — do not hand off to a fresh iteration just because the phase is done.
 
 7. **Progress tracking**:
    - Mark completed tasks as `[x]` in `{{TASK_FILE}}`

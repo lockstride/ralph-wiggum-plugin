@@ -70,6 +70,18 @@ RECOVERY_HINT_FILE="$RALPH_DIR/recovery-hint.md"
 CONSECUTIVE_READS=0
 MAX_READS_WITHOUT_WRITE="${RALPH_MAX_READS_WITHOUT_WRITE:-40}"
 
+# 0.4.0: Stuck-pattern thresholds. Pre-0.4.0 these were hardcoded at 2
+# (shell-fail) and 5 (file-thrash) in the body of their respective
+# detectors, which killed agents on the most ordinary red-state workflow:
+# run gate, read log, make targeted fix, re-run gate — if the fix didn't
+# work, that was attempt #2 and the loop killed the iteration with no
+# third try. The new 4 / 5 defaults give the agent a realistic debug
+# budget without letting genuine infinite loops run forever. Raise via
+# env var for longer debug sessions, lower (back to 2) for aggressive
+# bail-out behaviour.
+SHELL_FAIL_THRESHOLD="${RALPH_SHELL_FAIL_THRESHOLD:-4}"
+FILE_THRASH_THRESHOLD="${RALPH_FILE_THRASH_THRESHOLD:-5}"
+
 get_health_emoji() {
   local tokens=$1
   local pct=$((tokens * 100 / ROTATE_THRESHOLD))
@@ -87,6 +99,20 @@ calc_tokens() {
   echo $((total_bytes / 4))
 }
 
+# 0.4.0: emit a HEARTBEAT token to stdout so the main loop's `read -t`
+# timer resets on any real parser activity, not just on the narrow set
+# of control signals (ROTATE/COMPLETE/…). Decouples heartbeat-alive from
+# commit-cadence — a quietly productive agent keeps the heartbeat fresh
+# via reads / shells / token updates, and only a truly stalled agent
+# (no stream-json from claude) trips the timeout. Before 0.4.0 the
+# heartbeat was effectively measuring "time since last commit" and
+# would kill an agent doing legitimate multi-minute work between
+# commits. Kept separate so every stdout-emitting site in this file
+# can call it without repeating the `2>/dev/null || true`.
+_emit_heartbeat() {
+  echo "HEARTBEAT" 2>/dev/null || true
+}
+
 log_activity() {
   local message="$1"
   local timestamp
@@ -96,6 +122,7 @@ log_activity() {
   local emoji
   emoji=$(get_health_emoji "$tokens")
   echo "[$timestamp] $emoji $message" >>"$RALPH_DIR/activity.log"
+  _emit_heartbeat
 }
 
 log_error() {
@@ -123,6 +150,9 @@ log_token_status() {
 
   local breakdown="[read:$((BYTES_READ / 1024))KB write:$((BYTES_WRITTEN / 1024))KB assist:$((ASSISTANT_CHARS / 1024))KB shell:$((SHELL_OUTPUT_CHARS / 1024))KB]"
   echo "[$timestamp] $emoji $status_msg $breakdown" >>"$RALPH_DIR/activity.log"
+  # 0.4.0: emit heartbeat so the main loop's read timer resets on every
+  # token-status update (fires every 30s on any claude activity).
+  _emit_heartbeat
 }
 
 wrap_line() {
@@ -262,7 +292,12 @@ track_shell_failure() {
     # kills the agent and re-spawns it with a recovery hint prepended).
     # Second trip in the same iteration falls through to GUTTER — the
     # agent already had its one chance.
-    if [[ $count -ge 2 ]]; then
+    #
+    # 0.4.0: threshold raised from 2 → 4 (configurable via
+    # RALPH_SHELL_FAIL_THRESHOLD) so a normal red-state debug loop
+    # (run gate → read log → fix → re-run) doesn't burn its only
+    # recovery attempt on the first real iteration.
+    if [[ $count -ge $SHELL_FAIL_THRESHOLD ]]; then
       if [[ $RECOVERY_ATTEMPTED -eq 0 ]]; then
         _write_recovery_hint_shell "$cmd" "$exit_code"
         log_error "🔁 RECOVERABLE STUCK PATTERN: same command failed ${count}x — emitting RECOVER_ATTEMPT"
@@ -305,7 +340,7 @@ track_file_write() {
     $1 >= cutoff && $2 == path { count++ }
     END { print count+0 }
   ' "$WRITES_FILE")
-  if [[ $count -ge 5 ]]; then
+  if [[ $count -ge $FILE_THRASH_THRESHOLD ]]; then
     log_error "THRASHING: $path written ${count}x in 10 min"
     # 0.3.0: First trip in an iteration emits RECOVER_ATTEMPT; second
     # trip falls through to GUTTER. See track_shell_failure for rationale.

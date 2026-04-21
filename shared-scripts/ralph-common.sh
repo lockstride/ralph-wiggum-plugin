@@ -452,6 +452,8 @@ Do **not** read \`.ralph/activity.log\` (human monitoring only).
 - Never \`--amend\`, \`--force\`, or \`reset --hard\`. Fix mistakes with a new commit.
 - At session end, write \`.ralph/handoff.md\` (< 30 lines, navigation pointers only).
 - If context is running low, finish current edit, commit, and stop cleanly.
+- **Work every remaining unchecked task across every remaining phase** in this iteration. Do not stop at phase boundaries — the loop handles rotation and rate limits for you. Only yield on \`ALL_TASKS_DONE\`, rotation WARN, \`.ralph/stop-requested\`, or genuine GUTTER (0.4.0).
+- **After every commit, check whether \`.ralph/stop-requested\` exists.** If it does, the loop is asking you to yield cleanly: finish no new task, flush any dirty edits into a final commit if appropriate, and exit. Do not remove the marker — the loop clears it at next iteration start.
 $gate_block
 
 ## Task Execution
@@ -828,12 +830,77 @@ run_iteration() {
   # can flag any untracked files the agent commits.
   _capture_iteration_baseline "$workspace"
 
+  # 0.4.0: clear any leftover stop-requested marker from a prior
+  # iteration. The marker is the gentle-DEFER cooperation channel
+  # (see the DEFER case below) and must be absent at iteration start
+  # or the agent would bail out on its first commit.
+  rm -f "$workspace/.ralph/stop-requested" 2>/dev/null || true
+
   local fifo="$workspace/.ralph/.parser_fifo"
   local spinner_pid="" agent_pid="" norm_filter=""
+  local orphan_claims="$workspace/.ralph/.orphan-claims.pid"
+
+  # 0.4.0: at iteration start, mop up any pids left behind by a prior
+  # iteration that didn't clean up properly (e.g. killed mid-DEFER, or
+  # its trap fired before children were fully reaped). Each ralph
+  # iteration records its pipeline-stage pids to .orphan-claims.pid;
+  # on the next start we sweep that file, SIGKILL anything still
+  # running, and clear it. Without this, stale claude processes
+  # accumulate across DEFER cycles — seen repeatedly in field runs
+  # where kill -- -$agent_pid failed to reach grandchildren under
+  # certain process-group configurations.
+  if [[ -r "$orphan_claims" ]]; then
+    local _stale_pid
+    while IFS= read -r _stale_pid; do
+      [[ -z "$_stale_pid" ]] && continue
+      if kill -0 "$_stale_pid" 2>/dev/null; then
+        log_activity "$workspace" "🧹 ORPHAN SWEEP — SIGKILL stale pid $_stale_pid from prior iteration"
+        kill -9 "$_stale_pid" 2>/dev/null || true
+      fi
+    done <"$orphan_claims"
+    rm -f "$orphan_claims"
+  fi
 
   # shellcheck disable=SC2329 # invoked indirectly via trap
   _iteration_cleanup() {
+    # 0.4.0: strict reaping with explicit escalation ladder. The old
+    # path relied on a single `kill -- -$agent_pid` which silently
+    # failed to reach grandchildren under some process-group configs,
+    # leaving stale `claude` processes alive across retries. We now:
+    #   1. Enumerate current descendants of the subshell via pgrep -P.
+    #   2. SIGTERM each, wait briefly for voluntary exit.
+    #   3. SIGKILL any survivors.
+    #   4. Mop up anything still rooted at agent_pid with pkill -9.
+    #   5. Record all tracked pids to .orphan-claims.pid as a safety
+    #      net — the NEXT iteration's start-sweep picks up anything
+    #      that still survived all of this.
+    local _descendants _pid
+    _descendants=$(pgrep -P "$agent_pid" 2>/dev/null || true)
+    # SIGTERM sweep
+    for _pid in $_descendants; do
+      kill "$_pid" 2>/dev/null || true
+    done
+    # Targeted subshell kill (original behaviour, kept for hitting pg leader)
     kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+    # Brief grace for voluntary exit
+    sleep 1
+    # SIGKILL survivors
+    for _pid in $_descendants; do
+      if kill -0 "$_pid" 2>/dev/null; then
+        kill -9 "$_pid" 2>/dev/null || true
+      fi
+    done
+    # Broad mop-up on anything still rooted at the subshell
+    pkill -9 -P "$agent_pid" 2>/dev/null || true
+
+    # Record remaining pids for the next iteration's orphan sweep.
+    : >"$orphan_claims"
+    for _pid in $_descendants $agent_pid; do
+      if kill -0 "$_pid" 2>/dev/null; then
+        echo "$_pid" >>"$orphan_claims"
+      fi
+    done
+
     kill "$spinner_pid" 2>/dev/null || true
     wait "$agent_pid" 2>/dev/null || true
     wait "$spinner_pid" 2>/dev/null || true
@@ -920,6 +987,16 @@ run_iteration() {
       break
     }
     case "$line" in
+      "HEARTBEAT")
+        # 0.4.0: no-op control token. Stream-parser emits HEARTBEAT on
+        # every log_activity / log_token_status so this read iterates
+        # fast enough that the `read -t` timer never expires while the
+        # agent is productive. The timer exists to catch truly stalled
+        # agents (no stream-json from claude at all), not quiet work
+        # between commits — this branch is what makes the distinction
+        # observable in the read loop.
+        :
+        ;;
       "ROTATE")
         [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "🔄 Context rotation triggered — stopping agent..." >&2
@@ -968,9 +1045,23 @@ run_iteration() {
         ;;
       "DEFER")
         [[ -t 2 ]] && printf "\r\033[K" >&2
-        echo "⏸️  Rate limit or transient error — deferring for retry..." >&2
+        echo "⏸️  Rate limit or transient error — requesting graceful stop..." >&2
         signal="DEFER"
-        kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+        # 0.4.0: gentle DEFER. Writing .ralph/stop-requested lets the
+        # agent (per its prompt) finish its current tool sequence —
+        # usually a commit — and exit on its own terms. A background
+        # timer force-kills after RALPH_DEFER_GRACE seconds if the agent
+        # is wedged on a network call and can't check the marker. Saves
+        # in-flight commits that were previously torn up by the
+        # immediate kill on every rate-limit blip.
+        touch "$workspace/.ralph/stop-requested" 2>/dev/null || true
+        (
+          sleep "${RALPH_DEFER_GRACE:-30}"
+          if kill -0 "$agent_pid" 2>/dev/null; then
+            log_activity "$workspace" "⏰ DEFER GRACE EXPIRED — force-killing after ${RALPH_DEFER_GRACE:-30}s"
+            kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+          fi
+        ) &
         ;;
     esac
   done <"$fifo"
@@ -1074,6 +1165,17 @@ run_iteration() {
   wait "$spinner_pid" 2>/dev/null || true
   [[ -t 2 ]] && printf "\r\033[K" >&2
   rm -f "$fifo"
+
+  # 0.4.0: mop-up any reparented-to-init claude CLI that escaped the
+  # process-group kill. The agent's argv contains the workspace path
+  # (resolved via {{TASK_FILE}} in the prompt) — scoping on that avoids
+  # killing a concurrent ralph loop in another worktree. Handles the
+  # case where kill -- -$agent_pid fails to reach a grandchild;
+  # previously those survived as orphans holding API auth state and
+  # consuming memory across retries. If anything survives even this,
+  # the next iteration's orphan-sweep (orphan_claims at run_iteration
+  # start) picks up the pieces.
+  pkill -9 -f "$workspace.*Ralph Iteration" 2>/dev/null || true
 
   # Restore previous trap
   if [[ -n "$_prev_trap" ]]; then
