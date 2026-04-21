@@ -84,8 +84,8 @@ Configurable via `RALPH_GATE_TAIL` (default 60) and `RALPH_GATE_FAIL_HEAD` (defa
 | `RALPH_GATE_TAIL`          | `60`                 | Lines of tail included in the summary.                                           |
 | `RALPH_GATE_FAIL_HEAD`     | `80`                 | Failure-match lines in the summary.                                              |
 | `RALPH_GATE_TIMEOUT`       | *(unset)*            | Blanket timeout override (seconds). Wins over the per-label vars below.          |
-| `RALPH_FINAL_GATE_TIMEOUT` | `900`                | Timeout when `label=final`.                                                      |
-| `RALPH_BASIC_GATE_TIMEOUT` | `300`                | Timeout for every other label.                                                   |
+| `RALPH_FINAL_GATE_TIMEOUT` | `600`                | Timeout when `label=final`.                                                      |
+| `RALPH_BASIC_GATE_TIMEOUT` | `360`                | Timeout for every other label.                                                   |
 
 The timeout mechanism prefers GNU `timeout`, falls back to `gtimeout` (macOS via `brew install coreutils`), and degrades to no timeout if neither is installed. The degraded case is explicit — the wrapper does not pretend to enforce a limit it can't.
 

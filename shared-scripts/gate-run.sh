@@ -59,11 +59,11 @@ WHY
     • Maintains a .ralph/gates/<label>-latest.log pointer for quick reading
 
 LABELS (fixed set — pick the closest match; use 'custom' for anything else)
-  basic   Fast pre-commit gate (format, lint, unit tests). Default timeout 300 s.
-  final   Full verification gate (basic + integration/E2E). Default timeout 900 s.
-  e2e     Targeted E2E / browser / container suite. Default timeout 300 s.
-  lint    Lint-only or type-check-only runs. Default timeout 300 s.
-  custom  Anything that does not fit the four above. Default timeout 300 s.
+  basic   Fast pre-commit gate (format, lint, unit tests). Default timeout 360 s.
+  final   Full verification gate (basic + integration/E2E). Default timeout 600 s.
+  e2e     Targeted E2E / browser / container suite. Default timeout 360 s.
+  lint    Lint-only or type-check-only runs. Default timeout 360 s.
+  custom  Anything that does not fit the four above. Default timeout 360 s.
 
 EXAMPLES
   gate-run.sh basic pnpm basic-check
@@ -87,8 +87,8 @@ ENVIRONMENT
   RALPH_GATE_FAIL_HEAD  Failure-match lines in the summary (default 80).
   RALPH_GATE_TIMEOUT    Blanket timeout override (seconds) for any label.
                         Takes precedence over the per-label vars below.
-  RALPH_FINAL_GATE_TIMEOUT  Timeout for label=final   (default 900).
-  RALPH_BASIC_GATE_TIMEOUT  Timeout for every other label (default 300).
+  RALPH_FINAL_GATE_TIMEOUT  Timeout for label=final   (default 600).
+  RALPH_BASIC_GATE_TIMEOUT  Timeout for every other label (default 360).
 
 FAILURE-PATTERN MATCHING
   On completion the wrapper greps the log for common failure signatures
@@ -190,22 +190,34 @@ start_epoch=$(date +%s)
 # waiting forever.
 #
 # 0.3.5: Per-label defaults. Final gates (pnpm all-check, full E2E suites)
-# are empirically 3–5× slower than basic gates (lint + unit tests). A
-# single 300 s default caused chronic timeouts on final gates, forcing
-# agents to misread "exit 124" as a test failure when the gate simply
-# hadn't finished. Env vars cascade:
+# are empirically 3–5× slower than basic gates (lint + unit tests).
 #
-#   RALPH_FINAL_GATE_TIMEOUT  → used when label=final  (default 900)
-#   RALPH_BASIC_GATE_TIMEOUT  → used when label=basic  (default 300)
+# 0.3.8: Defaults re-targeted to ~2× measured monorepo runtimes after
+# field reports of repeated GATE TIMEOUT on `pnpm basic-check` at 300 s.
+# Observed real-time runtimes on an 8-project nx/pnpm monorepo (dmatrix
+# refactor-152733):
+#
+#   basic  ~3 min → 360 s timeout  (2× buffer)
+#   final  ~5 min → 600 s timeout  (2× buffer)
+#
+# The old 300 s basic default had less than 2× the measured runtime;
+# cold caches or a single flaky test file tipped it into exit 124 and
+# agents retried, burning tokens on gates that simply had not finished.
+# The old 900 s final default was overkill for projects this size.
+#
+# Env vars cascade:
+#
+#   RALPH_FINAL_GATE_TIMEOUT  → used when label=final  (default 600)
+#   RALPH_BASIC_GATE_TIMEOUT  → used when label=basic  (default 360)
 #   RALPH_GATE_TIMEOUT        → blanket override for any label (no default;
 #                                takes precedence over the per-label vars
 #                                when set, for backward compat)
 if [[ -n "${RALPH_GATE_TIMEOUT:-}" ]]; then
   gate_timeout="$RALPH_GATE_TIMEOUT"
 elif [[ "$label" == "final" ]]; then
-  gate_timeout="${RALPH_FINAL_GATE_TIMEOUT:-900}"
+  gate_timeout="${RALPH_FINAL_GATE_TIMEOUT:-600}"
 else
-  gate_timeout="${RALPH_BASIC_GATE_TIMEOUT:-300}"
+  gate_timeout="${RALPH_BASIC_GATE_TIMEOUT:-360}"
 fi
 
 # Resolve the timeout command portably (GNU timeout on Linux,
