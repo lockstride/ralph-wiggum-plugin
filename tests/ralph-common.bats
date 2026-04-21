@@ -374,6 +374,46 @@ EOF
   echo "$out" | grep -q "^jq=alive$"
 }
 
+@test "_probe_pipeline_stages: zombie children report as dead (0.3.10)" {
+  # Regression for the 0.3.10 zombie-filter fix. When stream-parser exits
+  # immediately after EOF-ing on jq's stdout, its pid enters Z state until
+  # the enclosing subshell `wait`s on it. The pre-0.3.10 probe used
+  # `pgrep -P` + `ps -o comm=` without checking state and reported the
+  # zombie as "alive", which tripped the PARSER EXIT false-positive on
+  # otherwise-clean natural ends (FIFO EOF with rc=1). Filtering STAT=Z
+  # in the probe gives an accurate picture.
+  #
+  # We simulate this by backgrounding a subshell whose only child exits
+  # immediately. The child becomes a zombie (not reaped until we wait on
+  # the outer subshell). During that window the probe must treat it as
+  # dead, not alive.
+  (
+    # Single-line command would be exec-optimized; pipe forces a real
+    # child process. That child (`true`) exits instantly and becomes a
+    # zombie until the outer subshell (us) reaps it.
+    true | sleep 0.5
+  ) &
+  local pid=$!
+  # Wait for the child to spawn and `true` to exit. A short sleep is
+  # enough — we want to probe while sleep is still alive and `true` is
+  # a zombie.
+  sleep 0.1
+
+  local out
+  out=$(_probe_pipeline_stages "$pid")
+
+  kill -9 "$pid" 2>/dev/null || true
+  pkill -9 -P "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  # The probe should NOT count the zombie `true` as alive. `sleep` is
+  # still alive but it isn't claude/jq/parser, so none of those flags
+  # should fire — all three should be dead.
+  echo "$out" | grep -q "^claude=dead$"
+  echo "$out" | grep -q "^jq=dead$"
+  echo "$out" | grep -q "^parser=dead$"
+}
+
 # ---------------------------------------------------------------------------
 # Read-loop rc capture (0.3.9)
 # ---------------------------------------------------------------------------

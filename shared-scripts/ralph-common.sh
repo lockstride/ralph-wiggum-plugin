@@ -743,10 +743,25 @@ _probe_pipeline_stages() {
   # Walk direct children; classify by short comm first, fall back to full args.
   # pgrep -P returns direct children only — perfect for `a | b | c` inside
   # a subshell where a, b, c are all direct children of the subshell.
+  #
+  # 0.3.10: filter out zombies (STAT=Z). The previous implementation counted
+  # a process as "alive" if `pgrep -P` returned it, but `pgrep` and `kill -0`
+  # both report exited-but-unreaped processes (zombies) as present. Right
+  # after claude exits, stream-parser's read loop EOFs and stream-parser
+  # exits — but the subshell hasn't yet called `wait` on it, so the pid
+  # sits as a zombie for a few milliseconds to seconds. In field logs we
+  # saw PARSER EXIT fire with rc=1 (real FIFO EOF, natural end) yet the
+  # probe reported all three stages "alive" because they were zombies
+  # mid-teardown. Skipping Z-state pids reports an accurate picture.
   local pids
   pids=$(pgrep -P "$agent_pid" 2>/dev/null || true)
   local pid
   for pid in $pids; do
+    local stat
+    stat=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
+    # Skip zombies — they're dead, just not yet reaped. Also skip empty
+    # (the pid vanished between pgrep and ps).
+    [[ -z "$stat" || "$stat" == Z* ]] && continue
     any_alive=1
     local comm args
     comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -869,7 +884,7 @@ run_iteration() {
   (
     eval "$invoke_cmd" 2>&1 |
       jq -n --unbuffered -c -f "$norm_filter" 2>>"$workspace/.ralph/errors.log" |
-      "$script_dir/stream-parser.sh" "$workspace" "$iteration" >"$fifo"
+      "$script_dir/stream-parser.sh" "$workspace" "$iter_label" >"$fifo"
     rm -f "$norm_filter"
   ) &
   agent_pid=$!
