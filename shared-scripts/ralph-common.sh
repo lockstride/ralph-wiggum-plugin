@@ -600,6 +600,36 @@ _write_postmortem() {
 # ITERATION RUNNER
 # =============================================================================
 
+# Format an iteration label for human-readable logs, folding in the per-
+# iteration retry count when it matters.
+#
+# Background (0.3.7): prior versions logged "ITERATION N" / "Session N"
+# regardless of how many times the same iteration had been retried on DEFER.
+# Operators watching a long DEFER loop saw "ITERATION 1 START" / "ITERATION
+# 1 END — ⏸️ DEFERRED" six times in a row and assumed the loop was frozen,
+# when in fact it was making real progress across retries (committing tasks,
+# advancing state). The counter only bumps on a clean natural end — DEFER
+# and a few other paths retry the same iteration number — which is correct
+# semantics but misleading in the log stream.
+#
+# Emits "N" when retry==0 (the common case) and "N.R" otherwise. All
+# ITERATION / Session log lines in main_loop and run_iteration now route
+# through this helper so a retry is immediately visible in both activity.log
+# and progress.md without requiring the reader to reconstruct it.
+#
+# Args:
+#   $1 — iteration number
+#   $2 — retry count (default 0)
+_fmt_iter() {
+  local iter="$1"
+  local retry="${2:-0}"
+  if [[ "$retry" -gt 0 ]]; then
+    printf '%s.%s' "$iter" "$retry"
+  else
+    printf '%s' "$iter"
+  fi
+}
+
 # Classify how the heartbeat read loop exited.
 #
 # Emits one of the following tokens on stdout:
@@ -660,13 +690,105 @@ _probe_agent_liveness() {
   fi
 }
 
+# Probe liveness of each stage inside the pipeline subshell.
+#
+# Background (0.3.7): the prior PARSER EXIT diagnostic ("pipeline died while
+# agent still running") only probed the enclosing subshell (`agent_pid`).
+# When that subshell is still alive after FIFO EOF, the diagnostic
+# concluded "parser pipeline exited" — but field logs showed stream-parser
+# continuing to emit log_activity entries for 30-60s AFTER the PARSER EXIT
+# line was written. Something further up the pipe (likely jq losing stdout
+# or exiting cleanly on a transient) was the real cause; stream-parser and
+# the CLI were still fine. The diagnostic blamed the wrong stage and the
+# loop killed the agent mid-task on false positives — ORPHAN LEAK warnings
+# at commit time confirm tasks were landing right before the kill.
+#
+# This helper enumerates direct children of the subshell (which are the
+# three pipeline stages: agent CLI | jq | stream-parser.sh) and classifies
+# each as alive or dead. The classifier uses `ps -o comm=` patterns plus
+# `ps -o args=` as a fallback for shells that strip the comm name to the
+# wrapper (`bash`, `node`).
+#
+# Emits one status token per line on stdout:
+#   claude=<alive|dead|unknown>
+#   jq=<alive|dead>
+#   parser=<alive|dead>
+# Callers should read the lines and interpret them. Unknown stages are
+# treated conservatively (not counted as dead) to avoid over-aggressive
+# DEFERs when the process table lookup is racey.
+#
+# Args:
+#   $1 — subshell pid whose children form the pipeline
+_probe_pipeline_stages() {
+  local agent_pid="$1"
+  local claude_alive=0 jq_alive=0 parser_alive=0
+  local any_alive=0
+
+  # Walk direct children; classify by short comm first, fall back to full args.
+  # pgrep -P returns direct children only — perfect for `a | b | c` inside
+  # a subshell where a, b, c are all direct children of the subshell.
+  local pids
+  pids=$(pgrep -P "$agent_pid" 2>/dev/null || true)
+  local pid
+  for pid in $pids; do
+    any_alive=1
+    local comm args
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')
+    args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+    case "$comm" in
+      jq | */jq) jq_alive=1 ;;
+      claude | cursor-agent | */claude | */cursor-agent) claude_alive=1 ;;
+      *)
+        case "$args" in
+          *stream-parser.sh*) parser_alive=1 ;;
+          *" claude "* | *" claude"* | */claude\ *) claude_alive=1 ;;
+          *cursor-agent*) claude_alive=1 ;;
+          *" jq "* | *" jq"*) jq_alive=1 ;;
+        esac
+        ;;
+    esac
+  done
+
+  # If the subshell has no children at all, the whole pipeline has finished
+  # draining — report everything dead rather than "unknown" so callers can
+  # distinguish a fully-torn-down pipeline from a partial crash.
+  local claude_state jq_state parser_state
+  if [[ $any_alive -eq 0 ]]; then
+    claude_state="dead"
+    jq_state="dead"
+    parser_state="dead"
+  else
+    [[ $claude_alive -eq 1 ]] && claude_state="alive" || claude_state="dead"
+    [[ $jq_alive -eq 1 ]] && jq_state="alive" || jq_state="dead"
+    [[ $parser_alive -eq 1 ]] && parser_state="alive" || parser_state="dead"
+  fi
+
+  echo "claude=$claude_state"
+  echo "jq=$jq_state"
+  echo "parser=$parser_state"
+}
+
 # Run a single agent iteration. Returns the final signal on stdout
 # (ROTATE / GUTTER / COMPLETE / DEFER / empty).
+#
+# Args:
+#   $1 — workspace
+#   $2 — iteration number
+#   $3 — session_id (optional; continues a prior agent session when set)
+#   $4 — script_dir (optional; defaults to the dir containing this file)
+#   $5 — retry count for this iteration (optional; default 0). Only used
+#        for human-readable log framing via _fmt_iter — the iteration
+#        number the agent sees in its prompt stays numeric (N) so the
+#        model's "iteration N of an autonomous loop" framing isn't
+#        muddied by a retry suffix.
 run_iteration() {
   local workspace="$1"
   local iteration="$2"
   local session_id="${3:-}"
   local script_dir="${4:-$(dirname "${BASH_SOURCE[0]}")}"
+  local retry="${5:-0}"
+  local iter_label
+  iter_label=$(_fmt_iter "$iteration" "$retry")
 
   local prompt
   prompt=$(build_prompt "$workspace" "$iteration")
@@ -698,7 +820,7 @@ run_iteration() {
 
   echo "" >&2
   echo "═══════════════════════════════════════════════════════════════════" >&2
-  echo "🐛 Ralph Iteration $iteration" >&2
+  echo "🐛 Ralph Iteration $iter_label" >&2
   echo "═══════════════════════════════════════════════════════════════════" >&2
   echo "" >&2
   echo "Workspace: $workspace" >&2
@@ -707,7 +829,7 @@ run_iteration() {
   echo "Monitor:   tail -f $workspace/.ralph/activity.log" >&2
   echo "" >&2
 
-  log_progress "$workspace" "**Session $iteration started** (cli: $RALPH_AGENT_CLI, model: $MODEL)"
+  log_progress "$workspace" "**Session $iter_label started** (cli: $RALPH_AGENT_CLI, model: $MODEL)"
 
   local invoke_cmd
   invoke_cmd=$(agent_build_cmd "$RALPH_AGENT_CLI" "$MODEL" "$prompt" "$session_id")
@@ -820,15 +942,59 @@ run_iteration() {
       # when the agent is still alive after a short grace window does
       # this indicate the 0.3.1-investigated hang (parser/jq crashed
       # independently) — then kill and DEFER.
+      #
+      # 0.3.7: stage-aware diagnosis + extended grace. In the field we saw
+      # PARSER EXIT fire while stream-parser was still emitting activity
+      # entries for another 30-60s, which meant the old "pipeline died"
+      # blame was wrong and the resulting DEFER killed agents mid-task.
+      # We now enumerate children of the pipeline subshell and report
+      # per-stage liveness (claude / jq / parser). If stream-parser is
+      # still alive we wait a longer window (RALPH_PIPELINE_EXTENDED_GRACE,
+      # default 30s) before declaring the pipeline wedged — that window
+      # covers the typical parser-drain-after-jq-close pattern where no
+      # intervention is actually needed.
       local grace_sec="${RALPH_EOF_GRACE:-5}"
       local liveness
       liveness=$(_probe_agent_liveness "$agent_pid" "$grace_sec")
       if [[ "$liveness" == "hang" ]]; then
-        [[ -t 2 ]] && printf "\r\033[K" >&2
-        echo "💥 Parser pipeline exited while agent still running — killing and deferring..." >&2
-        log_activity "$workspace" "💥 PARSER EXIT — pipeline died while agent still running (rc=$_read_rc, grace=${grace_sec}s)"
-        kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
-        signal="DEFER"
+        local stages_out claude_state jq_state parser_state
+        stages_out=$(_probe_pipeline_stages "$agent_pid")
+        claude_state=$(echo "$stages_out" | awk -F= '/^claude=/ {print $2}')
+        jq_state=$(echo "$stages_out" | awk -F= '/^jq=/ {print $2}')
+        parser_state=$(echo "$stages_out" | awk -F= '/^parser=/ {print $2}')
+
+        local ext_grace="${RALPH_PIPELINE_EXTENDED_GRACE:-30}"
+        if [[ "$parser_state" == "alive" ]]; then
+          # Give stream-parser time to finish draining whatever jq handed
+          # it. Re-probe the whole subshell and the parser after the
+          # extended grace. If the parser goes away cleanly during grace,
+          # the subshell almost always follows.
+          log_activity "$workspace" "⏳ PIPELINE DRAIN — stream-parser still alive after EOF, extending grace to ${ext_grace}s (claude=$claude_state jq=$jq_state)"
+          liveness=$(_probe_agent_liveness "$agent_pid" "$ext_grace")
+          if [[ "$liveness" == "clean" ]]; then
+            # Parser drained, subshell exited. Fall through to natural end.
+            log_activity "$workspace" "✅ PIPELINE DRAINED — subshell exited cleanly within extended grace; treating as natural end"
+            :
+          else
+            # Re-probe to get fresh stage state for the exit message.
+            stages_out=$(_probe_pipeline_stages "$agent_pid")
+            claude_state=$(echo "$stages_out" | awk -F= '/^claude=/ {print $2}')
+            jq_state=$(echo "$stages_out" | awk -F= '/^jq=/ {print $2}')
+            parser_state=$(echo "$stages_out" | awk -F= '/^parser=/ {print $2}')
+          fi
+        fi
+
+        if [[ "$liveness" == "hang" ]]; then
+          [[ -t 2 ]] && printf "\r\033[K" >&2
+          echo "💥 Pipeline wedged (claude=$claude_state jq=$jq_state parser=$parser_state) — killing and deferring..." >&2
+          log_activity "$workspace" "💥 PARSER EXIT — pipeline wedged (claude=$claude_state jq=$jq_state parser=$parser_state, rc=$_read_rc, grace=${grace_sec}s+${ext_grace}s)"
+          # Also record a breadcrumb in errors.log so post-mortems can
+          # distinguish which stage died first.
+          echo "[$(date '+%H:%M:%S')] PIPELINE_STAGE_EXIT: claude=$claude_state jq=$jq_state parser=$parser_state (rc=$_read_rc)" \
+            >>"$workspace/.ralph/errors.log"
+          kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+          signal="DEFER"
+        fi
       fi
       # else: clean natural end — leave signal="" so the main loop's
       # `*)` branch increments the iteration as it did pre-0.3.1.
@@ -941,6 +1107,12 @@ run_ralph_loop() {
   echo ""
 
   local iteration=1
+  # 0.3.7: retry counter for the current iteration. Bumps on DEFER (the
+  # only signal that re-runs the same iteration number) and resets to 0
+  # every time iteration advances. Folded into log headers via _fmt_iter
+  # so operators can tell at a glance that "ITERATION 1.3 START" is the
+  # fourth attempt at iteration 1, not a new iteration.
+  local retry=0
   local session_id=""
   local stall_count=0         # DEFER/rate-limit consecutive count (threshold 10)
   local zero_progress_count=0 # natural-end with zero task delta (threshold 3)
@@ -958,14 +1130,17 @@ run_ralph_loop() {
     local pre_total=${pre_counts##*:}
     local pre_remaining=$((pre_total - pre_done))
 
+    local iter_label
+    iter_label=$(_fmt_iter "$iteration" "$retry")
+
     if [[ "$pre_total" -gt 0 ]]; then
-      log_activity "$workspace" "ITERATION $iteration START — Tasks: $pre_done/$pre_total complete ($pre_remaining remaining)"
+      log_activity "$workspace" "ITERATION $iter_label START — Tasks: $pre_done/$pre_total complete ($pre_remaining remaining)"
     else
-      log_activity "$workspace" "ITERATION $iteration START"
+      log_activity "$workspace" "ITERATION $iter_label START"
     fi
 
     local signal
-    signal=$(run_iteration "$workspace" "$iteration" "$session_id" "$script_dir")
+    signal=$(run_iteration "$workspace" "$iteration" "$session_id" "$script_dir" "$retry")
 
     # Non-blocking check: did the agent commit any files that were
     # untracked at iteration start? (orphan sweep via broad `git add`)
@@ -997,7 +1172,7 @@ run_ralph_loop() {
         local _last_exit
         _last_exit=$(_most_recent_gate_exit "$workspace")
         log_activity "$workspace" "🛑 COMPLETE BLOCKED — all tasks checked but most recent gate exited $_last_exit. Agent must get the gate to green (or escalate via <ralph>GUTTER</ralph>) before the loop can exit.$task_suffix"
-        log_progress "$workspace" "**Session $iteration ended** — 🛑 COMPLETE BLOCKED (gate red, exit=$_last_exit)"
+        log_progress "$workspace" "**Session $iter_label ended** — 🛑 COMPLETE BLOCKED (gate red, exit=$_last_exit)"
         echo "🛑 Checkboxes all [x] but most recent gate exited $_last_exit — not honouring COMPLETE. Continuing..."
         # Reset stall/zero-progress counters — a red-gate block is not an
         # API hiccup, and work may have progressed this iteration.
@@ -1007,12 +1182,13 @@ run_ralph_loop() {
         # iterations with zero forward motion should still trip the
         # natural-end stall detection below.
         iteration=$((iteration + 1))
+        retry=0
         sleep 2
         continue
       fi
 
-      log_activity "$workspace" "ITERATION $iteration END — ✅ COMPLETE$task_suffix"
-      log_progress "$workspace" "**Session $iteration ended** — ✅ TASK COMPLETE"
+      log_activity "$workspace" "ITERATION $iter_label END — ✅ COMPLETE$task_suffix"
+      log_progress "$workspace" "**Session $iter_label ended** — ✅ TASK COMPLETE"
       echo ""
       echo "═══════════════════════════════════════════════════════════════════"
       echo "🎉 RALPH COMPLETE! All criteria satisfied."
@@ -1043,40 +1219,43 @@ run_ralph_loop() {
             local _last_exit
             _last_exit=$(_most_recent_gate_exit "$workspace")
             log_activity "$workspace" "🛑 COMPLETE BLOCKED — agent signaled COMPLETE but most recent gate exited $_last_exit.$task_suffix"
-            log_progress "$workspace" "**Session $iteration ended** — 🛑 COMPLETE BLOCKED (agent signaled; gate red, exit=$_last_exit)"
+            log_progress "$workspace" "**Session $iter_label ended** — 🛑 COMPLETE BLOCKED (agent signaled; gate red, exit=$_last_exit)"
             echo "🛑 Agent signaled COMPLETE but most recent gate exited $_last_exit — not honouring. Continuing..."
             stall_count=0
             DEFER_COUNT=0
             iteration=$((iteration + 1))
+            retry=0
             session_id=""
             continue
           fi
-          log_activity "$workspace" "ITERATION $iteration END — ✅ COMPLETE$task_suffix"
-          log_progress "$workspace" "**Session $iteration ended** — ✅ TASK COMPLETE (agent signaled)"
+          log_activity "$workspace" "ITERATION $iter_label END — ✅ COMPLETE$task_suffix"
+          log_progress "$workspace" "**Session $iter_label ended** — ✅ TASK COMPLETE (agent signaled)"
           return 0
         else
-          log_activity "$workspace" "ITERATION $iteration END — ⚠️ AGENT SIGNALED COMPLETE (criteria remain)$task_suffix"
-          log_progress "$workspace" "**Session $iteration ended** — Agent signaled complete but criteria remain"
+          log_activity "$workspace" "ITERATION $iter_label END — ⚠️ AGENT SIGNALED COMPLETE (criteria remain)$task_suffix"
+          log_progress "$workspace" "**Session $iter_label ended** — Agent signaled complete but criteria remain"
           echo "⚠️  Agent signaled completion but unchecked criteria remain. Continuing..."
           stall_count=0
           zero_progress_count=0
           DEFER_COUNT=0
           iteration=$((iteration + 1))
+          retry=0
         fi
         ;;
       "ROTATE")
-        log_activity "$workspace" "ITERATION $iteration END — 🔄 ROTATE$task_suffix"
-        log_progress "$workspace" "**Session $iteration ended** — 🔄 Context rotation"
+        log_activity "$workspace" "ITERATION $iter_label END — 🔄 ROTATE$task_suffix"
+        log_progress "$workspace" "**Session $iter_label ended** — 🔄 Context rotation"
         echo "🔄 Rotating to fresh context..."
         stall_count=0
         zero_progress_count=0
         DEFER_COUNT=0
         iteration=$((iteration + 1))
+        retry=0
         session_id=""
         ;;
       "GUTTER")
-        log_activity "$workspace" "ITERATION $iteration END — 🚨 GUTTER$task_suffix"
-        log_progress "$workspace" "**Session $iteration ended** — 🚨 GUTTER"
+        log_activity "$workspace" "ITERATION $iter_label END — 🚨 GUTTER$task_suffix"
+        log_progress "$workspace" "**Session $iter_label ended** — 🚨 GUTTER"
         echo "🚨 Gutter detected. Check .ralph/errors.log for details."
         _write_postmortem "$workspace" "gutter"
         return 1
@@ -1088,16 +1267,17 @@ run_ralph_loop() {
         # per-loop budget is exhausted, escalate to GUTTER instead.
         if [[ $RECOVERY_ATTEMPTS -lt $MAX_RECOVERY_ATTEMPTS ]]; then
           RECOVERY_ATTEMPTS=$((RECOVERY_ATTEMPTS + 1))
-          log_activity "$workspace" "ITERATION $iteration END — 🔁 RECOVERY ATTEMPT $RECOVERY_ATTEMPTS/$MAX_RECOVERY_ATTEMPTS$task_suffix"
-          log_progress "$workspace" "**Session $iteration ended** — 🔁 RECOVERY ATTEMPT $RECOVERY_ATTEMPTS/$MAX_RECOVERY_ATTEMPTS"
+          log_activity "$workspace" "ITERATION $iter_label END — 🔁 RECOVERY ATTEMPT $RECOVERY_ATTEMPTS/$MAX_RECOVERY_ATTEMPTS$task_suffix"
+          log_progress "$workspace" "**Session $iter_label ended** — 🔁 RECOVERY ATTEMPT $RECOVERY_ATTEMPTS/$MAX_RECOVERY_ATTEMPTS"
           echo "🔁 Recovery attempt $RECOVERY_ATTEMPTS of $MAX_RECOVERY_ATTEMPTS — restarting iteration with hint..."
           # Do NOT bump stall_count/zero_progress_count — recovery is its
           # own budget, separate from natural-end and DEFER counters.
           iteration=$((iteration + 1))
+          retry=0
           session_id=""
         else
-          log_activity "$workspace" "ITERATION $iteration END — 🚨 GUTTER (recovery budget exhausted: $MAX_RECOVERY_ATTEMPTS attempts)$task_suffix"
-          log_progress "$workspace" "**Session $iteration ended** — 🚨 GUTTER (recovery budget exhausted)"
+          log_activity "$workspace" "ITERATION $iter_label END — 🚨 GUTTER (recovery budget exhausted: $MAX_RECOVERY_ATTEMPTS attempts)$task_suffix"
+          log_progress "$workspace" "**Session $iter_label ended** — 🚨 GUTTER (recovery budget exhausted)"
           echo "🚨 Recovery budget exhausted ($MAX_RECOVERY_ATTEMPTS attempts) — escalating to GUTTER."
           # Discard any leftover hint so the next ralph invocation starts clean.
           rm -f "$workspace/.ralph/recovery-hint.md" 2>/dev/null || true
@@ -1110,10 +1290,14 @@ run_ralph_loop() {
         # Kept lenient (threshold 10) because rate limits can take minutes to clear.
         # Does NOT increment zero_progress_count — that's reserved for the agent
         # genuinely doing nothing useful, not for API hiccups.
-        log_activity "$workspace" "ITERATION $iteration END — ⏸️ DEFERRED$task_suffix"
-        log_progress "$workspace" "**Session $iteration ended** — ⏸️ DEFERRED"
+        log_activity "$workspace" "ITERATION $iter_label END — ⏸️ DEFERRED$task_suffix"
+        log_progress "$workspace" "**Session $iter_label ended** — ⏸️ DEFERRED"
         DEFER_COUNT=$((DEFER_COUNT + 1))
         stall_count=$((stall_count + 1))
+        # 0.3.7: bump the per-iteration retry counter. Iteration number
+        # stays the same (DEFER means "retry this iteration"), but the
+        # retry suffix surfaces progress in activity.log/progress.md.
+        retry=$((retry + 1))
         if [[ $stall_count -ge 10 ]]; then
           log_activity "$workspace" "LOOP END — 🚨 STALL: $stall_count consecutive empty/deferred iterations"
           log_progress "$workspace" "**Loop ended** — 🚨 STALL: $stall_count consecutive empty/deferred iterations, likely rate limited"
@@ -1149,17 +1333,18 @@ run_ralph_loop() {
             _write_postmortem "$workspace" "stall-natural"
             return 1
           fi
-          log_activity "$workspace" "ITERATION $iteration END — NATURAL ($remaining_count remaining)$task_suffix"
-          log_progress "$workspace" "**Session $iteration ended** — Agent finished naturally ($remaining_count remaining)"
+          log_activity "$workspace" "ITERATION $iter_label END — NATURAL ($remaining_count remaining)$task_suffix"
+          log_progress "$workspace" "**Session $iter_label ended** — Agent finished naturally ($remaining_count remaining)"
           echo "📋 Agent finished but $remaining_count criteria remaining. Starting next iteration..."
         else
-          log_activity "$workspace" "ITERATION $iteration END — NATURAL (no checkbox tracking)$task_suffix"
-          log_progress "$workspace" "**Session $iteration ended** — Agent finished naturally (no checkbox tracking)"
+          log_activity "$workspace" "ITERATION $iter_label END — NATURAL (no checkbox tracking)$task_suffix"
+          log_progress "$workspace" "**Session $iter_label ended** — Agent finished naturally (no checkbox tracking)"
           stall_count=0
           zero_progress_count=0
           DEFER_COUNT=0
         fi
         iteration=$((iteration + 1))
+        retry=0
         ;;
     esac
 

@@ -309,3 +309,103 @@ EOF
   printf '124' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
   ! _complete_allowed "$MOCK_WORKSPACE"
 }
+
+# ---------------------------------------------------------------------------
+# _fmt_iter — iteration label with per-iteration retry suffix (0.3.7)
+# ---------------------------------------------------------------------------
+
+@test "_fmt_iter: retry 0 returns bare iteration number (0.3.7)" {
+  [ "$(_fmt_iter 1 0)" = "1" ]
+  [ "$(_fmt_iter 7 0)" = "7" ]
+  # Omitted retry arg defaults to 0
+  [ "$(_fmt_iter 12)" = "12" ]
+}
+
+@test "_fmt_iter: retry > 0 appends dotted suffix (0.3.7)" {
+  [ "$(_fmt_iter 1 1)" = "1.1" ]
+  [ "$(_fmt_iter 1 3)" = "1.3" ]
+  [ "$(_fmt_iter 14 9)" = "14.9" ]
+}
+
+# ---------------------------------------------------------------------------
+# _probe_pipeline_stages — per-stage classifier for FIFO EOF diagnosis (0.3.7)
+# ---------------------------------------------------------------------------
+
+@test "_probe_pipeline_stages: empty subshell reports all dead (0.3.7)" {
+  # A subshell that exits immediately — its pid is dead by the time we
+  # probe, so it has no children. Should report all stages dead rather
+  # than emitting noise.
+  ( : ) &
+  local pid=$!
+  wait "$pid" 2>/dev/null || true
+  local out
+  out=$(_probe_pipeline_stages "$pid")
+  echo "$out" | grep -q "^claude=dead$"
+  echo "$out" | grep -q "^jq=dead$"
+  echo "$out" | grep -q "^parser=dead$"
+}
+
+@test "_probe_pipeline_stages: detects a live jq child (0.3.7)" {
+  # Stand up a subshell that runs a real 3-stage pipe (mirroring the
+  # production `claude | jq | stream-parser.sh` shape) so every stage is
+  # a real child of the subshell. A trailing no-op (`: ;`) plus the pipe
+  # structure prevents bash from exec'ing a single command in place of
+  # the subshell.
+  (
+    sleep 2 | jq -c . >/dev/null 2>&1
+    :
+  ) &
+  local pid=$!
+  # Wait for bash to fork the pipe stages inside the subshell.
+  local tries=0
+  while ! pgrep -P "$pid" >/dev/null 2>&1 && [[ $tries -lt 30 ]]; do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+
+  local out
+  out=$(_probe_pipeline_stages "$pid")
+
+  kill -9 "$pid" 2>/dev/null || true
+  # Kill any lingering jq child.
+  pkill -9 -P "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  echo "$out" | grep -q "^jq=alive$"
+}
+
+@test "_probe_pipeline_stages: detects a live stream-parser child by args (0.3.7)" {
+  # A bash wrapper whose args contain "stream-parser.sh" should classify
+  # as parser=alive even when comm is just "bash". Use a real pipe so the
+  # bash stage is a child of the subshell, not exec'd in place.
+  local fake_script
+  fake_script=$(mktemp "$BATS_TMPDIR/stream-parser.sh.XXXXXX")
+  cat >"$fake_script" <<'EOF'
+#!/usr/bin/env bash
+# Fake stream-parser that just sleeps so the probe finds it alive.
+sleep 5
+EOF
+  chmod +x "$fake_script"
+
+  (
+    sleep 2 | bash "$fake_script" /workspace 1
+    :
+  ) &
+  local pid=$!
+  local tries=0
+  while ! pgrep -P "$pid" >/dev/null 2>&1 && [[ $tries -lt 30 ]]; do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+
+  local out
+  out=$(_probe_pipeline_stages "$pid")
+
+  kill -9 "$pid" 2>/dev/null || true
+  pkill -9 -P "$pid" 2>/dev/null || true
+  pkill -9 -f "$fake_script" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -f "$fake_script"
+
+  echo "$out" | grep -q "^parser=alive$"
+}

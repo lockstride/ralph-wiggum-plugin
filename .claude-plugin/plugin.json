@@ -1,6 +1,6 @@
 {
   "name": "ralph-wiggum-plugin",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "CLI-agnostic Ralph autonomous development loop with token tracking, context rotation, gutter detection, and Spec Kit support. Drives either the Claude Code or cursor-agent CLI from a terminal-run shell loop.",
   "author": {
     "name": "lockstride"
