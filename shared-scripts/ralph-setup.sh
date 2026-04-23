@@ -42,6 +42,11 @@ PROMPT_MODE=""
 PROMPT_VALUE=""
 BRANCH_FROM_FLAG=""
 OPEN_PR_FLAG=""
+# Acceptance-eval chaining: --evaluate flag or RALPH_CHAIN_EVALUATE=1 env var.
+# Env var gives a durable opt-in for shells that always want the eval pass;
+# the flag gives per-invocation control.
+CHAIN_EVALUATE="${RALPH_CHAIN_EVALUATE:-false}"
+EVAL_ITER_FROM_FLAG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cli)
@@ -82,6 +87,14 @@ while [[ $# -gt 0 ]]; do
       OPEN_PR_FLAG=true
       shift
       ;;
+    --evaluate)
+      CHAIN_EVALUATE=true
+      shift
+      ;;
+    --eval-iterations)
+      EVAL_ITER_FROM_FLAG="$2"
+      shift 2
+      ;;
     -v | --version)
       jq -r '.version' "$SCRIPT_DIR/../.claude-plugin/plugin.json"
       exit 0
@@ -102,6 +115,9 @@ Options:
   --spec [name]                Use Spec Kit spec (default: newest)
   --branch <name>              Work on named branch
   --pr                         Open PR when complete (requires --branch)
+  --evaluate                   Chain acceptance evaluation loop on COMPLETE
+                               (equivalent env var: RALPH_CHAIN_EVALUATE=1)
+  --eval-iterations N          Cap for the eval loop when chained (default 5)
   -v, --version                Show version
   -h, --help                   Show this help
 
@@ -439,11 +455,36 @@ main() {
   echo "  • Prompt:     $PROMPT_MODE${PROMPT_VALUE:+ ($PROMPT_VALUE)}"
   [[ -n "$USE_BRANCH" ]] && echo "  • Branch:     $USE_BRANCH"
   [[ "${OPEN_PR:-false}" == "true" ]] && echo "  • Open PR:    Yes"
+  [[ "$CHAIN_EVALUATE" == "true" ]] && echo "  • Chain eval: Yes${EVAL_ITER_FROM_FLAG:+ (-n $EVAL_ITER_FROM_FLAG)}"
   echo "─────────────────────────────────────────────────────────────────"
   echo ""
 
   run_ralph_loop "$WORKSPACE" "$SCRIPT_DIR"
-  exit $?
+  local main_rc=$?
+
+  # Chain into the acceptance evaluation loop only when the main loop exited
+  # cleanly (all tasks [x], gate green). Failed/exhausted/gutter runs skip
+  # the eval pass — running acceptance tests against known-broken state
+  # produces noise, not signal.
+  if [[ "$main_rc" -eq 0 ]] && [[ "$CHAIN_EVALUATE" == "true" ]]; then
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "🔍 Main loop complete — chaining acceptance evaluation loop"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+    local -a eval_args=()
+    eval_args+=(--cli "$RALPH_AGENT_CLI" -m "$MODEL")
+    case "$PROMPT_MODE" in
+      prompt) eval_args+=(--prompt) ;;
+      file) eval_args+=(--prompt-file "$PROMPT_VALUE") ;;
+      spec) [[ -n "$PROMPT_VALUE" ]] && eval_args+=(--spec "$PROMPT_VALUE") || eval_args+=(--spec) ;;
+    esac
+    [[ -n "$EVAL_ITER_FROM_FLAG" ]] && eval_args+=(-n "$EVAL_ITER_FROM_FLAG")
+    "$SCRIPT_DIR/ralph-evaluate.sh" "${eval_args[@]}" "$WORKSPACE"
+    main_rc=$?
+  fi
+
+  exit "$main_rc"
 }
 
 main

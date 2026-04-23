@@ -94,7 +94,7 @@ git clone https://github.com/lockstride/ralph-wiggum-plugin.git ~/ralph-wiggum-p
 
 ### Option C — Claude Code plugin (adds slash commands)
 
-Installs the repo as a registered Claude Code plugin. You get the same loop scripts as A and B, plus `/ralph`, `/ralph-once`, and `/ralph-cancel` in the slash-command menu. Only useful if you run Claude Code and want that discoverability — the slash commands are convenience wrappers that print a terminal command, nothing more.
+Installs the repo as a registered Claude Code plugin. You get the same loop scripts as A and B, plus `/ralph`, `/ralph-once`, `/ralph-evaluate`, and `/ralph-cancel` in the slash-command menu. Only useful if you run Claude Code and want that discoverability — the slash commands are convenience wrappers that print a terminal command, nothing more.
 
 ```
 /plugin marketplace add lockstride/claude-marketplace
@@ -152,6 +152,8 @@ Flags that take a required value are shown with `<value>`. When a flag is omitte
 | `-n, --iterations N` | Max iterations | interactive picker (pre-fills `20`) |
 | `--branch <name>` | Work on a named branch | current branch |
 | `--pr` | Open a PR when complete; requires `--branch` | off |
+| `--evaluate` | Chain acceptance evaluation loop when the main loop completes (equivalent env var: `RALPH_CHAIN_EVALUATE=1`) | off |
+| `--eval-iterations N` | Cap for the chained eval loop | 5 |
 | `-v, --version` | Print version and exit | — |
 | `-h, --help` | Show help | — |
 
@@ -200,6 +202,50 @@ The generated prompt is cached at `<spec_dir>/ralph-prompt.md` with a hash at `<
 
 Set `RALPH_SKIP_GENERATION=1` to force use of the built-in template instead.
 
+## Acceptance evaluation loop
+
+When the main Ralph loop exits `COMPLETE`, all it has confirmed is that the agent checked every `[ ]` and the final gate was green. That's a self-assessment. The **acceptance evaluation loop** is a second Ralph loop that runs *after* the first one, with an independent orchestrator prompt that:
+
+1. Re-reads the original ground truth (the same `PROMPT.md`, custom file, or `specs/*/tasks.md` the main loop worked from).
+2. Picks one of two modes per iteration based on the current state of `.ralph/acceptance-report.md`:
+   - **VERIFIER** — independently checks every requirement (file reads, grep for conventions, Playwright MCP for UI behavior if the server is available, gate runs under `eval-*` labels) and records every unmet requirement as a `[ ]` line in the report's **Gaps** section.
+   - **REWORK** — works the verifier's Gaps list, resolving as many as possible and checking them off. Unresolvable ones get a `(blocked: reason)` suffix.
+3. Delegates all mode work to a sub-agent via the Task tool. The orchestrator stays lean so context pollution across iterations stays bounded.
+
+The loop exits cleanly when the verifier flips the report's top-level `- [ ] All acceptance criteria met and verified` checkbox to `[x]` (only the verifier is allowed to do this, and only after a clean independent pass). Otherwise it stops at the iteration cap (default 5).
+
+### Invoke standalone
+
+```
+./shared-scripts/ralph-evaluate.sh --prompt
+./shared-scripts/ralph-evaluate.sh --spec
+./shared-scripts/ralph-evaluate.sh --prompt-file custom.md -n 8
+./shared-scripts/ralph-evaluate.sh --prompt --fresh   # wipe prior report
+```
+
+Or via the slash command inside Claude Code: `/ralph-evaluate --prompt`.
+
+### Chain after a main loop
+
+Pass `--evaluate` to the main launcher (or set `RALPH_CHAIN_EVALUATE=1` as a durable opt-in):
+
+```
+./shared-scripts/ralph-setup.sh --cli claude --prompt --evaluate --eval-iterations 5
+```
+
+Chain fires only when the main loop exits cleanly. Failed / exhausted / gutter runs skip the eval pass — acceptance testing against known-broken state produces noise, not signal.
+
+### Artifacts
+
+- `.ralph/acceptance-report.md` — the report the orchestrator maintains. Git-ignored (same as the rest of `.ralph/`); if you want a persistent audit trail, copy it out after the loop exits.
+- `.ralph/eval-ground-truth` — breadcrumb recording which file served as ground truth for the last eval run.
+
+### Limitations
+
+- **Sub-agent support depends on the driving CLI.** The orchestrator uses the Task tool to spawn role sub-agents. `claude` supports this natively; `cursor-agent` may fall back to in-context orchestration, which reduces the context-isolation benefit but does not break correctness.
+- **UI verification requires Playwright MCP.** If the MCP server isn't installed, the verifier notes the limitation in the relevant gap rather than silently skipping UI requirements.
+- **The verifier is only as good as the ground-truth requirements.** Vague requirements in `PROMPT.md` produce vague gap reports.
+
 ## Watchdogs
 
 Ralph includes three watchdogs to prevent the loop from hanging indefinitely:
@@ -239,7 +285,7 @@ brew install bats-core
 bats tests/
 ```
 
-Tests cover gate-run.sh (timeout, exit codes, log retention), stream-parser.sh (signal detection, stall patterns), prompt-resolver.sh (caching, hash checks, fallbacks), and build_prompt framing.
+Tests cover gate-run.sh (timeout, exit codes, log retention), stream-parser.sh (signal detection, stall patterns), prompt-resolver.sh (caching, hash checks, fallbacks, task-file-path breadcrumb for all prompt modes), ralph-evaluate.sh (flag parsing, ground-truth resolution, report seeding, orchestrator prompt rendering), and build_prompt framing.
 
 `./lint.sh` runs tests automatically if bats is installed.
 
@@ -268,6 +314,11 @@ git config core.hooksPath .githooks
 Commits that introduce lint or formatting issues will be blocked. Bypass with `git commit --no-verify` if needed.
 
 ## Changelog
+
+### 0.5.0
+
+- **Acceptance evaluation loop (`ralph-evaluate.sh`, `/ralph-evaluate`).** A second Ralph loop that runs after the main one claims completion, with an orchestrator prompt that picks a VERIFIER or REWORK mode per iteration based on `.ralph/acceptance-report.md` and delegates the work to a sub-agent via the Task tool. The orchestrator keeps its own context lean; the sub-agent does the heavy lifting (file reads, gate runs, Playwright MCP for UI). Runs standalone, or chained after a main loop via `--evaluate` (flag) or `RALPH_CHAIN_EVALUATE=1` (env). Capped at 5 iterations by default; override with `--eval-iterations N`. Chain fires only when the main loop exits cleanly, so acceptance testing always runs against a claimed-done state.
+- **Reliable task-file resolution for PROMPT.md and custom prompt-file modes.** Both now write the same `.ralph/task-file-path` breadcrumb the Spec Kit path has used since its introduction, pointing the loop's completion detector at the real task file instead of cascading through heuristic fallbacks. Fixes a long-standing ambiguity where edits to `.ralph/effective-prompt.md` mid-run could affect the counter in PROMPT.md mode. The eval loop relies on this breadcrumb to point the counter at its acceptance report instead.
 
 ### 0.4.0
 

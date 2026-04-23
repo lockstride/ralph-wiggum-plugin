@@ -505,6 +505,73 @@ EOF
   [ "$rc" -ne 0 ]
 }
 
+@test "check_task_complete: honors RALPH_TASK_FILE pointing at an acceptance report (0.5.0)" {
+  # Simulate the eval loop's handoff: RALPH_TASK_FILE points at the
+  # acceptance report; the counter must use that file, not PROMPT.md.
+  mkdir -p "$MOCK_WORKSPACE/.ralph"
+  cat > "$MOCK_WORKSPACE/.ralph/acceptance-report.md" <<'REPORT'
+# Acceptance Report
+
+- [ ] All acceptance criteria met and verified
+
+**Status:** UNVERIFIED
+
+## Gaps
+
+- [ ] gap one
+- [ ] gap two
+REPORT
+
+  # Also write a PROMPT.md with fully-checked tasks to make sure the
+  # counter doesn't fall back to it.
+  cat > "$MOCK_WORKSPACE/PROMPT.md" <<'PROMPT'
+- [x] a
+- [x] b
+PROMPT
+
+  export RALPH_TASK_FILE="$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+  local status
+  status=$(check_task_complete "$MOCK_WORKSPACE")
+  # Three unchecked boxes in the report → INCOMPLETE, not COMPLETE.
+  [[ "$status" == INCOMPLETE:* ]]
+  unset RALPH_TASK_FILE
+}
+
+@test "check_task_complete: flips to COMPLETE when every report checkbox is [x] (0.5.0)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph"
+  cat > "$MOCK_WORKSPACE/.ralph/acceptance-report.md" <<'REPORT'
+# Acceptance Report
+
+- [x] All acceptance criteria met and verified
+
+**Status:** CLEAN
+
+## Gaps
+
+- [x] gap one
+- [x] gap two
+REPORT
+
+  export RALPH_TASK_FILE="$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+  local status
+  status=$(check_task_complete "$MOCK_WORKSPACE")
+  [ "$status" = "COMPLETE" ]
+  unset RALPH_TASK_FILE
+}
+
+@test "_resolve_task_file: breadcrumb wins over PROMPT.md (0.5.0)" {
+  # This covers the eval loop's handoff AND the new PROMPT.md-mode
+  # breadcrumb. If both are present, the breadcrumb is authoritative.
+  mkdir -p "$MOCK_WORKSPACE/.ralph"
+  echo "$MOCK_WORKSPACE/.ralph/acceptance-report.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+  echo "- [ ] placeholder" > "$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+  echo "- [ ] decoy" > "$MOCK_WORKSPACE/PROMPT.md"
+
+  local got
+  got=$(_resolve_task_file "$MOCK_WORKSPACE")
+  [ "$got" = "$MOCK_WORKSPACE/.ralph/acceptance-report.md" ]
+}
+
 @test "_probe_pipeline_stages: detects a live stream-parser child by args (0.3.7)" {
   # A bash wrapper whose args contain "stream-parser.sh" should classify
   # as parser=alive even when comm is just "bash". Use a real pipe so the
