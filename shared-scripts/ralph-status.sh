@@ -32,6 +32,9 @@ activity_log="$ralph_dir/activity.log"
 gates_dir="$ralph_dir/gates"
 task_file_path="$ralph_dir/task-file-path"
 handoff="$ralph_dir/handoff.md"
+# 0.5.1: ralph-evaluate.sh drops this breadcrumb so status can visibly
+# distinguish an acceptance-evaluation run from a regular implementation run.
+eval_ground_truth_path="$ralph_dir/eval-ground-truth"
 
 if [[ ! -d "$ralph_dir" ]]; then
   echo "ralph-status: no .ralph/ directory at $workspace"
@@ -40,6 +43,17 @@ if [[ ! -d "$ralph_dir" ]]; then
   echo "Tip: pass a fragment to target a different worktree, e.g."
   echo "  ralph-status 172552    # resolves to worktree path containing '172552'"
   exit 0
+fi
+
+# Eval-mode detection — truthy when ralph-evaluate.sh is (or was) driving
+# this workspace. Used to decorate the header and inject a mode row into
+# the STATUS section so operators can tell at a glance which loop they're
+# looking at.
+_eval_mode=false
+_eval_ground_truth=""
+if [[ -f "$eval_ground_truth_path" ]]; then
+  _eval_mode=true
+  _eval_ground_truth=$(cat "$eval_ground_truth_path")
 fi
 
 # -----------------------------------------------------------------------------
@@ -71,7 +85,11 @@ _section() {
 # -----------------------------------------------------------------------------
 
 printf '═══════════════════════════════════════════════════════════════════\n'
-printf '🐛 Ralph status — %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+if [[ "$_eval_mode" == "true" ]]; then
+  printf '🐛 Ralph status — %s   [ACCEPTANCE EVAL]\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+else
+  printf '🐛 Ralph status — %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+fi
 printf '   workspace: %s\n' "$workspace"
 printf '═══════════════════════════════════════════════════════════════════\n'
 
@@ -80,6 +98,10 @@ printf '════════════════════════
 # -----------------------------------------------------------------------------
 
 _section 'STATUS'
+
+if [[ "$_eval_mode" == "true" ]]; then
+  printf '  mode:      acceptance eval (ground truth: %s)\n' "$_eval_ground_truth"
+fi
 
 # Driver process state
 if pgrep -f "ralph-setup.sh.*$workspace" >/dev/null 2>&1 ||

@@ -315,6 +315,10 @@ Commits that introduce lint or formatting issues will be blocked. Bypass with `g
 
 ## Changelog
 
+### 0.5.1
+
+- **`ralph-status` eval badge.** When `.ralph/eval-ground-truth` exists (dropped by `ralph-evaluate.sh`), the status header now renders with an `[ACCEPTANCE EVAL]` suffix and the STATUS section gains a `mode: acceptance eval (ground truth: …)` row. Makes it obvious at a glance whether a running loop is an implementation pass or an acceptance re-check.
+
 ### 0.5.0
 
 - **Acceptance evaluation loop (`ralph-evaluate.sh`, `/ralph-evaluate`).** A second Ralph loop that runs after the main one claims completion, with an orchestrator prompt that picks a VERIFIER or REWORK mode per iteration based on `.ralph/acceptance-report.md` and delegates the work to a sub-agent via the Task tool. The orchestrator keeps its own context lean; the sub-agent does the heavy lifting (file reads, gate runs, Playwright MCP for UI). Runs standalone, or chained after a main loop via `--evaluate` (flag) or `RALPH_CHAIN_EVALUATE=1` (env). Capped at 5 iterations by default; override with `--eval-iterations N`. Chain fires only when the main loop exits cleanly, so acceptance testing always runs against a claimed-done state.
