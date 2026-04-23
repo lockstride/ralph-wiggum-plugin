@@ -157,6 +157,49 @@ PROMPT
   ! grep -q "PROMPT" "$MOCK_WORKSPACE/.ralph/activity.log"
 }
 
+@test "PROMPT.md mode writes task-file-path breadcrumb pointing at PROMPT.md" {
+  cat > "$MOCK_WORKSPACE/PROMPT.md" <<'PROMPT'
+# Tasks
+- [ ] alpha
+- [ ] beta
+PROMPT
+
+  resolve_prompt "$MOCK_WORKSPACE" "prompt" "" >/dev/null
+
+  [ -f "$MOCK_WORKSPACE/.ralph/task-file-path" ]
+  local recorded
+  recorded=$(cat "$MOCK_WORKSPACE/.ralph/task-file-path")
+  [ "$recorded" = "$MOCK_WORKSPACE/PROMPT.md" ]
+}
+
+@test "--prompt-file mode writes task-file-path breadcrumb pointing at the resolved path" {
+  cat > "$MOCK_WORKSPACE/custom.md" <<'PROMPT'
+# Tasks
+- [ ] one
+PROMPT
+
+  resolve_prompt "$MOCK_WORKSPACE" "file" "$MOCK_WORKSPACE/custom.md" >/dev/null
+
+  [ -f "$MOCK_WORKSPACE/.ralph/task-file-path" ]
+  local recorded
+  recorded=$(cat "$MOCK_WORKSPACE/.ralph/task-file-path")
+  [ "$recorded" = "$MOCK_WORKSPACE/custom.md" ]
+}
+
+@test "--prompt-file mode resolves workspace-relative path in breadcrumb" {
+  cat > "$MOCK_WORKSPACE/rel.md" <<'PROMPT'
+# Tasks
+- [ ] one
+PROMPT
+
+  resolve_prompt "$MOCK_WORKSPACE" "file" "rel.md" >/dev/null
+
+  [ -f "$MOCK_WORKSPACE/.ralph/task-file-path" ]
+  local recorded
+  recorded=$(cat "$MOCK_WORKSPACE/.ralph/task-file-path")
+  [ "$recorded" = "$MOCK_WORKSPACE/rel.md" ]
+}
+
 @test "cached prompt preserves placeholders for later substitution" {
   create_mock_speckit_implement
 

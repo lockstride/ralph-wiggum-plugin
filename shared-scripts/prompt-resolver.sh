@@ -103,7 +103,8 @@ resolve_prompt_promptmd() {
     echo "❌ PROMPT.md not found at $prompt_file" >&2
     return 1
   fi
-  rm -f "$workspace/.ralph/task-file-path"
+  mkdir -p "$workspace/.ralph"
+  echo "$prompt_file" >"$workspace/.ralph/task-file-path"
   _write_effective_prompt "$workspace" "$(cat "$prompt_file")"
 }
 
@@ -123,7 +124,8 @@ resolve_prompt_file() {
     echo "❌ Prompt file not found: $path" >&2
     return 1
   fi
-  rm -f "$workspace/.ralph/task-file-path"
+  mkdir -p "$workspace/.ralph"
+  echo "$path" >"$workspace/.ralph/task-file-path"
   _write_effective_prompt "$workspace" "$(cat "$path")"
 }
 
