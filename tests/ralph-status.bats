@@ -75,6 +75,60 @@ TASKS
   ! echo "$output" | grep -qE '^  tasks: '
 }
 
+@test "ralph-status: STATUS shows previous/current/next task triplet (0.5.6)" {
+  # Mid-stream task file: 2 done, 2 to go. Expect all three rows.
+  cat > "$MOCK_WORKSPACE/tasks.md" <<'TASKS'
+# Tasks
+- [x] T001 done one
+- [x] T002 done two
+- [ ] T003 currently in progress
+- [ ] T004 queued next
+TASKS
+  echo "$MOCK_WORKSPACE/tasks.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+
+  run bash "$STATUS_SCRIPT" "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+
+  echo "$output" | grep -qE '^  previous:  T002 done two'
+  echo "$output" | grep -qE '^  current:   T003 currently in progress'
+  echo "$output" | grep -qE '^  next:      T004 queued next'
+}
+
+@test "ralph-status: omits 'previous' before the first commit (0.5.6)" {
+  # Brand-new task file, no [x] yet — there is no previous task.
+  cat > "$MOCK_WORKSPACE/tasks.md" <<'TASKS'
+# Tasks
+- [ ] T001 first task
+- [ ] T002 second task
+TASKS
+  echo "$MOCK_WORKSPACE/tasks.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+
+  run bash "$STATUS_SCRIPT" "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+
+  ! echo "$output" | grep -qE '^  previous:'
+  echo "$output" | grep -qE '^  current:   T001 first task'
+  echo "$output" | grep -qE '^  next:      T002 second task'
+}
+
+@test "ralph-status: omits 'next' when current is the last task (0.5.6)" {
+  # Last-task case: only one [ ] remains.
+  cat > "$MOCK_WORKSPACE/tasks.md" <<'TASKS'
+# Tasks
+- [x] T001 done
+- [x] T002 done
+- [ ] T003 last one
+TASKS
+  echo "$MOCK_WORKSPACE/tasks.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+
+  run bash "$STATUS_SCRIPT" "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+
+  echo "$output" | grep -qE '^  previous:  T002 done'
+  echo "$output" | grep -qE '^  current:   T003 last one'
+  ! echo "$output" | grep -qE '^  next:'
+}
+
 @test "ralph-status: STATUS section includes a mode row with the ground-truth path in eval mode (0.5.1)" {
   local gt="$MOCK_WORKSPACE/PROMPT.md"
   echo "# ground truth" > "$gt"

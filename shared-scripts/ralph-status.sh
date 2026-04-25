@@ -155,18 +155,32 @@ if [[ -f "$activity_log" ]]; then
   fi
 fi
 
-# Next unchecked task (the count itself is in the PROGRESS section above)
+# Task triplet: previous (last [x]), current (first [ ]), next (second [ ]).
+# 'current' is the task the agent is mid-flight on — agents flip [ ] → [x]
+# only after committing, so the first unchecked task is what they're
+# working on right now (or the next pickup if mid-transition between
+# tasks, which is a sub-second window in practice). Lines are omitted
+# when their slot is empty: no 'previous' before the first commit; no
+# 'next' when current is the last task.
+_task_render() {
+  # Strip the leading "<lineno>:" from grep -n and the "  - [x] " /
+  # "  - [ ] " checkbox prefix; truncate to keep the line readable.
+  echo "$1" |
+    sed 's/^[0-9]*://' |
+    sed -E 's/^[[:space:]]*[-*][[:space:]]*\[(x| )\][[:space:]]*//' |
+    cut -c1-90
+}
+
 if [[ -f "$task_file_path" ]]; then
   task_file=$(cat "$task_file_path")
   if [[ -f "$task_file" ]]; then
-    next_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | head -1 || true)
-    if [[ -n "$next_task" ]]; then
-      _next_text=$(echo "$next_task" |
-        sed 's/^[0-9]*://' |
-        sed 's/^[[:space:]]*[-*][[:space:]]*\[ \][[:space:]]*//' |
-        cut -c1-90)
-      printf '  next:      %s\n' "$_next_text"
-    fi
+    _prev_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[x\]' "$task_file" 2>/dev/null | tail -1 || true)
+    _curr_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | head -1 || true)
+    _next_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | sed -n '2p' || true)
+
+    [[ -n "$_prev_task" ]] && printf '  previous:  %s\n' "$(_task_render "$_prev_task")"
+    [[ -n "$_curr_task" ]] && printf '  current:   %s\n' "$(_task_render "$_curr_task")"
+    [[ -n "$_next_task" ]] && printf '  next:      %s\n' "$(_task_render "$_next_task")"
   fi
 fi
 

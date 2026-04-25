@@ -320,14 +320,16 @@ tool_result_json() {
 }
 
 @test "heartbeat sidecar exits when parser exits (no leaked process) (0.5.4)" {
-  # Spawn the parser with a long heartbeat interval (so any leaked `sleep`
-  # is unambiguously OUR leak — no chance of natural completion racing the
-  # check), feed one event so the parser exits cleanly, and verify no
-  # `sleep <interval>` lingers afterwards. Pre-0.5.4 the trap killed only
-  # the subshell pid; bash didn't propagate SIGTERM to the foreground
-  # `sleep` child, so it became an orphan holding the FIFO open. Long
-  # interval (60s) makes the orphan visible far past test wallclock.
-  local interval=60
+  # Spawn the parser with a distinctive heartbeat interval (so any leaked
+  # `sleep` is unambiguously OUR leak — `sleep 60` collides with the
+  # spinner() fallback in ralph-common.sh which other parallel-running
+  # tests trigger), feed one event so the parser exits cleanly, and verify
+  # no `sleep <interval>` lingers afterwards. Pre-0.5.4 the trap killed
+  # only the subshell pid; bash didn't propagate SIGTERM to the foreground
+  # `sleep` child, so it became an orphan holding the FIFO open. Odd
+  # uncommon value (47s) makes the orphan visible far past test wallclock
+  # without colliding with any other shared-scripts/ sleeper.
+  local interval=47
   echo '{"kind":"system","model":"test"}' |
     RALPH_PARSER_HEARTBEAT_INTERVAL=$interval \
       bash "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE" 1 >/dev/null
