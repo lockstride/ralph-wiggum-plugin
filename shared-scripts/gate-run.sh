@@ -182,6 +182,47 @@ _log_activity() {
   printf '===\n'
 } >"$log_file"
 
+# 0.5.4: per-label mkdir-mutex. Prevents two concurrent gate runs of the
+# same label from racing on the shared $latest_link symlink, the shared
+# coverage/ output dirs, and the long-lived nx daemon. Concurrent runs are
+# almost always orphans from a killed iteration whose deep pnpm/nx/vitest
+# subtree survived the loop's pgrep-based reaper — when that happens, the
+# new iteration's first gate would clobber and corrupt the orphan's output
+# (or vice versa) and report a spurious failure. The mutex serializes the
+# two so the orphan finishes (or is reaped by the next sweep) before the
+# new run starts. mkdir is atomic across POSIX filesystems and works without
+# coreutils' `flock`, which is not on macOS by default.
+_lock_dir="$gates_dir/.${label}.lock"
+_lock_wait="${RALPH_GATE_LOCK_WAIT:-60}"
+_lock_acquired=0
+_lock_waited=0
+while [[ $_lock_waited -lt $_lock_wait ]]; do
+  if mkdir "$_lock_dir" 2>/dev/null; then
+    _lock_acquired=1
+    break
+  fi
+  # Stale-lock heuristic: if the lock dir is older than the largest
+  # plausible gate timeout (RALPH_GATE_STALE_LOCK_SEC, default 1800s = 30
+  # min, well above the 900s final-gate cap), the prior holder almost
+  # certainly died without cleanup. Steal the lock rather than block.
+  _stale_after="${RALPH_GATE_STALE_LOCK_SEC:-1800}"
+  _lock_age=$(($(date +%s) - $(stat -f '%m' "$_lock_dir" 2>/dev/null || stat -c '%Y' "$_lock_dir" 2>/dev/null || echo 0)))
+  if [[ $_lock_age -gt $_stale_after ]]; then
+    _log_activity "🧪 GATE LOCK STOLEN label=$label — prior holder appears dead (age=${_lock_age}s)"
+    rm -rf "$_lock_dir"
+    continue
+  fi
+  sleep 1
+  _lock_waited=$((_lock_waited + 1))
+done
+if [[ $_lock_acquired -eq 0 ]]; then
+  echo "gate-run.sh: another gate-run.sh is holding the $label lock; waited ${_lock_wait}s and gave up" >&2
+  echo "  (lock dir: $_lock_dir — remove manually if you are sure no other gate is running)" >&2
+  _log_activity "🧪 GATE BLOCKED label=$label — could not acquire lock after ${_lock_wait}s"
+  exit 64
+fi
+trap 'rmdir "$_lock_dir" 2>/dev/null || true' EXIT
+
 _log_activity "🧪 GATE start label=$label cmd=$(printf '%q ' "$@")"
 
 start_epoch=$(date +%s)

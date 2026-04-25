@@ -276,6 +276,26 @@ tool_result_json() {
   echo "$output" | grep -q "DEFER"
 }
 
+@test "emits RECOVER on chained 'git add ... && git commit' command (0.5.4)" {
+  # Spec-Kit prompt encourages: `git add <paths> && git commit -m "..."`
+  # The pre-0.5.4 regex `^git[[:space:]]+commit` missed this because the
+  # cmd starts with `git add`, so reset_failure_counters_on_task_boundary
+  # never fired and the per-iteration shell-failure counter accumulated
+  # across an entire iteration's worth of successful commits.
+  local cmd='git add foo.ts && git commit -m "feat: add foo (T001)"'
+  local event
+  event=$(printf '{"kind":"tool_result","name":"Shell","bytes":50,"lines":2,"exit_code":0,"path":"","cmd":%s}\n' \
+    "$(printf '%s' "$cmd" | jq -R -s .)")
+
+  local out
+  out=$(run_parser "$event")
+
+  # Should emit RECOVER (the reset signal) — proves the regex matched.
+  echo "$out" | grep -q "^RECOVER$"
+  # And should log the commit, with the message captured from -m "..."
+  grep -q 'COMMIT "feat: add foo (T001)"' "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
 @test "emits RECOVER on successful git commit" {
   local events=""
   events+=$(tool_result_json "Shell" 50 5 0 "" "git commit -m 'test'")
@@ -299,26 +319,25 @@ tool_result_json() {
   echo "$out" | grep -q "^HEARTBEAT$"
 }
 
-@test "heartbeat sidecar exits when parser exits (no leaked process)" {
-  # Spawn the parser with a fast heartbeat, feed one event so it processes
-  # and exits, then verify no orphan sleep/echo subshell is left running
-  # under our test pid namespace. The trap on EXIT kills HB_SIDECAR_PID.
-  local before_count
-  before_count=$(pgrep -c "sleep 1" 2>/dev/null || echo 0)
-
+@test "heartbeat sidecar exits when parser exits (no leaked process) (0.5.4)" {
+  # Spawn the parser with a long heartbeat interval (so any leaked `sleep`
+  # is unambiguously OUR leak — no chance of natural completion racing the
+  # check), feed one event so the parser exits cleanly, and verify no
+  # `sleep <interval>` lingers afterwards. Pre-0.5.4 the trap killed only
+  # the subshell pid; bash didn't propagate SIGTERM to the foreground
+  # `sleep` child, so it became an orphan holding the FIFO open. Long
+  # interval (60s) makes the orphan visible far past test wallclock.
+  local interval=60
   echo '{"kind":"system","model":"test"}' |
-    RALPH_PARSER_HEARTBEAT_INTERVAL=1 \
+    RALPH_PARSER_HEARTBEAT_INTERVAL=$interval \
       bash "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE" 1 >/dev/null
 
-  # Give the trap a moment to fire after the read loop exits.
-  sleep 0.2
+  # Give the trap a moment to reap.
+  sleep 0.3
 
-  local after_count
-  after_count=$(pgrep -c "sleep 1" 2>/dev/null || echo 0)
-
-  # The post-run count must not exceed the pre-run count — i.e., the
-  # sidecar's `sleep 1` did not leak.
-  [ "$after_count" -le "$before_count" ]
+  # Any orphan `sleep 60` is OURS — the parent test runner is unlikely to
+  # have started one at this exact value. Hard-fail rather than soft-compare.
+  ! pgrep -f "^sleep $interval$" >/dev/null
 }
 
 @test "Shell commands increment read-without-write counter" {

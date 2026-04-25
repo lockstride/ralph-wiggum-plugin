@@ -1177,6 +1177,17 @@ run_iteration() {
   # start) picks up the pieces.
   pkill -9 -f "$workspace.*Ralph Iteration" 2>/dev/null || true
 
+  # 0.5.4: also reap the gate-run.sh subtree rooted at this workspace.
+  # Gate runs spawn a deep tree (bash → pnpm → nx → vitest → N node
+  # workers) that the pgrep -P walk above does not fully reach when the
+  # iteration is killed mid-gate (recovery, DEFER, heartbeat timeout).
+  # Surviving gate trees collide with the next iteration's first gate on
+  # the shared $latest-link symlink, the coverage/ output dirs, and the
+  # nx daemon — producing spurious failures that look like real bugs.
+  # gate-run.sh's mkdir-mutex (0.5.4) catches some of this, but reaping
+  # at iteration boundaries is the cleaner fix.
+  pkill -9 -f "gate-run.sh.*$workspace" 2>/dev/null || true
+
   # Restore previous trap
   if [[ -n "$_prev_trap" ]]; then
     eval "$_prev_trap"

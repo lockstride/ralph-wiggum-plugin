@@ -55,8 +55,26 @@ WRITES_FILE=$(mktemp)
 # 0.5.3: independent heartbeat emitter pid. Set in main() once the sidecar
 # is spawned; left empty here so the EXIT trap can no-op safely if main()
 # exits before the spawn (e.g. test fixtures that source the file).
+#
+# 0.5.4: trap MUST reap the sidecar's `sleep` child before killing the
+# sidecar itself. The sidecar is a `( while sleep N; do echo HB; done ) &`
+# subshell; HB_SIDECAR_PID is the subshell's pid. Sending SIGTERM/KILL to
+# the subshell does NOT propagate to the foreground `sleep` child — bash
+# only checks for trapped signals between commands, and `sleep` blocks the
+# subshell for the full interval. The sleep then becomes an orphan
+# (PPID=1) holding the FIFO open across the test run, which both leaks
+# memory in long-running loops and makes bats suites flaky as orphans
+# accumulate across runs. `pkill -P` reaps the children first, then we
+# kill the subshell so it exits promptly.
 HB_SIDECAR_PID=""
-trap '[[ -n "$HB_SIDECAR_PID" ]] && kill "$HB_SIDECAR_PID" 2>/dev/null; rm -f "$FAILURES_FILE" "$WRITES_FILE"' EXIT
+_cleanup_parser() {
+  if [[ -n "$HB_SIDECAR_PID" ]]; then
+    pkill -P "$HB_SIDECAR_PID" 2>/dev/null || true
+    kill "$HB_SIDECAR_PID" 2>/dev/null || true
+  fi
+  rm -f "$FAILURES_FILE" "$WRITES_FILE"
+}
+trap _cleanup_parser EXIT
 
 # 0.3.0: Active-recovery state. The first recoverable stuck pattern in an
 # iteration emits RECOVER_ATTEMPT (not GUTTER); subsequent stuck patterns
@@ -84,7 +102,7 @@ MAX_READS_WITHOUT_WRITE="${RALPH_MAX_READS_WITHOUT_WRITE:-40}"
 # budget without letting genuine infinite loops run forever. Raise via
 # env var for longer debug sessions, lower (back to 2) for aggressive
 # bail-out behaviour.
-SHELL_FAIL_THRESHOLD="${RALPH_SHELL_FAIL_THRESHOLD:-4}"
+SHELL_FAIL_THRESHOLD="${RALPH_SHELL_FAIL_THRESHOLD:-5}"
 FILE_THRASH_THRESHOLD="${RALPH_FILE_THRASH_THRESHOLD:-5}"
 
 get_health_emoji() {
@@ -444,7 +462,18 @@ process_line() {
           ;;
         Shell)
           SHELL_OUTPUT_CHARS=$((SHELL_OUTPUT_CHARS + bytes))
-          if [[ "$cmd" =~ ^git[[:space:]]+commit ]]; then
+          # 0.5.4: anchor the `git commit` and `git push` matches to either
+          # start-of-string OR a shell separator (whitespace, &, ;, |, `(`),
+          # not just start-of-string. Spec-Kit-style agents canonically batch
+          # `git add <paths> && git commit -m "..."` as a single shell call,
+          # which the prior `^git ` anchor missed entirely. Without this fix,
+          # reset_failure_counters_on_task_boundary never fires, the per-task
+          # shell-failure counter accumulates across the whole iteration, and
+          # an iteration with N successful commits + a few unrelated transient
+          # failures eventually trips the recovery threshold for no real
+          # reason. Field log: 14 successful commits in one iteration produced
+          # exactly one `COMMIT` activity-log line.
+          if [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git[[:space:]]+commit ]]; then
             if [[ $exit_code -eq 0 ]]; then
               local commit_msg=""
               if [[ "$cmd" =~ -m[[:space:]]+[\"\']([^\"\']+)[\"\'] ]]; then
@@ -465,7 +494,7 @@ process_line() {
               log_activity "COMMIT FAILED $cmd → exit $exit_code"
               track_shell_failure "$cmd" "$exit_code"
             fi
-          elif [[ "$cmd" =~ ^git[[:space:]]+push ]]; then
+          elif [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git[[:space:]]+push ]]; then
             if [[ $exit_code -eq 0 ]]; then
               log_activity "PUSH $cmd → exit 0"
             else

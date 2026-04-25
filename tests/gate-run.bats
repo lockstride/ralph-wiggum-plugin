@@ -147,6 +147,36 @@ teardown() {
   [ "$(cat "$MOCK_WORKSPACE/.ralph/gates/final-latest.exit")" = "0" ]
 }
 
+@test "concurrent runs of the same label serialize via the lock (0.5.4)" {
+  # Holder grabs the lock by hand, then we kick off a second invocation
+  # with a tiny lock-wait timeout. The second one must give up with exit
+  # 64 and a recognizable message rather than racing the holder.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  mkdir "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
+
+  RALPH_GATE_LOCK_WAIT=2 run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "should not run"
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"holding the basic lock"* ]]
+
+  # Cleanup
+  rmdir "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
+}
+
+@test "stale lock older than RALPH_GATE_STALE_LOCK_SEC is stolen (0.5.4)" {
+  # Forge a stale lock dir with mtime in the distant past, then run with
+  # a tiny stale threshold so it gets stolen and the gate proceeds.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  mkdir "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
+  # Backdate mtime to 1 hour ago — touch -t works on both macOS and GNU
+  touch -t "$(date -v-1H '+%Y%m%d%H%M' 2>/dev/null || date -d '1 hour ago' '+%Y%m%d%H%M')" \
+    "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
+
+  RALPH_GATE_LOCK_WAIT=5 RALPH_GATE_STALE_LOCK_SEC=60 \
+    run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "ran after steal"
+  [ "$status" -eq 0 ]
+  grep -q "ran after steal" "$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
+}
+
 @test "retains only RALPH_GATE_KEEP logs" {
   export RALPH_GATE_KEEP=2
 
