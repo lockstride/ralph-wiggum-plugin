@@ -371,4 +371,57 @@ _log_activity "🧪 GATE end label=$label exit=$cmd_status duration=${duration}s
 # across all labels represents the last gate the agent ran.
 printf '%s' "$cmd_status" >"$gates_dir/$label-latest.exit"
 
+# 0.6.1: Long-gate single-failure SUGGEST_SKILL trigger.
+#
+# A gate that took ≥ RALPH_LONG_GATE_THRESHOLD seconds (default 300s = 5min)
+# AND exited non-zero is treated as evidence of stuckness on its own —
+# even on the first failure. The stream-parser's existing 3-strike SUGGEST
+# threshold can't help here: an e2e gate that takes 9 minutes per run would
+# need 27+ minutes of compute (and 3 identical agent retries) before the
+# parser's threshold trips. By that point the agent has spent more compute
+# on retries than it would have on a `diagnosing-stuck-tasks` invocation.
+#
+# Writes `.ralph/skill-suggestion` directly. The agent's framing prompt
+# instructs it to read this file at startup and after every commit, so
+# the next agent turn picks up the suggestion. No stream signal needed —
+# stream-parser's SUGGEST_SKILL signal exists for in-session deduplication
+# in the loop's read cycle, but gate-run.sh runs as a child of the agent's
+# own shell tool, so the agent reads the file directly on its next turn.
+#
+# Tunable via RALPH_LONG_GATE_THRESHOLD. Set to 0 to disable.
+LONG_GATE_THRESHOLD="${RALPH_LONG_GATE_THRESHOLD:-300}"
+if [[ $cmd_status -ne 0 ]] &&
+  [[ $LONG_GATE_THRESHOLD -gt 0 ]] &&
+  [[ ${duration:-0} -ge $LONG_GATE_THRESHOLD ]]; then
+  skill_suggestion_file="$workspace/.ralph/skill-suggestion"
+  # Don't clobber an existing higher-priority suggestion (e.g. one written
+  # by stream-parser's RECOVER_ATTEMPT path or a prior gate in this turn).
+  if [[ ! -f "$skill_suggestion_file" ]]; then
+    cat >"$skill_suggestion_file" <<EOF
+## Loop suggestion (consume once, then delete this file)
+
+**Skill to invoke**: \`diagnosing-stuck-tasks\`
+
+**Why**: Gate \`$label\` took ${duration}s and failed (exit $cmd_status).
+
+**Context**: A long-running gate that exits non-zero is rarely fixed by
+re-running it the same way. Read the failing-test summary above (or
+\`$rel_latest\`), question whether the failure points at a real bug or an
+infrastructure issue (port not listening, dependency not started, env var
+missing), and run a layer-bypassing diagnostic (e.g. \`curl\` directly
+against the endpoint the test couldn't reach, or check the relevant
+docker/orb container) before retrying the full gate.
+
+The loop detected this pattern on the FIRST failure (not the third) because
+each gate run costs ${duration}s of compute — three identical retries would
+burn $((duration * 3))s before the stream-parser's 3-strike threshold
+suggested a skill. Switch postures now.
+
+After the skill completes (or you decide to override its recommendation),
+delete this file with \`rm .ralph/skill-suggestion\`.
+EOF
+    _log_activity "💡 Skill suggestion: diagnosing-stuck-tasks (long-gate fail: $label ${duration}s)"
+  fi
+fi
+
 exit "$cmd_status"

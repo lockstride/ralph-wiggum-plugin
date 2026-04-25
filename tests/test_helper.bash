@@ -95,6 +95,23 @@ SKILL
   )
 }
 
+# Compute the 0.6.1 composite cache key for a speckit.implement.md path.
+# Format: <sha256(speckit)>:<sha256(adaptation-guide)>
+# Falls back to the single-hash format if the guide isn't readable —
+# matches the behavior in prompt-resolver.sh's resolve_prompt_spec.
+compute_composite_cache_hash() {
+  local speckit_path="$1"
+  local guide_path="${TEMPLATES_DIR:-$PLUGIN_ROOT/shared-references/templates}/speckit-adaptation-guide.md"
+  local speckit_hash guide_hash
+  speckit_hash=$(shasum -a 256 "$speckit_path" | cut -d' ' -f1)
+  if [[ -f "$guide_path" ]]; then
+    guide_hash=$(shasum -a 256 "$guide_path" | cut -d' ' -f1)
+    echo "${speckit_hash}:${guide_hash}"
+  else
+    echo "$speckit_hash"
+  fi
+}
+
 # Create a mock speckit-implement skill (alternate location)
 create_mock_speckit_implement_skill() {
   mkdir -p "$MOCK_WORKSPACE/.claude/skills/speckit-implement"

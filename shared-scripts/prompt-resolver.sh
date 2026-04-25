@@ -496,19 +496,94 @@ resolve_prompt_spec() {
   local use_generated=false
 
   if [[ -n "$speckit_implement" ]] && [[ "${RALPH_SKIP_GENERATION:-}" != "1" ]]; then
+    # 0.6.1: Composite cache key — sha256(speckit.implement) + sha256(adaptation
+    # guide). Pre-0.6.1 the key was the speckit hash alone, which meant a
+    # plugin upgrade that rewrote the adaptation guide (the rules driving
+    # generation) did NOT invalidate the cache. The 0.6.0 release added
+    # skill+ACTIVITY_TAIL rules to the guide, but every existing workspace
+    # kept reusing prompts generated under the old guide because their
+    # speckit.implement.md hadn't changed. Result: skills+self-observation
+    # silently bypassed for the most-used codepath.
+    #
+    # Behavior split (intentional, see _generate_ralph_prompt below):
+    #   - speckit.implement.md changed (user edit)  → regenerate silently.
+    #     The user explicitly changed the source, regeneration is expected.
+    #   - guide changed underneath (plugin upgrade) → WARN, don't regenerate.
+    #     Generation is an LLM call (~5–10s + token cost) and should be
+    #     opt-in for unattended-loop scenarios. The warning gives the
+    #     operator a one-line `rm` they can paste, or they can set
+    #     RALPH_REGENERATE_PROMPT=1 to opt in for the current invocation.
+    #
+    # Falls back gracefully when the guide can't be hashed (treats it as
+    # empty, so legacy single-hash files still match cleanly).
     local current_hash
     current_hash=$(shasum -a 256 "$speckit_implement" | cut -d' ' -f1)
+    local guide_hash=""
+    local guide_path="$templates_dir/speckit-adaptation-guide.md"
+    if [[ -f "$guide_path" ]]; then
+      guide_hash=$(shasum -a 256 "$guide_path" | cut -d' ' -f1)
+    fi
+    local composite_hash="$current_hash"
+    if [[ -n "$guide_hash" ]]; then
+      composite_hash="${current_hash}:${guide_hash}"
+    fi
 
     if [[ -f "$ralph_prompt" ]] && [[ -f "$ralph_hash_file" ]]; then
       local stored_hash
       stored_hash=$(cat "$ralph_hash_file")
-      if [[ "$current_hash" == "$stored_hash" ]]; then
+      if [[ "$composite_hash" == "$stored_hash" ]]; then
         echo "  ✓ Using cached prompt (hash match)" >&2
         _pr_log "$workspace" "PROMPT ✓ using cached prompt (hash match)"
         use_generated=true
       else
-        echo "  ↻ speckit.implement.md changed — regenerating prompt..." >&2
-        _pr_log "$workspace" "PROMPT speckit.implement.md changed — regenerating..."
+        # Decompose what changed. The stored hash may be either the legacy
+        # single-hash format ("<speckit_hash>") or the 0.6.1 composite
+        # format ("<speckit_hash>:<guide_hash>"). Compare each component
+        # so we can distinguish "user edited the source" (regenerate) from
+        # "plugin upgrade rewrote the guide" (warn-only).
+        local stored_speckit_hash="${stored_hash%%:*}"
+        local stored_guide_hash=""
+        if [[ "$stored_hash" == *:* ]]; then
+          stored_guide_hash="${stored_hash#*:}"
+        fi
+        local speckit_changed=false guide_changed=false
+        [[ "$current_hash" != "$stored_speckit_hash" ]] && speckit_changed=true
+        [[ -n "$guide_hash" ]] && [[ "$guide_hash" != "$stored_guide_hash" ]] && guide_changed=true
+
+        if [[ "$speckit_changed" == "true" ]]; then
+          echo "  ↻ speckit.implement.md changed — regenerating prompt..." >&2
+          _pr_log "$workspace" "PROMPT speckit.implement.md changed — regenerating..."
+          # Falls through to the generation block below.
+        elif [[ "$guide_changed" == "true" ]]; then
+          # Plugin-side change. Warn loudly and use the cached prompt as-is
+          # unless the operator opted in via RALPH_REGENERATE_PROMPT=1.
+          if [[ "${RALPH_REGENERATE_PROMPT:-}" == "1" ]]; then
+            echo "  ↻ adaptation guide changed (plugin upgrade) — RALPH_REGENERATE_PROMPT=1, regenerating..." >&2
+            _pr_log "$workspace" "PROMPT guide changed — regenerating per RALPH_REGENERATE_PROMPT=1"
+          else
+            cat >&2 <<EOF
+  ⚠️  Cached spec prompt is STALE.
+      Your spec prompt was generated under a different version of the
+      Ralph adaptation guide. The cached prompt may be missing newer
+      loop wiring (skills, activity-tail, escalation hooks).
+
+      To regenerate now:
+        rm $ralph_prompt $ralph_hash_file
+        # then re-run ralph-resume / ralph-once
+
+      Or opt in for this run only:
+        RALPH_REGENERATE_PROMPT=1 ralph-resume
+
+      Continuing with the cached prompt for now.
+EOF
+            _pr_log "$workspace" "PROMPT ⚠️ guide changed — using stale cache (operator must opt in to regenerate)"
+            # Update the stored hash to record the guide we WOULD have
+            # used, so the warning fires once per guide change (not on
+            # every iteration). The cached prompt body is unchanged.
+            printf '%s\n' "$composite_hash" >"$ralph_hash_file"
+            use_generated=true
+          fi
+        fi
       fi
     else
       echo "  ⚙ No cached prompt — generating from speckit.implement.md..." >&2
@@ -517,7 +592,7 @@ resolve_prompt_spec() {
 
     if [[ "$use_generated" != "true" ]]; then
       if _generate_ralph_prompt "$workspace" "$spec_dir" "$speckit_implement" \
-        "$current_hash" "$ralph_prompt" "$ralph_hash_file" "$templates_dir"; then
+        "$composite_hash" "$ralph_prompt" "$ralph_hash_file" "$templates_dir"; then
         use_generated=true
       else
         echo "  ⚠️  Prompt generation failed — falling back to built-in template" >&2

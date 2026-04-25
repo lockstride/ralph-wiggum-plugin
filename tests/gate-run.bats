@@ -177,6 +177,92 @@ teardown() {
   grep -q "ran after steal" "$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
 }
 
+# -----------------------------------------------------------------------------
+# 0.6.1: Long-gate single-failure → SUGGEST_SKILL (skill-suggestion file)
+#
+# Pre-0.6.1 the only stuck-pattern escalation was the stream-parser's 3-strike
+# SUGGEST threshold on identical shell commands. For long-running gates (e2e,
+# all-check) that take 5–15 minutes per run, hitting 3 strikes meant 15–45
+# minutes of wall time and 3× compute before the agent got a hint to switch
+# strategies. The first failure already represents a meaningful chunk of
+# compute — escalate immediately when the gate took ≥ RALPH_LONG_GATE_THRESHOLD
+# seconds.
+# -----------------------------------------------------------------------------
+
+@test "long-gate failure writes skill-suggestion (0.6.1)" {
+  # 1s threshold so the test runs fast. Real default is 300s.
+  export RALPH_LONG_GATE_THRESHOLD=1
+
+  run bash "$SCRIPTS_DIR/gate-run.sh" e2e bash -c "sleep 2; exit 1"
+  [ "$status" -eq 1 ]
+
+  # Skill-suggestion file written, pointing at diagnosing-stuck-tasks.
+  [ -f "$MOCK_WORKSPACE/.ralph/skill-suggestion" ]
+  grep -q "diagnosing-stuck-tasks" "$MOCK_WORKSPACE/.ralph/skill-suggestion"
+  # Includes the failing gate's label and duration so the agent has context
+  # when it reads the suggestion.
+  grep -q "Gate \`e2e\`" "$MOCK_WORKSPACE/.ralph/skill-suggestion"
+  grep -q "exit 1" "$MOCK_WORKSPACE/.ralph/skill-suggestion"
+  # Activity log records the suggestion so operators can see it post-hoc.
+  grep -q "💡 Skill suggestion: diagnosing-stuck-tasks (long-gate fail" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "fast gate failure does NOT write skill-suggestion (0.6.1)" {
+  # A red unit-test loop that takes seconds shouldn't trip the long-gate
+  # path — the stream-parser's 3-strike threshold is the correct mechanism
+  # there. Default threshold is 300s; we set it explicitly to be deterministic.
+  export RALPH_LONG_GATE_THRESHOLD=10
+
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic bash -c "exit 1"
+  [ "$status" -eq 1 ]
+
+  # No skill-suggestion file should exist.
+  [ ! -f "$MOCK_WORKSPACE/.ralph/skill-suggestion" ]
+}
+
+@test "long-gate path can be disabled with RALPH_LONG_GATE_THRESHOLD=0 (0.6.1)" {
+  export RALPH_LONG_GATE_THRESHOLD=0
+
+  run bash "$SCRIPTS_DIR/gate-run.sh" e2e bash -c "sleep 1; exit 1"
+  [ "$status" -eq 1 ]
+
+  # Disabled — no skill-suggestion file even though duration ≥ 1s.
+  [ ! -f "$MOCK_WORKSPACE/.ralph/skill-suggestion" ]
+}
+
+@test "long-gate success does NOT write skill-suggestion (0.6.1)" {
+  # Slow but green gates are fine — they're just slow.
+  export RALPH_LONG_GATE_THRESHOLD=1
+
+  run bash "$SCRIPTS_DIR/gate-run.sh" e2e bash -c "sleep 2; exit 0"
+  [ "$status" -eq 0 ]
+
+  [ ! -f "$MOCK_WORKSPACE/.ralph/skill-suggestion" ]
+}
+
+@test "long-gate path doesn't clobber an existing higher-priority suggestion (0.6.1)" {
+  # If the stream-parser (or a prior gate in this turn) already wrote a
+  # skill-suggestion, gate-run.sh should leave it alone rather than overwrite
+  # it with its own. The pre-existing suggestion is the more recent / more
+  # specific signal to act on.
+  export RALPH_LONG_GATE_THRESHOLD=1
+  mkdir -p "$MOCK_WORKSPACE/.ralph"
+  cat > "$MOCK_WORKSPACE/.ralph/skill-suggestion" <<'EOF'
+## Loop suggestion (consume once, then delete this file)
+
+**Skill to invoke**: `reviewing-loop-progress`
+
+(Pre-existing suggestion from stream-parser — gate-run.sh should not overwrite this.)
+EOF
+
+  run bash "$SCRIPTS_DIR/gate-run.sh" e2e bash -c "sleep 2; exit 1"
+  [ "$status" -eq 1 ]
+
+  # The pre-existing reviewing-loop-progress suggestion is still in place.
+  grep -q "reviewing-loop-progress" "$MOCK_WORKSPACE/.ralph/skill-suggestion"
+  ! grep -q "diagnosing-stuck-tasks" "$MOCK_WORKSPACE/.ralph/skill-suggestion"
+}
+
 @test "retains only RALPH_GATE_KEEP logs" {
   export RALPH_GATE_KEEP=2
 

@@ -604,9 +604,27 @@ process_line() {
       # but not evidence of stuckness on its own. Real stuckness comes
       # from repeated identical shell failures or file thrashing, which
       # are handled elsewhere.
+      # 0.6.1: also emit SUGGEST_SKILL pointing at `reviewing-loop-progress`.
+      # Empirical evidence (12 stall warnings in a single dmatrix.refactor
+      # session with zero escalation) showed the logged-only treatment was
+      # too passive — agents that read 40+ files with no write are usually
+      # confused about the task, not legitimately exploring. The lighter
+      # `reviewing-loop-progress` skill (one-paragraph "what am I actually
+      # doing" reflection) is the right intervention here, not the heavier
+      # `diagnosing-stuck-tasks` (reserved for repeated gate failures).
+      # Deduped per-iteration via SUGGESTED_SKILLS_FILE so the same stall
+      # pattern doesn't spam suggestions every 40 ops.
       if [[ $CONSECUTIVE_READS -ge $MAX_READS_WITHOUT_WRITE ]]; then
         log_error "⚠️ READ-WITHOUT-WRITE STALL: $CONSECUTIVE_READS consecutive reads/shells without a write (informational only)"
         log_activity "⚠️ Read-without-write stall: $CONSECUTIVE_READS ops without a write"
+        if ! grep -qxF "reviewing-loop-progress" "$SUGGESTED_SKILLS_FILE" 2>/dev/null; then
+          _write_skill_suggestion "reviewing-loop-progress" \
+            "Agent has performed ${CONSECUTIVE_READS} reads/shells with no write in between" \
+            "Long read-without-write streaks usually mean the agent is confused about the task or thrashing through unrelated files. A meta-reflection (one paragraph: what am I doing, what's working, what's not) is cheaper than another 40 reads."
+          echo "reviewing-loop-progress" >>"$SUGGESTED_SKILLS_FILE"
+          log_activity "💡 Skill suggestion: reviewing-loop-progress (read-without-write stall)"
+          echo "SUGGEST_SKILL" 2>/dev/null || true
+        fi
         CONSECUTIVE_READS=0
       fi
 

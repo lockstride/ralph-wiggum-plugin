@@ -263,7 +263,13 @@ tool_result_json() {
   echo "$output" | grep -q "^GUTTER$"
 }
 
-@test "logs read-without-write stall but does not emit GUTTER (0.2.4)" {
+@test "read-without-write stall emits SUGGEST_SKILL → reviewing-loop-progress, not GUTTER (0.6.1)" {
+  # 0.2.4 downgraded the stall from GUTTER to a logged-only observation —
+  # too passive in practice (a single dmatrix.refactor session in the wild
+  # logged 12 stall warnings with zero escalation). 0.6.1 restores
+  # escalation but as a soft skill suggestion: lighter-touch
+  # `reviewing-loop-progress` ("am I still on the right track?"), not the
+  # heavier `diagnosing-stuck-tasks` (reserved for repeated gate failures).
   export RALPH_MAX_READS_WITHOUT_WRITE=5  # low threshold for testing
 
   local events=""
@@ -274,13 +280,46 @@ tool_result_json() {
 
   local output
   output=$(run_parser "$events")
-  # Stall is logged for visibility...
+
+  # Stall is logged for visibility (existing behavior).
   grep -q "READ-WITHOUT-WRITE STALL" "$MOCK_WORKSPACE/.ralph/errors.log"
   grep -q "Read-without-write stall" "$MOCK_WORKSPACE/.ralph/activity.log"
-  # ...but does NOT emit GUTTER. It is a smell, not evidence of stuckness.
+
+  # 0.6.1: SUGGEST_SKILL is also emitted to stdout, and a skill-suggestion
+  # file is written pointing at reviewing-loop-progress (NOT diagnosing-stuck-tasks).
+  echo "$output" | grep -q "^SUGGEST_SKILL$"
+  [ -f "$MOCK_WORKSPACE/.ralph/skill-suggestion" ]
+  grep -q "reviewing-loop-progress" "$MOCK_WORKSPACE/.ralph/skill-suggestion"
+  ! grep -q "diagnosing-stuck-tasks" "$MOCK_WORKSPACE/.ralph/skill-suggestion"
+  grep -q "💡 Skill suggestion: reviewing-loop-progress" "$MOCK_WORKSPACE/.ralph/activity.log"
+
+  # Still does NOT emit GUTTER — soft suggestion only.
   if echo "$output" | grep -q "GUTTER"; then
-    fail "Stall should not emit GUTTER as of 0.2.4; it logs only"
+    fail "Stall should not emit GUTTER as of 0.2.4; it suggests a skill (0.6.1)"
   fi
+}
+
+@test "stall SUGGEST_SKILL is deduplicated within an iteration (0.6.1)" {
+  # If the agent keeps reading after the stall threshold trips, we don't
+  # want to keep re-emitting the same suggestion every 40 ops. The
+  # SUGGESTED_SKILLS_FILE marker matches the dedup behavior of the
+  # shell-fail and file-thrash soft-suggestion paths.
+  export RALPH_MAX_READS_WITHOUT_WRITE=5
+
+  local events=""
+  for i in $(seq 1 12); do
+    events+=$(tool_result_json "Read" 10 5 0 "/tmp/file${i}.ts")
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+
+  # Two stall thresholds were crossed (12 reads, threshold 5 with reset),
+  # but only ONE SUGGEST_SKILL emission for reviewing-loop-progress.
+  local count
+  count=$(echo "$output" | grep -c "^SUGGEST_SKILL$" || true)
+  [ "$count" -eq 1 ]
 }
 
 @test "resets read-without-write counter on Write" {
