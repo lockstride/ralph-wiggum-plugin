@@ -162,13 +162,64 @@ fi
 # tasks, which is a sub-second window in practice). Lines are omitted
 # when their slot is empty: no 'previous' before the first commit; no
 # 'next' when current is the last task.
-_task_render() {
-  # Strip the leading "<lineno>:" from grep -n and the "  - [x] " /
-  # "  - [ ] " checkbox prefix; truncate to keep the line readable.
+#
+# Long task descriptions wrap at the terminal width (or 100 cols when
+# stdout is not a tty), with continuation lines indented to align under
+# the first text column. RALPH_STATUS_WIDTH overrides if you want a
+# narrower wrap (e.g. for piping through less -S).
+
+_term_width() {
+  if [[ -n "${RALPH_STATUS_WIDTH:-}" ]]; then
+    echo "$RALPH_STATUS_WIDTH"
+    return
+  fi
+  if [[ -n "${COLUMNS:-}" ]] && [[ "$COLUMNS" -gt 40 ]]; then
+    echo "$COLUMNS"
+    return
+  fi
+  local cols
+  cols=$(tput cols 2>/dev/null || echo 0)
+  if [[ "$cols" -gt 40 ]]; then
+    echo "$cols"
+    return
+  fi
+  echo 100
+}
+
+# Strip "<lineno>:" prefix from grep -n and the leading "- [x] " / "- [ ] "
+# checkbox marker. Returns just the task text.
+_task_strip() {
   echo "$1" |
     sed 's/^[0-9]*://' |
-    sed -E 's/^[[:space:]]*[-*][[:space:]]*\[(x| )\][[:space:]]*//' |
-    cut -c1-90
+    sed -E 's/^[[:space:]]*[-*][[:space:]]*\[(x| )\][[:space:]]*//'
+}
+
+# Print "  <label>:<pad><wrapped text>" with continuation lines aligned
+# under the start of the text. fold -s wraps on whitespace and never
+# splits a word. The first-line write is split out so we don't have to
+# pre-compute byte vs. screen widths for printf.
+_print_task_row() {
+  local label="$1"
+  local text="$2"
+  local prefix
+  prefix=$(printf '  %-10s ' "$label:")
+  local indent
+  indent=$(printf '%*s' "${#prefix}" '')
+
+  local width
+  width=$(_term_width)
+  local wrap_at=$((width - ${#prefix}))
+  [[ $wrap_at -lt 30 ]] && wrap_at=30
+
+  local first=1
+  while IFS= read -r _line; do
+    if [[ $first -eq 1 ]]; then
+      printf '%s%s\n' "$prefix" "$_line"
+      first=0
+    else
+      printf '%s%s\n' "$indent" "$_line"
+    fi
+  done < <(printf '%s\n' "$text" | fold -s -w "$wrap_at")
 }
 
 if [[ -f "$task_file_path" ]]; then
@@ -178,9 +229,9 @@ if [[ -f "$task_file_path" ]]; then
     _curr_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | head -1 || true)
     _next_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | sed -n '2p' || true)
 
-    [[ -n "$_prev_task" ]] && printf '  previous:  %s\n' "$(_task_render "$_prev_task")"
-    [[ -n "$_curr_task" ]] && printf '  current:   %s\n' "$(_task_render "$_curr_task")"
-    [[ -n "$_next_task" ]] && printf '  next:      %s\n' "$(_task_render "$_next_task")"
+    [[ -n "$_prev_task" ]] && _print_task_row previous "$(_task_strip "$_prev_task")"
+    [[ -n "$_curr_task" ]] && _print_task_row current "$(_task_strip "$_curr_task")"
+    [[ -n "$_next_task" ]] && _print_task_row next "$(_task_strip "$_next_task")"
   fi
 fi
 
