@@ -397,95 +397,59 @@ PROMPT
 }
 
 # -----------------------------------------------------------------------------
-# 0.6.1: stale-cache warning behavior
+# 0.6.2: auto-regenerate on cache-key mismatch
 #
-# Background: pre-0.6.1 the cache key was sha256(speckit.implement) only, so a
-# plugin upgrade that rewrote the adaptation guide silently kept reusing the
-# old cached prompt — even though the rules driving generation had changed.
-# 0.6.1 detects this and warns loudly, telling the operator how to regenerate.
-# Generation is NOT triggered automatically (it's an LLM call, ~5–10s + token
-# cost) — opt in with RALPH_REGENERATE_PROMPT=1 or rm the cache pair.
+# Pre-0.6.1 the cache key was sha256(speckit.implement) only, so plugin
+# upgrades that rewrote the adaptation guide silently reused stale cached
+# prompts. 0.6.1 added the guide hash to the key but only WARNED on guide
+# change — the warning got buried in tmux startup output and operators
+# missed it. 0.6.2 unifies both branches: any composite-hash mismatch
+# (speckit changed, guide changed, or both) triggers regeneration. The log
+# message tells the operator which side moved, but no env-var opt-in is
+# required and no stale prompt ever runs.
+#
+# Tests below use the activity-log breadcrumb to verify the right branch
+# was taken — the actual regeneration calls `claude -p` and is exercised
+# only in end-to-end tests.
 # -----------------------------------------------------------------------------
 
-@test "guide change triggers stale warning (cached body unchanged) (0.6.1)" {
+@test "guide-only change triggers auto-regen (0.6.2)" {
   create_mock_speckit_implement
 
-  # Compute the speckit hash, but use a stale guide hash to simulate a plugin
-  # upgrade that rewrote the adaptation guide underneath the cache.
+  # Stored hash: real speckit hash + bogus guide hash → guide-only mismatch.
   local speckit_hash
   speckit_hash=$(shasum -a 256 "$MOCK_WORKSPACE/.claude/commands/speckit.implement.md" | cut -d' ' -f1)
   local stale_composite="${speckit_hash}:0000000000000000000000000000000000000000000000000000000000000000"
 
   cat > "$MOCK_SPEC_DIR/ralph-prompt.md" <<'PROMPT'
-# Stale-but-still-usable cached prompt
-This was generated under an older adaptation guide.
+# Old cached prompt
 PROMPT
   echo "$stale_composite" > "$MOCK_SPEC_DIR/.ralph-prompt-hash"
   (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "add stale-guide cache")
 
-  # Skip generation — even if RALPH_REGENERATE_PROMPT were set, we don't want
-  # to hit the API in tests. We're verifying the warning + cache-preservation
-  # behavior on its own.
+  # Source ralph-common so log_activity is defined and breadcrumbs land.
+  source "$SCRIPTS_DIR/ralph-common.sh"
+  echo "# Activity Log" > "$MOCK_WORKSPACE/.ralph/activity.log"
+
   local out
   out=$(resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" 2>&1)
 
-  # Warning surfaces, with a copy-pasteable rm command pointing at both files.
-  echo "$out" | grep -q "Cached spec prompt is STALE"
-  echo "$out" | grep -q "rm $MOCK_SPEC_DIR/ralph-prompt.md"
-  echo "$out" | grep -q ".ralph-prompt-hash"
-  # Mentions the env var as the alternative opt-in path.
-  echo "$out" | grep -q "RALPH_REGENERATE_PROMPT=1"
-
-  # Cached prompt body MUST be preserved on disk — warn, don't regenerate.
-  grep -q "Stale-but-still-usable" "$MOCK_SPEC_DIR/ralph-prompt.md"
-
-  # Effective prompt was still rendered from the cached body so the loop
-  # can keep going while the operator decides.
-  grep -q "Stale-but-still-usable" "$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  # Stderr line surfaces which side changed.
+  echo "$out" | grep -q "adaptation guide changed"
+  echo "$out" | grep -q "regenerating"
+  # Activity log captures both the loud STALE marker (for postmortem grep)
+  # AND the auto-regen attribution. Stderr surfaces the STALE marker too.
+  echo "$out" | grep -q "STALE prompt cache"
+  grep -q "PROMPT ⚠️ STALE: adaptation guide changed" "$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -q "PROMPT guide changed (plugin upgrade) — regenerating" "$MOCK_WORKSPACE/.ralph/activity.log"
+  # No env-var opt-in mention — that's gone in 0.6.2.
+  ! echo "$out" | grep -q "RALPH_REGENERATE_PROMPT"
 }
 
-@test "stale-cache warning fires only once (hash file is upgraded after warning) (0.6.1)" {
+@test "speckit-only change triggers auto-regen with speckit-attributed message (0.6.2)" {
   create_mock_speckit_implement
 
-  local speckit_hash
-  speckit_hash=$(shasum -a 256 "$MOCK_WORKSPACE/.claude/commands/speckit.implement.md" | cut -d' ' -f1)
-  local stale_composite="${speckit_hash}:0000000000000000000000000000000000000000000000000000000000000000"
-
-  cat > "$MOCK_SPEC_DIR/ralph-prompt.md" <<'PROMPT'
-# Cached prompt
-Body.
-PROMPT
-  echo "$stale_composite" > "$MOCK_SPEC_DIR/.ralph-prompt-hash"
-  (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "add stale cache")
-
-  # First invocation: warns
-  local out1
-  out1=$(resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" 2>&1)
-  echo "$out1" | grep -q "STALE"
-
-  # Stored hash should now be the live composite (not the stale one) so the
-  # operator isn't spammed with the warning every iteration.
-  local stored_after
-  stored_after=$(cat "$MOCK_SPEC_DIR/.ralph-prompt-hash")
-  [ "$stored_after" != "$stale_composite" ]
-
-  # Second invocation: cache hit, no warning
-  local out2
-  out2=$(resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" 2>&1)
-  ! echo "$out2" | grep -q "STALE"
-  echo "$out2" | grep -q "hash match"
-}
-
-@test "speckit.implement.md change does NOT trigger stale warning (0.6.1)" {
-  # User-driven changes to the source skill route through the regenerate
-  # branch, NOT the warn-only stale branch. The stale warning is reserved
-  # for plugin-side guide rewrites that the operator didn't initiate. We
-  # can't exercise the actual generation here (it would call claude -p),
-  # but we can verify the STALE warning is absent — that proves the code
-  # took the speckit-changed branch instead of the guide-changed branch.
-  create_mock_speckit_implement
-
-  # Stored hash matches the GUIDE but not the speckit (different speckit hash).
+  # Stored hash: bogus speckit hash + real guide hash → speckit-only mismatch.
   local guide_hash=""
   if [[ -f "$TEMPLATES_DIR/speckit-adaptation-guide.md" ]]; then
     guide_hash=$(shasum -a 256 "$TEMPLATES_DIR/speckit-adaptation-guide.md" | cut -d' ' -f1)
@@ -493,16 +457,72 @@ PROMPT
   local fake_speckit_hash="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   echo "${fake_speckit_hash}:${guide_hash}" > "$MOCK_SPEC_DIR/.ralph-prompt-hash"
   cat > "$MOCK_SPEC_DIR/ralph-prompt.md" <<'PROMPT'
-# Old cached prompt for an older speckit body
+# Old cached prompt
 PROMPT
   (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "add old cache")
+
+  source "$SCRIPTS_DIR/ralph-common.sh"
+  echo "# Activity Log" > "$MOCK_WORKSPACE/.ralph/activity.log"
 
   local out
   out=$(resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" 2>&1)
 
-  # Critical invariant: NO stale warning when speckit changed. Generation
-  # path may emit other messages (or fail if claude is unavailable in CI),
-  # but the STALE phrasing is reserved for guide-change-only scenarios.
+  echo "$out" | grep -q "speckit.implement.md changed"
+  grep -q "PROMPT speckit.implement.md changed — regenerating" "$MOCK_WORKSPACE/.ralph/activity.log"
+  # Should NOT attribute the change to the guide.
+  ! grep -q "guide changed" "$MOCK_WORKSPACE/.ralph/activity.log"
+  # Speckit-only changes are user-initiated and not "stale" — no STALE marker.
+  ! grep -q "STALE" "$MOCK_WORKSPACE/.ralph/activity.log"
   ! echo "$out" | grep -q "STALE"
-  ! echo "$out" | grep -q "RALPH_REGENERATE_PROMPT"
+}
+
+@test "both speckit and guide changed: combined-attribution log line (0.6.2)" {
+  create_mock_speckit_implement
+
+  # Both hashes wrong → combined message.
+  local stale="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  echo "$stale" > "$MOCK_SPEC_DIR/.ralph-prompt-hash"
+  cat > "$MOCK_SPEC_DIR/ralph-prompt.md" <<'PROMPT'
+# Old cached prompt
+PROMPT
+  (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "add fully stale cache")
+
+  source "$SCRIPTS_DIR/ralph-common.sh"
+  echo "# Activity Log" > "$MOCK_WORKSPACE/.ralph/activity.log"
+
+  local out
+  out=$(resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" 2>&1)
+
+  echo "$out" | grep -q "speckit.implement.md AND adaptation guide changed"
+  grep -q "PROMPT speckit + guide changed — regenerating" "$MOCK_WORKSPACE/.ralph/activity.log"
+  # Combined case: STALE marker still fires (guide changed component).
+  grep -q "PROMPT ⚠️ STALE: adaptation guide changed" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "legacy single-hash cache (pre-0.6.1) triggers auto-regen as guide change (0.6.2)" {
+  # Legacy cache files written before 0.6.1 stored a single sha256 (just
+  # the speckit hash). 0.6.2 should detect the missing guide-hash component
+  # and regenerate, attributing the change to the guide (since the speckit
+  # hash component still matches the live one).
+  create_mock_speckit_implement
+
+  local speckit_hash
+  speckit_hash=$(shasum -a 256 "$MOCK_WORKSPACE/.claude/commands/speckit.implement.md" | cut -d' ' -f1)
+  echo "$speckit_hash" > "$MOCK_SPEC_DIR/.ralph-prompt-hash"
+  cat > "$MOCK_SPEC_DIR/ralph-prompt.md" <<'PROMPT'
+# Pre-0.6.1 cached prompt
+PROMPT
+  (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "add legacy cache")
+
+  source "$SCRIPTS_DIR/ralph-common.sh"
+  echo "# Activity Log" > "$MOCK_WORKSPACE/.ralph/activity.log"
+
+  local out
+  out=$(resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" 2>&1)
+
+  echo "$out" | grep -q "adaptation guide changed"
+  grep -q "PROMPT guide changed (plugin upgrade) — regenerating" "$MOCK_WORKSPACE/.ralph/activity.log"
+  # Legacy single-hash files reach the "guide changed" branch (the guide
+  # hash component is empty in the stored value), so the STALE marker fires.
+  grep -q "PROMPT ⚠️ STALE: adaptation guide changed" "$MOCK_WORKSPACE/.ralph/activity.log"
 }
