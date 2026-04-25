@@ -80,12 +80,12 @@ teardown() {
 }
 
 @test "times out on hung command and returns exit 124" {
-  RALPH_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" basic sleep 30
+  RALPH_GATE_TIMEOUT=1 run bash "$SCRIPTS_DIR/gate-run.sh" basic sleep 5
   [ "$status" -eq 124 ]
 }
 
 @test "writes timeout message to log on timeout" {
-  RALPH_GATE_TIMEOUT=2 bash "$SCRIPTS_DIR/gate-run.sh" basic sleep 30 || true
+  RALPH_GATE_TIMEOUT=1 bash "$SCRIPTS_DIR/gate-run.sh" basic sleep 5 || true
 
   local log="$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
   grep -q "timed out" "$log"
@@ -105,19 +105,19 @@ teardown() {
 
 @test "basic gate uses RALPH_BASIC_GATE_TIMEOUT default (0.3.5)" {
   # Default basic timeout is 600 s (0.3.9) — override to 2 s to trip it
-  RALPH_BASIC_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" basic sleep 30
+  RALPH_BASIC_GATE_TIMEOUT=1 run bash "$SCRIPTS_DIR/gate-run.sh" basic sleep 5
   [ "$status" -eq 124 ]
 }
 
 @test "final gate uses RALPH_FINAL_GATE_TIMEOUT default (0.3.5)" {
   # Default final timeout is 900 s (0.3.9) — override to 2 s so it hits timeout
-  RALPH_FINAL_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" final sleep 30
+  RALPH_FINAL_GATE_TIMEOUT=1 run bash "$SCRIPTS_DIR/gate-run.sh" final sleep 5
   [ "$status" -eq 124 ]
 }
 
 @test "RALPH_GATE_TIMEOUT overrides per-label defaults (0.3.5)" {
   # Even though final default is 900, the blanket override takes precedence
-  RALPH_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" final sleep 30
+  RALPH_GATE_TIMEOUT=1 run bash "$SCRIPTS_DIR/gate-run.sh" final sleep 5
   [ "$status" -eq 124 ]
 }
 
@@ -137,7 +137,7 @@ teardown() {
 
 @test "custom label falls through to basic default (0.3.5)" {
   # Labels other than 'final' get the basic default
-  RALPH_BASIC_GATE_TIMEOUT=2 run bash "$SCRIPTS_DIR/gate-run.sh" e2e sleep 30
+  RALPH_BASIC_GATE_TIMEOUT=1 run bash "$SCRIPTS_DIR/gate-run.sh" e2e sleep 5
   [ "$status" -eq 124 ]
 }
 
