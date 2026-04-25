@@ -200,6 +200,60 @@ PROMPT
   [ "$recorded" = "$MOCK_WORKSPACE/rel.md" ]
 }
 
+@test "spec mode prepends universal guardrails preamble" {
+  local out
+  out=$(resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec")
+
+  local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  [ -f "$effective" ]
+  grep -q "Universal Loop Guardrails" "$effective"
+  grep -q "Command-variant spirals" "$effective"
+}
+
+@test "PROMPT.md mode prepends universal guardrails preamble" {
+  cat > "$MOCK_WORKSPACE/PROMPT.md" <<'PROMPT'
+# Tasks
+- [ ] alpha
+PROMPT
+
+  resolve_prompt "$MOCK_WORKSPACE" "prompt" "" >/dev/null
+
+  local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  [ -f "$effective" ]
+  grep -q "Universal Loop Guardrails" "$effective"
+  grep -q "Command-variant spirals" "$effective"
+  # User's content must still be present after the preamble
+  grep -q "alpha" "$effective"
+}
+
+@test "--prompt-file mode prepends universal guardrails preamble" {
+  cat > "$MOCK_WORKSPACE/custom.md" <<'PROMPT'
+# Tasks
+- [ ] one
+PROMPT
+
+  resolve_prompt "$MOCK_WORKSPACE" "file" "$MOCK_WORKSPACE/custom.md" >/dev/null
+
+  local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  [ -f "$effective" ]
+  grep -q "Universal Loop Guardrails" "$effective"
+  grep -q "Command-variant spirals" "$effective"
+  grep -q "one" "$effective"
+}
+
+@test "RALPH_SKIP_GUARDRAILS=1 omits the preamble" {
+  cat > "$MOCK_WORKSPACE/PROMPT.md" <<'PROMPT'
+# Tasks
+- [ ] alpha
+PROMPT
+
+  RALPH_SKIP_GUARDRAILS=1 resolve_prompt "$MOCK_WORKSPACE" "prompt" "" >/dev/null
+
+  local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  ! grep -q "Universal Loop Guardrails" "$effective"
+  grep -q "alpha" "$effective"
+}
+
 @test "cached prompt preserves placeholders for later substitution" {
   create_mock_speckit_implement
 

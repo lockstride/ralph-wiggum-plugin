@@ -45,6 +45,36 @@ teardown() {
   echo "$output" | grep -q 'ACCEPTANCE EVAL'
 }
 
+@test "ralph-status: PROGRESS section is rendered above STATUS with task counts (0.5.3)" {
+  # Seed a task file pointed to by .ralph/task-file-path with a mix of
+  # checked and unchecked tasks. Expect a PROGRESS banner before STATUS
+  # showing N/M complete and the percentage.
+  cat > "$MOCK_WORKSPACE/tasks.md" <<'TASKS'
+# Tasks
+- [x] T001 done one
+- [x] T002 done two
+- [ ] T003 still open
+- [ ] T004 still open
+TASKS
+  echo "$MOCK_WORKSPACE/tasks.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+
+  run bash "$STATUS_SCRIPT" "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+
+  # Banner must be present with the right count + percentage.
+  echo "$output" | grep -qE '📋 TASKS: 2 / 4 complete  \(2 remaining, 50%\)'
+
+  # Banner must appear BEFORE the STATUS section header (i.e. above it).
+  local progress_line status_line
+  progress_line=$(echo "$output" | grep -n '📋 TASKS' | head -1 | cut -d: -f1)
+  status_line=$(echo "$output" | grep -n '^STATUS' | head -1 | cut -d: -f1)
+  [ "$progress_line" -lt "$status_line" ]
+
+  # The duplicate `tasks:     N / M complete` row inside STATUS should be
+  # gone — only the PROGRESS banner carries the count now.
+  ! echo "$output" | grep -qE '^  tasks: '
+}
+
 @test "ralph-status: STATUS section includes a mode row with the ground-truth path in eval mode (0.5.1)" {
   local gt="$MOCK_WORKSPACE/PROMPT.md"
   echo "# ground truth" > "$gt"

@@ -51,7 +51,12 @@ RATE_LIMITED=0
 # Gutter detection — temp files (macOS bash 3.x has no assoc arrays)
 FAILURES_FILE=$(mktemp)
 WRITES_FILE=$(mktemp)
-trap 'rm -f "$FAILURES_FILE" "$WRITES_FILE"' EXIT
+
+# 0.5.3: independent heartbeat emitter pid. Set in main() once the sidecar
+# is spawned; left empty here so the EXIT trap can no-op safely if main()
+# exits before the spawn (e.g. test fixtures that source the file).
+HB_SIDECAR_PID=""
+trap '[[ -n "$HB_SIDECAR_PID" ]] && kill "$HB_SIDECAR_PID" 2>/dev/null; rm -f "$FAILURES_FILE" "$WRITES_FILE"' EXIT
 
 # 0.3.0: Active-recovery state. The first recoverable stuck pattern in an
 # iteration emits RECOVER_ATTEMPT (not GUTTER); subsequent stuck patterns
@@ -586,6 +591,28 @@ main() {
     echo "Ralph Session Started${iter_label}: $(date)"
     echo "═══════════════════════════════════════════════════════════════"
   } >>"$RALPH_DIR/activity.log"
+
+  # 0.5.3: spawn an independent heartbeat sidecar that emits HEARTBEAT on a
+  # fixed interval regardless of input cadence. Without this, parser cannot
+  # emit HEARTBEAT during long quiet periods (e.g. agent waiting on a
+  # multi-minute gate or model-thinking turn) since log_activity and
+  # log_token_status only fire when input arrives via the read loop. The
+  # main loop's `read -t RALPH_HEARTBEAT_TIMEOUT` then trips, breaks out,
+  # and the next write from this parser SIGPIPEs (no reader on the FIFO) —
+  # killing parser and jq, leaving claude orphaned, and the loop diagnoses
+  # this as a "PIPELINE EXIT — pipeline wedged" event. The fix decouples
+  # liveness signaling from input cadence: the sidecar pings the FIFO every
+  # RALPH_PARSER_HEARTBEAT_INTERVAL seconds (default 60) so the loop's read
+  # timer always resets while the parser is alive. The interval must stay
+  # well below RALPH_HEARTBEAT_TIMEOUT (default 300s) for the sidecar to
+  # actually keep the loop unblocked.
+  local hb_interval="${RALPH_PARSER_HEARTBEAT_INTERVAL:-60}"
+  (
+    while sleep "$hb_interval"; do
+      echo "HEARTBEAT" 2>/dev/null || break
+    done
+  ) &
+  HB_SIDECAR_PID=$!
 
   local last_token_log
   last_token_log=$(date +%s)

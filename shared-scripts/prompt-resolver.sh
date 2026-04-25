@@ -61,14 +61,41 @@ _default_templates_dir() {
   echo "$_PR_SCRIPT_DIR/templates"
 }
 
-# Write the resolved prompt body to .ralph/effective-prompt.md
+# Resolve the universal guardrails preamble that every effective prompt
+# is prefixed with, regardless of mode (PROMPT.md, --prompt-file, spec).
+#
+# Lookup order mirrors _default_templates_dir. Returns empty string if
+# the file is missing — callers must tolerate that (older installs, or a
+# user who deliberately removed it). Honor RALPH_SKIP_GUARDRAILS=1 as an
+# explicit opt-out for users with their own preamble.
+_resolve_guardrails_preamble() {
+  if [[ "${RALPH_SKIP_GUARDRAILS:-}" == "1" ]]; then
+    return 0
+  fi
+  local templates_dir
+  templates_dir=$(_default_templates_dir)
+  local guardrails="$templates_dir/loop-guardrails.md"
+  if [[ -f "$guardrails" ]]; then
+    cat "$guardrails"
+  fi
+}
+
+# Write the resolved prompt body to .ralph/effective-prompt.md.
+# Prepends the universal guardrails preamble so PROMPT.md, --prompt-file,
+# and spec modes all carry the same anti-pattern rules.
 _write_effective_prompt() {
   local workspace="$1"
   local body="$2"
   local rel="${RALPH_EFFECTIVE_PROMPT:-.ralph/effective-prompt.md}"
   local out="$workspace/$rel"
   mkdir -p "$(dirname "$out")"
-  printf '%s' "$body" >"$out"
+  local preamble
+  preamble=$(_resolve_guardrails_preamble)
+  if [[ -n "$preamble" ]]; then
+    printf '%s\n%s' "$preamble" "$body" >"$out"
+  else
+    printf '%s' "$body" >"$out"
+  fi
   echo "$out"
 }
 

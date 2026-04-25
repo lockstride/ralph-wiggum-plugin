@@ -94,6 +94,27 @@ printf '   workspace: %s\n' "$workspace"
 printf '═══════════════════════════════════════════════════════════════════\n'
 
 # -----------------------------------------------------------------------------
+# PROGRESS — at-a-glance task counts. The single most-asked question from
+# operators glancing at status, surfaced above STATUS so it is visible
+# without scrolling on small terminals. Falls through silently when no task
+# file is configured (e.g. PROMPT.md mode without a checkbox-style file).
+# -----------------------------------------------------------------------------
+
+if [[ -f "$task_file_path" ]]; then
+  _task_file=$(cat "$task_file_path")
+  if [[ -f "$_task_file" ]]; then
+    _total=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[(x| )\]' "$_task_file" 2>/dev/null || echo 0)
+    _done=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[x\]' "$_task_file" 2>/dev/null || echo 0)
+    if [[ "$_total" -gt 0 ]]; then
+      _remaining=$((_total - _done))
+      _pct=$((_done * 100 / _total))
+      printf '\n📋 TASKS: %s / %s complete  (%s remaining, %s%%)\n' \
+        "$_done" "$_total" "$_remaining" "$_pct"
+    fi
+  fi
+fi
+
+# -----------------------------------------------------------------------------
 # STATUS — the headline a glance should give: running? iteration? progress?
 # -----------------------------------------------------------------------------
 
@@ -134,15 +155,10 @@ if [[ -f "$activity_log" ]]; then
   fi
 fi
 
-# Task progress + next unchecked task
+# Next unchecked task (the count itself is in the PROGRESS section above)
 if [[ -f "$task_file_path" ]]; then
   task_file=$(cat "$task_file_path")
   if [[ -f "$task_file" ]]; then
-    total=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[(x| )\]' "$task_file" 2>/dev/null || echo 0)
-    done_count=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[x\]' "$task_file" 2>/dev/null || echo 0)
-    remaining=$((total - done_count))
-    printf '  tasks:     %s / %s complete (%s remaining)\n' "$done_count" "$total" "$remaining"
-
     next_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | head -1 || true)
     if [[ -n "$next_task" ]]; then
       _next_text=$(echo "$next_task" |

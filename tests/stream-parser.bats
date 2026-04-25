@@ -285,6 +285,42 @@ tool_result_json() {
   echo "$output" | grep -q "RECOVER"
 }
 
+@test "heartbeat sidecar emits HEARTBEAT on its interval even with no input (0.5.3)" {
+  # The sidecar must emit a HEARTBEAT line on a fixed schedule independent
+  # of the input stream. Without input the read loop blocks forever, but
+  # downstream consumers (the main loop's `read -t RALPH_HEARTBEAT_TIMEOUT`)
+  # must still see liveness. We pin the interval to 1s, hold stdin open
+  # with no input for 3s, then close stdin and capture stdout. Expect at
+  # least one HEARTBEAT line.
+  local out
+  out=$(RALPH_PARSER_HEARTBEAT_INTERVAL=1 \
+    bash -c 'sleep 3 | bash "$0" "$1" 1' \
+    "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE")
+  echo "$out" | grep -q "^HEARTBEAT$"
+}
+
+@test "heartbeat sidecar exits when parser exits (no leaked process)" {
+  # Spawn the parser with a fast heartbeat, feed one event so it processes
+  # and exits, then verify no orphan sleep/echo subshell is left running
+  # under our test pid namespace. The trap on EXIT kills HB_SIDECAR_PID.
+  local before_count
+  before_count=$(pgrep -c "sleep 1" 2>/dev/null || echo 0)
+
+  echo '{"kind":"system","model":"test"}' |
+    RALPH_PARSER_HEARTBEAT_INTERVAL=1 \
+      bash "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE" 1 >/dev/null
+
+  # Give the trap a moment to fire after the read loop exits.
+  sleep 0.2
+
+  local after_count
+  after_count=$(pgrep -c "sleep 1" 2>/dev/null || echo 0)
+
+  # The post-run count must not exceed the pre-run count — i.e., the
+  # sidecar's `sleep 1` did not leak.
+  [ "$after_count" -le "$before_count" ]
+}
+
 @test "Shell commands increment read-without-write counter" {
   export RALPH_MAX_READS_WITHOUT_WRITE=5
 
