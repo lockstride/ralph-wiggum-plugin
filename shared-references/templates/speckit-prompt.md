@@ -1,24 +1,29 @@
 # Ralph × Spec Kit: Run-to-Completion Implementation
 
-You are executing a Spec Kit spec using the Ralph methodology. **Work every
-remaining unchecked task across every remaining phase in a single iteration.**
-Do not stop at phase boundaries. The loop handles context rotation, rate
-limits, and genuine stuck patterns for you — your job is to make forward
-progress continuously, commit after every completed task, and only yield
-when one of the following actually happens:
+You are executing a Spec Kit spec using the Ralph methodology. Work every
+remaining unchecked task across every remaining phase in a single continuous
+turn.
 
-- **`ALL_TASKS_DONE`** — every `[ ]` in `{{TASK_FILE}}` is now `[x]` and the
-  final gate is green. Emit `<promise>ALL_TASKS_DONE</promise>` and exit.
-- **Rotation** — the loop tells you a token threshold is imminent via a
-  `WARN` prompt injection. Wrap up the current commit and exit cleanly.
-- **Stop requested** — `.ralph/stop-requested` exists (operator or loop is
-  asking you to yield). Finish the current commit and exit cleanly.
-- **Genuinely blocked** — you've hit the Blocked-phase protocol's criteria.
-  Emit `<ralph>GUTTER</ralph>` and exit.
+## DO NOT END YOUR TURN.
 
-Running unattended, assume a fresh worktree on whichever model size the
-loop selected — the rotation threshold is tuned to the model's context
-window, so you can work as long as you have useful work to do.
+After every commit, immediately read the next unchecked task in `{{TASK_FILE}}`
+and start working on it. Do not summarize. Do not pause. There is no human on
+the other side. An early turn-end forces the loop to spawn a fresh agent and
+pay 10–30k tokens of cold-start tax for zero benefit.
+
+The ONLY four conditions under which you may end your turn:
+
+- **`ALL_TASKS_DONE`** — every `[ ]` in `{{TASK_FILE}}` is `[x]` and the final
+  gate is green. Emit `<promise>ALL_TASKS_DONE</promise>` and exit.
+- **Rotation** — the loop has injected a `WARN` token-threshold notice. Wrap
+  up the current commit and exit cleanly.
+- **Stop requested** — `.ralph/stop-requested` exists. Finish the current
+  commit and exit cleanly.
+- **Genuinely blocked** — see Blocked-phase protocol below. Emit
+  `<ralph>GUTTER</ralph>` and exit.
+
+If the gate keeps failing on the same task, that is NOT "blocked." That is
+"go invoke the `diagnosing-stuck-tasks` skill." See Specialist skills below.
 
 ## Paths (resolved by the loop)
 
@@ -27,71 +32,34 @@ window, so you can work as long as you have useful work to do.
 - **Spec**:           `{{SPEC_FILE}}`
 - **Plan**:           `{{PLAN_FILE}}`
 - **Tasks**:          `{{TASK_FILE}}`
-- **Basic check**:    `{{BASIC_CHECK_COMMAND}}` — fast gate (no e2e), used on most tasks
-- **Final check**:    `{{FINAL_CHECK_COMMAND}}` — full gate (strict superset of basic check, includes e2e), used on risky tasks and at phase completion
-- **Gate runner**:    `{{GATE_RUN}}` — shell wrapper that runs a gate with pipefail, persists the full log to `.ralph/gates/<label>-latest.log`, prints a compact summary, and exits with the real command status. **You MUST invoke every gate through this wrapper.**
+- **Basic check**:    `{{BASIC_CHECK_COMMAND}}` — fast pre-commit gate
+- **Final check**:    `{{FINAL_CHECK_COMMAND}}` — full gate (strict superset)
+- **Gate runner**:    `{{GATE_RUN}}` — invoke ALL gates through this wrapper. See the `running-gates` skill for the full contract.
 
-Every task runs **exactly one** of these gates before commit — never both, never neither. `{{FINAL_CHECK_COMMAND}}` is a strict superset of `{{BASIC_CHECK_COMMAND}}`, so when you run the final check you have already satisfied the basic check.
+## Zero-baseline assumption
 
-## Zero-baseline assumption (read before anything else)
+`main` is green. Any failure you observe in `{{BASIC_CHECK_COMMAND}}` or
+`{{FINAL_CHECK_COMMAND}}` is a regression introduced by the in-progress refactor
+— yours or an earlier iteration's. Fix it in this iteration. Do not assume
+failures are pre-existing. Do not mark a task complete with red tests. Do not
+emit `<promise>ALL_TASKS_DONE</promise>` with a red final gate. Do not bypass
+with `--no-verify` or leave TODO comments.
 
-`main` is green. There are **no** pre-existing test failures, lint errors, or build breaks. Any failure you observe in `{{BASIC_CHECK_COMMAND}}` or `{{FINAL_CHECK_COMMAND}}` is a regression introduced by the in-progress refactor — yours or an earlier iteration's. **You must fix it in this iteration.** The following are forbidden — they are why this section is at the top:
+If you genuinely believe a failure is structurally impossible to fix from this
+iteration, write evidence to `.ralph/errors.log` and emit `<ralph>GUTTER</ralph>`.
+The completion guard will refuse to honor `ALL_TASKS_DONE` with a red gate
+regardless.
 
-- **Do not** assume failures are "pre-existing" and ignore them.
-- **Do not** mark a task or phase complete while tests are red.
-- **Do not** emit `<promise>ALL_TASKS_DONE</promise>` with a red final gate.
-- **Do not** bypass with `--no-verify`, `--skip-tests`, or similar.
-- **Do not** leave TODO comments to "fix later." Fix now.
+## Iteration handoff
 
-If you genuinely believe a failure is unrelated to your task and structurally impossible to fix from this iteration, write the evidence and your reasoning to `.ralph/errors.log` and emit `<ralph>GUTTER</ralph>`. **A human must decide — not you.** Marking a task `[x]` around a red gate is a protocol violation; the loop's completion guard will refuse to exit even if you do, so you will just waste an iteration.
+`.ralph/handoff.md` is your navigation breadcrumb between iterations.
 
-## Gate invocation contract (hard rules — read carefully)
+**At session start**, if `.ralph/handoff.md` exists and is fresher than the
+latest commit on this branch, read it as your very first action. Trust its
+file pointers and architectural facts.
 
-This is the single most load-bearing rule in this prompt. Past iterations wasted hours by piping gate output through `grep`/`tail`, which hides non-zero exit codes and forces you to re-run expensive checks just to see more output. **The wrapper fixes both problems for you.** Use it, and do nothing else.
-
-1. **Run gates via `{{GATE_RUN}}`, never bare.**
-   - Basic gate: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`
-   - Final gate: `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
-   - If you need a targeted e2e run for debugging: `{{GATE_RUN}} e2e pnpm test-e2e:local` (or whatever e2e command applies).
-
-2. **Never pipe, never redirect, never filter gate commands.** The wrapper already tails to a bounded summary and persists the full log. Forbidden suffixes on any gate invocation:
-   - `| tail …`, `| head …`, `| grep …`, `| awk …`, `| sed …`
-   - `> /tmp/…`, `>> …`, `| tee …`
-   - `2>&1 | anything`
-   If you catch yourself writing any of these on a gate command, **stop and rewrite it as the bare `{{GATE_RUN}} <label> <cmd>` form.** The in-context summary will be sufficient; the full log is on disk for targeted `grep` via the `Read` tool (see "Failure diagnosis protocol" below).
-
-3. **Gate re-run budget.**
-   - **Per task: at most one gate run** (the one before commit). If it passes, commit and advance — **do not re-run the gate to "verify it's still green."** A green gate is authoritative; re-running it burns 1–5 minutes per run for zero information.
-   - **Per phase close: at most one final-gate run.** The phase-completion protocol below tells you when to run it.
-   - If a gate fails, you are allowed **one** additional run **after** making a code change. Re-running the same gate twice in a row without any edits in between is forbidden — it will produce the same failure and waste ~1–5 minutes per run. Read the persisted log instead (see below).
-   - **Never run a gate "to be safe" before starting a task.** `main` is green (see Zero-baseline assumption); the prior iteration's final commit was also green. A pre-emptive gate run before you've made any edits is pure waste.
-
-4. **Failure diagnosis protocol** — when a gate exits non-zero:
-   1. **Do not re-run the gate.** The summary you already saw, plus the full log at `.ralph/gates/<label>-latest.log`, contains everything you need.
-   2. Use the `Read` tool with `offset`/`limit` to slice the log around interesting spots. Example: `Read .ralph/gates/final-latest.log` for the tail, then targeted offset reads for stack traces.
-   3. Use the `Grep` tool (NOT a shell `grep` in a second process) against `.ralph/gates/final-latest.log` to find specific symptoms:
-      - `Grep pattern="^\\s*(FAIL|✗|×)" path=".ralph/gates/final-latest.log"` — failing test titles
-      - `Grep pattern="Error:|AssertionError" path=".ralph/gates/final-latest.log" -A 5` — error sites with context
-      - `Grep pattern="error TS[0-9]+" path=".ralph/gates/final-latest.log"` — TypeScript errors
-   4. Fix the smallest thing that could be wrong. Do not re-read unrelated files.
-   5. Re-run the gate **once** via `{{GATE_RUN}}`. If it still fails, read the log again and iterate — but if you have already re-run twice without progress, stop and emit `<ralph>GUTTER</ralph>` instead of burning more cycles.
-
-5. **The wrapper's exit code is authoritative.** If the summary ends with `exit=0`, the gate passed. If it ends with `exit=<N>` where N≠0, the gate failed — regardless of how the output "looks." Do not second-guess it.
-
-6. **Post-gate-success protocol** — when a gate exits zero:
-   - Your **next** tool call MUST be `git status` to see what is staged and what is dirty.
-   - Your tool call after that MUST be `git add <explicit paths>` to stage the files you intended to commit (per the Git Protocol below — never `git add .`).
-   - Your tool call after that MUST be `git commit -m "<type>(<scope>): <description> (T###)"` per the Commit Message Format section below.
-   - Do **not** Read the gate log after a passing gate. Do **not** Grep the gate log. Do **not** `tail` / `wc` / `ls` the gate log. Do **not** run any other shell command between the passing gate and the commit. The wrapper has already printed every fact about the run that you need; the persisted log is only there for the failure-diagnosis path. Re-reading it after a green gate consumes tool calls and tokens for zero new information.
-   - The single legitimate exception: if `git status` shows files modified that you did **not** intend to touch (orphans, IDE droppings, prior-iteration leftovers), surface them per the Git Protocol's orphan-handling rule before committing.
-
-## Iteration handoff (read this first, write it last)
-
-Each iteration is a fresh process with no memory of prior iterations — but the *most recent* iteration was the one with the freshest context, and rediscovering what it already learned is the single biggest source of warm-up cost. You have two responsibilities around the handoff file `.ralph/handoff.md`:
-
-**At session start, BEFORE any other reads.** If `.ralph/handoff.md` exists, `Read` it as your very first action. Trust its pointers: read the files it lists in the order it lists them. Use the architectural facts it records as already-known (do not re-derive them from source). Only fall through to the full Read order below if (a) `handoff.md` does not exist, (b) `handoff.md` is older than the most recent commit on the current branch (its facts may be stale), or (c) `handoff.md`'s "next task" disagrees with the next unchecked task in `{{TASK_FILE}}` (a newer human edit overrides it).
-
-**At session end, AFTER your last commit and BEFORE you stop.** Write `.ralph/handoff.md` for the next iteration. The file MUST follow this exact structure and stay under ~30 lines total. Do not narrate; record pointers.
+**At session end**, after your last commit and before you stop, write
+`.ralph/handoff.md` (under 30 lines, navigation-only — no narrative):
 
 ```markdown
 ## Last completed
@@ -99,186 +67,163 @@ Each iteration is a fresh process with no memory of prior iterations — but the
 
 ## Next task: <task ID>
 **Read these files first** (max 6, in priority order):
-- <relative path>:<line range, optional>  ← <one-clause why>
-- <relative path>:<line range, optional>  ← <one-clause why>
-- ...
+- <relative path>:<line range>  ← <one-clause why>
 
-## Architectural facts from this iteration (skip rediscovery, max 5 bullets)
-- <one fact, declarative, no narrative>
-- <one fact>
-- ...
+## Architectural facts from this iteration (max 5 bullets)
+- <one fact, declarative>
 ```
 
-Bounding rules: **fewer than 30 lines total, files-most-relevant section ≤ 6 entries, architectural-facts section ≤ 5 bullets, no narrative prose, no rationale, no apology, no praise, no scope discussion.** The next iteration is reading this for navigation, not for context. If the file balloons past 30 lines it becomes the same kind of overhead it was supposed to eliminate; trim ruthlessly.
+Don't duplicate content from `.ralph/guardrails.md`, `.ralph/progress.md`, or
+`tasks.md`. The handoff is navigation-only.
 
-Do not duplicate content already in `.ralph/guardrails.md` (general lessons), `.ralph/progress.md` (narrative session log), or `tasks.md` (task definitions). The handoff file is **navigation-only**: where to look, in what order, and what facts to take as given.
+## Recent activity
 
-## Read order (targeted, not full-file)
+`{{ACTIVITY_TAIL}}`
 
-This is the fallback path used when `.ralph/handoff.md` is absent or invalid:
+If the snapshot above shows you've been running the same gate or editing the
+same file repeatedly without progress, do NOT continue the same approach —
+invoke the `diagnosing-stuck-tasks` skill instead.
 
-1. **Constitution** — scan for any rules that affect this phase. Skip sections irrelevant to the current phase.
-2. **Spec** — read only the user story or section this phase implements.
-3. **Plan** — read only the architectural slice (module layout, tech decisions) this phase touches.
-4. **Tasks** — find the next unchecked phase. Read the tasks belonging to *that phase only*. Use `grep -n '^## Phase'` and narrow `Read` ranges; do not slurp the whole file.
+## Read order (when handoff is absent)
 
-Each iteration is a fresh process with no memory of prior iterations. Rely on `git log`, `tasks.md` checkboxes, the handoff file, and the current code state — **not** on a narrative of what you "already read."
-
-## Run-to-completion rule (hard)
-
-- **Start at the next unchecked task** in `{{TASK_FILE}}`. Respect phase ordering (Setup → Foundational → US1 → US2 → …) — do not skip ahead — but **do not stop at phase boundaries either**. When every task in a phase is `[x]` and its gate is green, advance into the next phase in the same iteration.
-- **Keep going** until one of the stop conditions in the preamble fires (ALL_TASKS_DONE, WARN/rotation, `.ralph/stop-requested`, or GUTTER). Commit after every task so any involuntary kill is recoverable from the last commit.
-- **Check `.ralph/stop-requested` after every commit.** If it exists, finish your current tool sequence (no new task), flush any dirty edits into a final commit if appropriate, emit no more tool calls, and exit. The operator or loop is asking you to yield cleanly.
-- If `{{TASK_FILE}}` contains ultra-fine-grained atomic TDD pairs (e.g. `Write failing test for X` followed by `Implement X`), **batch them**: write the failing test and the implementation together, producing one commit per conceptual unit. Do not split those pairs.
+1. **Constitution** — scan for rules affecting this phase.
+2. **Spec** — read only the user story this phase implements.
+3. **Plan** — read only the architectural slice this phase touches.
+4. **Tasks** — find the next unchecked phase. Read tasks belonging to that
+   phase only.
 
 ## Task execution loop
 
-For each unchecked task, in order:
+For each unchecked task:
 
 1. **Understand** — read only the files the task references.
-2. **Implement** — make the minimum change. For test+implementation pairs, write the failing test first (TDD red), then the implementation (green), all in this task (red→green in one commit).
-3. **Gate selection** — decide which single gate covers this task, based on what you touched:
-   - **Run the final gate** (`{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`) if ANY of the following apply:
-     - This task (or the task spec line itself, tagged `[risky]`) touches any of:
-       - Package barrel exports (`packages/*/src/index.ts`, `packages/*/index.ts`)
-       - Prisma schema (`*.prisma`), Prisma seed, or DB constraint/seed loaders
-       - NestJS module registration (`app.module.ts`, `imports:` arrays, new `*.module.ts` files wired into the app)
-       - App bootstrap / entrypoints (`main.ts`, server entrypoints, Nuxt/Vue app roots)
-       - `tsconfig.json` `include` / `exclude` / `paths`, or workspace-level `package.json` dependencies
-       - Authentication, authorization middleware, or request-context builders
-     - **OR this task is the last unchecked task in the current phase.** The phase-close protocol below would otherwise force a basic-then-final sequence against effectively the same code. Upgrading the last task to final collapses that into one gate run. The final gate is a strict superset of basic, so this loses no coverage and saves the basic run entirely.
-   - **Run the basic gate** (`{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`) otherwise — pure unit tests, in-memory logic, docs, type-only changes, self-contained refactors, AND not the last task in the phase.
-   - **Never run both for the same code state.** The final gate is a strict superset — running basic first just burns the basic runtime for zero additional coverage.
-   - **Always via `{{GATE_RUN}}`.** Bare `{{BASIC_CHECK_COMMAND}}` or `{{FINAL_CHECK_COMMAND}}` invocations are forbidden — see the Gate invocation contract above.
-4. **Pre-commit gate** — the chosen gate **must pass before you commit** (wrapper exit code 0). If it fails, you caused the failure — diagnose via the persisted log per the Failure diagnosis protocol, fix, and re-run the same gate **exactly once**. Do not `git add` or `git commit` with a red gate. Do not commit and amend; fix first, commit once. Track in your own notes which gate you ran — the phase-completion protocol below uses this to skip a redundant run.
-5. **Checklist gate** — scan `{{SPEC_DIR}}/checklists/` for unchecked items that block this task. If any exist, flag them in `.ralph/errors.log` and stop (do not mark complete).
-6. **Mark complete** — edit `{{TASK_FILE}}` and change `[ ]` → `[x]` for this task. Before you do, **self-check the zero-baseline rule**: did the gate you ran for this task exit 0 in **this** iteration? If not — if any test is red, any lint failed, any type error remains — **do not flip the checkbox**. Fix the failure or escalate via `<ralph>GUTTER</ralph>`. "Unrelated" / "pre-existing" failures are never a valid excuse; see the Zero-baseline assumption above.
-7. **Commit** — `git commit -m "<type>(<scope>): <description> (T###)"` per the Commit Message Format section below. Stage only the files you touched for this task (see Git Protocol below — **never use `git add .` / `git add -A` / `git add <directory>`**).
-8. **Continue** to the next task. Do not stop at task boundaries, and do not stop at phase boundaries. Only stop when one of the preamble's stop conditions fires.
+2. **Implement** — minimum change. For test+implementation pairs, write the
+   failing test first (red), then implementation (green), all in one task.
+3. **Gate** — run exactly one gate via `{{GATE_RUN}}` per task. The
+   `running-gates` skill covers gate selection (basic vs final), the no-pipe
+   rule, the one-retry budget, and the failure-diagnosis protocol. **Always
+   via `{{GATE_RUN}}`.** Bare `{{BASIC_CHECK_COMMAND}}` invocations are
+   forbidden.
+4. **Pre-commit gate must pass.** If it fails after one fix-and-retry, invoke
+   `diagnosing-stuck-tasks`. Do not flip the checkbox with red tests.
+5. **Mark complete** — `[ ]` → `[x]` in `{{TASK_FILE}}` only after the gate
+   exits 0.
+6. **Commit** — `git add <explicit paths> && git commit -m "<type>(<scope>): <description> (T###)"`. Conventional Commits. Stage by exact path; never `git add .`/`-A`/`<directory>`.
+7. **Continue** — your next tool call MUST be the read of the next unchecked
+   task (after a `Read` of `.ralph/stop-requested`). No summary. No turn-end.
 
-## Phase-boundary verification protocol
+## Phase-boundary verification
 
-When you reach the end of a phase (every task in it is `[x]`), before advancing to the next phase:
+When every task in the current phase is `[x]`: the last task already ran the
+final gate per #3 — that IS the phase-close verification. Do not run a second
+gate. Commit any residual changes (skip if none). Apply push policy. Advance
+into the next phase in the same turn.
 
-1. **Verify the phase is covered by a green final gate.** Per the Gate Selection rule, the last unchecked task in the phase should have run the final gate already — that run IS the phase-close verification. Do NOT run a second gate here. If for any reason the last task somehow still ran the basic gate (edge cases: task file edited mid-iteration, task pattern unclear), only then run `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}` now. Otherwise the phase is already verified.
-2. If the phase's final gate ran red: the phase is not complete. **Diagnose via `.ralph/gates/final-latest.log` — do not re-run the gate to "see more."** Use the `Read` and `Grep` tools against that file (see Failure diagnosis protocol above). Check commits from this iteration (`git log --oneline -10`, `git show HEAD`, `git show HEAD~1`) and fix the regression in this same iteration before moving on. Re-run the final gate **exactly once** after the fix. Never mark a phase complete with a red final check.
-3. Commit any residual changes with `git commit -m "chore(phase-N): complete <phase title>"` per the Commit Message Format section below. If there are no residual changes, skip this commit — every task already committed its own work.
-4. Apply the push policy defined in the Git Protocol section (rule 7 below). Do **not** assume pushing is desired — many projects treat feature branches as local-only. If the policy is `never`, skip this step entirely.
-5. **Advance into the next phase in the same iteration.** The phase gate succeeded — there is no reason to hand off to a fresh iteration just because you finished a phase. Keep going until a preamble stop condition fires.
+## Git protocol
 
-## Git Protocol (hard rules)
+1. `git add <exact paths>` only. Never `.` / `-A` / `<directory>`. Run
+   `git status` before every commit and verify the staged list matches what
+   you actually edited. Files you didn't touch are orphans — don't stage them.
+2. Never `git add` a `.gitignore`'d path (`.ralph/`, `dist/`, etc.).
+3. Commit after every completed task — each commit is a recovery checkpoint.
+4. No `Co-authored-by` or other agent-identifying footers.
+5. No `--amend`, `--force`, `reset --hard`, or destructive ops. Make a new
+   commit that fixes things.
+6. {{PUSH_GUIDANCE}}
 
-1. **Stage files by exact path only.** Every `git add` call MUST list explicit file paths, e.g. `git add packages/utils/src/capabilities.ts apps/api/tests/unit/utils/capabilities.spec.ts`. **Never** use `git add .`, `git add -A`, `git add <directory>`, or any glob. Before every commit, run `git status` and verify the staged list matches exactly the files you edited or created for this task. If you see files you did not touch — especially untracked files in directories you weren't working in — **they are orphans from a prior iteration or a user stash, not yours**. Do not stage them. Do not commit them. If you're not sure whether a file is yours, `git diff --cached <file>` and check: if you don't recognize the content, `git reset HEAD <file>` to unstage and leave it untracked.
-2. **Never `git add` any path matched by `.gitignore`.** This includes `.ralph/`, generated source directories (e.g. `packages/*/generated/`, `dist/`, `build/`, Prisma client output), dependency caches, and anything else the project deliberately excludes. `git add` on an ignored path fails with exit 1 and aborts the whole commit. If you are unsure whether a path is ignored, run `git check-ignore <path>` first. Commit only source files, `tasks.md`, and other non-ignored content.
-3. Write progress notes **directly** to `.ralph/progress.md` with the `Write`/`Edit` tool. Never via commits.
-4. Commit after every completed task (not at the end of the phase). Each commit is a checkpoint the next iteration can resume from.
-5. Never include `Co-authored-by` trailers or any other agent-identifying footer. Use the Commit Message Format section below.
-6. Never use `--amend`, `--force`, `reset --hard`, or any destructive git operation. If something went wrong, make a new commit that fixes it.
-7. {{PUSH_GUIDANCE}} The policy is resolved from the breadcrumb file `.ralph/push-policy` at iteration start; if you disagree with it, do not override it from inside the loop — surface the disagreement in `.ralph/errors.log` and let the operator adjust the breadcrumb between iterations.
+## Naming hygiene
 
-## Naming hygiene (hard rules — read carefully)
+**Match the existing project's conventions.** Before creating any new file,
+directory, class, method, variable, or config key, read the nearest related
+existing file and copy its style — casing, layout, naming pattern, vocabulary.
+The project's source tree is the naming authority, not the spec.
 
-**The overriding rule: match the existing project's conventions at all times.**
+Spec metadata (slug, `T###`, `US#`, `[P]`, `[risky]`) belongs in `specs/`,
+`.ralph/`, branch names, and commit prefixes — NOT in source/test/dir/identifier
+names. If you catch yourself typing a spec slug or task ID into a path you're
+about to create, rename to match the project style first.
 
-Spec Kit artifacts — the spec slug, user-story numbers (`US1`, `US2`, …), task IDs (`T001`, …), phase numbering, and any other shorthand invented for this specific spec — are **process metadata**. They live in `{{SPEC_FILE}}`, `{{PLAN_FILE}}`, `{{TASK_FILE}}`, the spec directory name, the `[ralph][speckit] T### …` commit prefix, and any `[risky]` / `[P]` / `[US#]` tags. They do **not** belong in implementation artifacts. Implementation artifacts (source files, test files, directories, function names, class names, type names, database columns, configuration keys, shell scripts, docs) live forever; the spec gets archived. A reader six months from now should be able to understand every file and identifier you create **without** reading the spec.
+## Specialist skills
 
-This is a recurring failure mode on Spec Kit loops. Watch for it on every task.
+The plugin provides three skills that swap in specialist behavior when the
+main loop's procedural mode is wrong for the current situation. Use the
+`Skill` tool with these names:
 
-**Concrete rules:**
-
-1. **Match the root project's existing conventions.** Before creating any new file, directory, class, method, variable, type, config key, or database column, read the nearest related existing file and copy its style — casing, layout, dir grouping, naming pattern, vocabulary. Whatever the rest of the project does is authoritative. If the project groups tests by module, yours goes in the existing module directory. If the project uses kebab-case filenames with behavior descriptions, yours does the same. If the project uses camelCase method names built from domain nouns, yours does the same. The project's source tree, not the spec, is the naming authority.
-
-2. **Name for behavior, not for origin.** A file, class, or method name should describe what it *does* or *asserts*, not which spec or user story produced it. `describe("US3: <feature slug> — <scenario>", …)` and `us3-feature-slug.spec.ts` are wrong; the correct forms describe the behavior under test (e.g. `describe("<behavior>: <scenario>", …)` and `<behavior-description>.spec.ts`). The same rule applies to every nested `it()` title, to directory names, to exported symbols, and to config sections.
-
-3. **Do not carry the spec slug, user-story number, or task ID into any identifier.** If the spec uses a codename or shorthand for the feature (`<spec-slug>`, `<feature-codename>`, `<project-internal-abbreviation>`), check whether that term already appears broadly in the **real source tree** — modules, public types, database tables, API routes, top-level directories. If it does, it is part of the project's own vocabulary and you may use it. If it appears only in `specs/`, `.ralph/`, branch names, and commit message prefixes, it is spec-process vocabulary and must not leak into implementation.
-
-4. **Never create a new top-level directory named after a spec slug or codename.** If the rest of the tree organizes work by module, feature, or domain, your new files go into the existing directory that matches the module, feature, or domain you are touching — not into a parallel `tests/<spec-slug>/` or `policies/<spec-slug>/` or `seed/<spec-slug>/` catch-all. If no suitable existing directory exists, the new directory you create should be named after the behavior or domain concept, not the spec.
-
-5. **Before creating any new directory under a source root, test root, or package root, `Glob` the sibling parent to confirm the existing layout.** If a directory already exists for the concept you are working on, your file goes there. Do not create a parallel directory to hold the same concept. This is cheap (one tool call) and prevents the most common source of naming-hygiene regressions.
-
-6. **Extend existing helpers in place — do not add a parallel second helper with a spec-flavored name.** If an existing repository / service / utility method already does 80% of what your task needs, either (a) generalize the existing method in place, or (b) rename it to something more specific and add a new more-general variant. Do **not** create a second method on the same class where the second name embeds spec vocabulary and the two methods return overlapping shapes. Two sibling methods on the same class that both load the same root entity with overlapping joins are a code smell the naming-hygiene rules exist to prevent. The same principle applies to parallel component files, parallel config entries, parallel table columns, and parallel type aliases.
-
-7. **Maintenance edits on existing code must respect names the prior commits already settled on.** If a previous iteration renamed `<oldName>` to `<newName>` in commit X, do **not** resurrect `<oldName>` — check the git log (`git log --oneline --all -- <file>`) for recent renames before extending an existing surface. A recently-renamed identifier is a strong signal that a human or prior iteration made a deliberate naming decision; honour it.
-
-If you catch yourself typing a spec slug, user-story number, task ID, or project-internal shorthand into a path or identifier you're about to create — **stop, re-read the nearest related existing file, and rename your new thing to match the existing project's style**. Renaming is cheap before commit; expensive after.
+- **`running-gates`** — gate-invocation contract (how to call `{{GATE_RUN}}`,
+  no-pipe rule, retry budget, failure-diagnosis protocol). Reference this any
+  time you're about to run a gate or diagnose a gate failure.
+- **`diagnosing-stuck-tasks`** — exploratory mode when a gate keeps failing
+  or you've been on the same task too long. Suspends the procedural cycle,
+  reads the full failure log, runs layer-bypassing diagnostics (`curl`,
+  Playwright if available), decides between continue-with-new-approach and
+  GUTTER. The loop will sometimes prompt you to invoke this via
+  `.ralph/skill-suggestion`.
+- **`reviewing-loop-progress`** — lightweight meta-reflection. "Am I still on
+  the right track?" One paragraph, then act on the recommendation.
 
 ## Constitution compliance
 
-Ground every decision in `{{CONSTITUTION_PATH}}`. If a task would violate it, mark the task blocked (see Blocked-phase protocol) and stop — do not work around the constitution.
+Ground every decision in `{{CONSTITUTION_PATH}}`. If a task would violate it,
+mark the task blocked and stop — do not work around the constitution.
 
 ## Blocked-phase protocol
 
 If you cannot complete a task or phase:
 
-- Append `<!-- blocked: <one-line reason> -->` to the blocking task's line in `{{TASK_FILE}}`.
-- Write a longer explanation to `.ralph/errors.log` with the task ID, what you tried, and what the human needs to decide.
-- Do **not** mark `[x]` for the blocked task.
-- If ≥ 2 tasks in the current phase are blocked, or the phase is structurally impossible, emit `<ralph>GUTTER</ralph>` so the human is pulled in.
+- Append `<!-- blocked: <one-line reason> -->` to the blocking task's line in
+  `{{TASK_FILE}}`.
+- Write a longer explanation to `.ralph/errors.log` with the task ID and what
+  the human needs to decide.
+- Do not mark `[x]`.
+- If ≥ 2 tasks in the current phase are blocked, emit `<ralph>GUTTER</ralph>`.
 
 ## Completion protocol
 
-- When every `[ ]` in `{{TASK_FILE}}` is checked **and** `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}` passes (wrapper exit 0), emit `<promise>ALL_TASKS_DONE</promise>`.
-- The stream parser will re-scan `{{TASK_FILE}}` before honoring the promise. Do not emit the sigil unless the checkboxes actually show completion — a hallucinated promise wastes an iteration.
+When every `[ ]` in `{{TASK_FILE}}` is checked AND `{{GATE_RUN}} final
+{{FINAL_CHECK_COMMAND}}` exits 0, emit `<promise>ALL_TASKS_DONE</promise>`.
 
-## Observability (operator surfaces)
+The stream parser re-scans `{{TASK_FILE}}` before honoring the promise. Don't
+emit it unless checkboxes actually show completion — a hallucinated promise
+wastes an iteration.
 
-Operators inspecting loop progress use these files — keep them clean and informative:
+## Observability
 
-- `.ralph/activity.log` — concise per-action log (commits, pushes, gate starts/ends, shell commands, reads, writes). Every gate-run.sh invocation writes a `🧪 GATE start` and `🧪 GATE end` line here automatically.
-- `.ralph/gates/<label>-latest.log` — full, unfiltered output of the most recent gate run for that label. Symlinked to a timestamped file; older runs are retained (last 10 per label).
-- `.ralph/errors.log` — longer explanations for blocked tasks or structural problems the operator needs to resolve.
-- `.ralph/progress.md` — narrative session/iteration summary.
-- `.ralph/guardrails.md` — lessons learned from prior failures. Add a new Sign here whenever you encounter a repeat-failure pattern.
-- `.ralph/recovery-hint.md` — transient breadcrumb written by the loop when the prior iteration tripped a recoverable stuck pattern (same shell command failed twice, or the same file was rewritten 5× in 10 min). If a `## Recovery Hint from Prior Iteration` section appears at the very top of this prompt, it came from this file and **is authoritative steering** — the prior run was killed mid-flight; do not repeat what it just tried. The hint is consumed once and deleted; you will not see it again.
+Operators inspecting loop progress use these files. Keep them clean:
 
-If you would normally tell the operator "I'll paste the failing output below," instead tell them "see `.ralph/gates/<label>-latest.log`" — they already have it.
+- `.ralph/activity.log` — concise per-action log
+- `.ralph/gates/<label>-latest.log` — full gate output (read for failures)
+- `.ralph/errors.log` — blocked-task explanations
+- `.ralph/handoff.md` — navigation breadcrumb (you write it at session end)
+- `.ralph/diagnosis.md` — diagnostic findings (the `diagnosing-stuck-tasks` skill writes this)
+- `.ralph/skill-suggestion` — if present, the loop is suggesting you invoke a specific skill before continuing
+
+If you would normally tell the operator "I'll paste the failing output below",
+instead say "see `.ralph/gates/<label>-latest.log`" — they already have it.
 
 ## Commit message format
 
-Use **Conventional Commits** (<https://www.conventionalcommits.org/>):
+Conventional Commits:
 
 ```
 <type>(<scope>): <short description> (T###)
 ```
 
-- **type** — one of `feat | fix | refactor | test | chore | docs | perf | build | ci | style`. Pick what the task actually does:
-  - `feat` — new user-visible capability
-  - `fix` — bug fix
-  - `refactor` — internal restructure without behaviour change
-  - `test` — test-only additions or changes
-  - `chore` — infra, tooling, deps, no source-code behaviour change
-  - `docs` — documentation
-- **scope** — the module most affected by the change, matching the project's existing convention (e.g. `auth`, `logto`, `api`, `webapp`, `prisma`). Look at recent `git log --oneline` to see the scopes this repo uses. Omit the parens if there's no sensible scope.
-- **short description** — imperative mood, lowercase start, no trailing period, ≤ 60 characters ideally.
-- **(T###)** — the real task ID from `{{TASK_FILE}}` in parentheses at the end of the subject line, e.g. `(T007)`. Keeps git log searchable by task without polluting the type/scope structure. Never use placeholders like `<description>` or `TODO`.
+- **type**: `feat | fix | refactor | test | chore | docs | perf | build | ci | style`
+- **scope**: the module most affected, matching the project's existing convention (look at `git log --oneline`)
+- **description**: imperative, lowercase start, no trailing period, ≤ 60 chars
+- **(T###)**: the real task ID at the end of the subject line
 
-Phase-completion commits use `chore(<phase-slug>): complete <phase title> (phase-N)` — e.g. `chore(us1): complete branded sign-in (phase-4)`.
+Phase-completion commits: `chore(<phase-slug>): complete <phase title> (phase-N)`.
 
-**No agent-identifying footers.** Never include `Co-authored-by`, `Signed-off-by` for an agent persona, or any other "generated with X" trailer. The commit is the change; metadata about who produced it lives in the PR description, not in git history.
-
-**Examples:**
-
-```
-feat(logto): add seedBranding to apply dMatrix branding via Management API (T006)
-fix(auth): correct SMTP default to empty strings for Mailpit (T003)
-refactor(logto): centralize SMTP_DEFAULTS constant (T003)
-test(logto): add unit coverage for empty-string SMTP auth (T003)
-chore(us1): complete branded sign-in (phase-4)
-```
-
-## Working directory
-
-You are already in a git repository. Do **not**:
-- run `git init`
-- run scaffolding commands that create nested directories
-- create worktrees or branches unless the task explicitly asks
-
-Work in the current directory.
+No `Co-authored-by` or other agent-identifying trailers.
 
 ## Learning from failure
 
-If a step fails, check `.ralph/errors.log` and `.ralph/guardrails.md` for a pattern. If the same failure has happened before, add a `Sign` to `.ralph/guardrails.md` describing the trigger and the fix. The next iteration will read it.
+If a step fails, check `.ralph/errors.log` and `.ralph/guardrails.md` for a
+prior pattern. If the same failure has happened before, add a Sign to
+`.ralph/guardrails.md` describing the trigger and the fix.
 
 ---
 
-Begin by finding the next unchecked task in `{{TASK_FILE}}` and working task-by-task through every remaining unchecked task, across every remaining phase, until a preamble stop condition fires.
+Begin by reading `.ralph/handoff.md` if it exists, then continue from the
+first unchecked task in `{{TASK_FILE}}`.

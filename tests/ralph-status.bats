@@ -75,8 +75,8 @@ TASKS
   ! echo "$output" | grep -qE '^  tasks: '
 }
 
-@test "ralph-status: STATUS shows previous/current/next task triplet (0.5.6)" {
-  # Mid-stream task file: 2 done, 2 to go. Expect all three rows.
+@test "ralph-status: shows PREVIOUS/CURRENT/NEXT sections with task ID + body (0.5.7)" {
+  # Mid-stream task file: 2 done, 2 to go. Expect all three sections.
   cat > "$MOCK_WORKSPACE/tasks.md" <<'TASKS'
 # Tasks
 - [x] T001 done one
@@ -89,12 +89,15 @@ TASKS
   run bash "$STATUS_SCRIPT" "$MOCK_WORKSPACE"
   [ "$status" -eq 0 ]
 
-  echo "$output" | grep -qE '^  previous:  T002 done two'
-  echo "$output" | grep -qE '^  current:   T003 currently in progress'
-  echo "$output" | grep -qE '^  next:      T004 queued next'
+  echo "$output" | grep -qE '^PREVIOUS \(T002\)$'
+  echo "$output" | grep -qE '^T002 done two'
+  echo "$output" | grep -qE '^CURRENT \(T003\)$'
+  echo "$output" | grep -qE '^T003 currently in progress'
+  echo "$output" | grep -qE '^NEXT \(T004\)$'
+  echo "$output" | grep -qE '^T004 queued next'
 }
 
-@test "ralph-status: omits 'previous' before the first commit (0.5.6)" {
+@test "ralph-status: omits PREVIOUS section before the first commit (0.5.7)" {
   # Brand-new task file, no [x] yet — there is no previous task.
   cat > "$MOCK_WORKSPACE/tasks.md" <<'TASKS'
 # Tasks
@@ -106,12 +109,12 @@ TASKS
   run bash "$STATUS_SCRIPT" "$MOCK_WORKSPACE"
   [ "$status" -eq 0 ]
 
-  ! echo "$output" | grep -qE '^  previous:'
-  echo "$output" | grep -qE '^  current:   T001 first task'
-  echo "$output" | grep -qE '^  next:      T002 second task'
+  ! echo "$output" | grep -qE '^PREVIOUS'
+  echo "$output" | grep -qE '^CURRENT \(T001\)$'
+  echo "$output" | grep -qE '^NEXT \(T002\)$'
 }
 
-@test "ralph-status: omits 'next' when current is the last task (0.5.6)" {
+@test "ralph-status: omits NEXT section when current is the last task (0.5.7)" {
   # Last-task case: only one [ ] remains.
   cat > "$MOCK_WORKSPACE/tasks.md" <<'TASKS'
 # Tasks
@@ -124,9 +127,9 @@ TASKS
   run bash "$STATUS_SCRIPT" "$MOCK_WORKSPACE"
   [ "$status" -eq 0 ]
 
-  echo "$output" | grep -qE '^  previous:  T002 done'
-  echo "$output" | grep -qE '^  current:   T003 last one'
-  ! echo "$output" | grep -qE '^  next:'
+  echo "$output" | grep -qE '^PREVIOUS \(T002\)$'
+  echo "$output" | grep -qE '^CURRENT \(T003\)$'
+  ! echo "$output" | grep -qE '^NEXT'
 }
 
 @test "ralph-status: STATUS section includes a mode row with the ground-truth path in eval mode (0.5.1)" {

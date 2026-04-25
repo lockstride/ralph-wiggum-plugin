@@ -1013,6 +1013,17 @@ run_iteration() {
         echo "🚨 Gutter detected — agent may be stuck..." >&2
         signal="GUTTER"
         ;;
+      "SUGGEST_SKILL")
+        # 0.6.0: Soft suggestion from stream-parser. The parser detected an
+        # early stuck pattern (3 same-cmd failures or 3 same-file thrashes,
+        # below the 5-strike hard recovery threshold) and wrote
+        # `.ralph/skill-suggestion` with a recommended skill. The agent's
+        # prompt directs it to read that file and switch modes. We do NOT
+        # kill the agent here — same session continues. Logged to stderr
+        # for operator visibility, then the read loop continues.
+        [[ -t 2 ]] && printf "\r\033[K" >&2
+        echo "💡 Skill suggestion written to .ralph/skill-suggestion (agent will pick up next turn)" >&2
+        ;;
       "RECOVER_ATTEMPT")
         # 0.3.0: Recoverable stuck pattern hit (first time this iteration).
         # The stream-parser has written a recovery hint to

@@ -134,6 +134,53 @@ tool_result_json() {
   echo "$output" | grep -q "RECOVER_ATTEMPT"
 }
 
+@test "soft skill suggestion fires at 3 same-cmd failures before hard recovery (0.6.0)" {
+  # Pin thresholds so the test runs fast and deterministically.
+  export RALPH_SHELL_FAIL_SUGGEST_THRESHOLD=3
+  export RALPH_SHELL_FAIL_THRESHOLD=5
+
+  local events=""
+  for _ in 1 2 3; do
+    events+=$(tool_result_json "Shell" 50 2 1 "" "pnpm test")
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+
+  # SUGGEST_SKILL signal must be emitted to stdout.
+  echo "$output" | grep -q "^SUGGEST_SKILL$"
+  # Suggestion file must be written with the expected skill name.
+  [ -f "$MOCK_WORKSPACE/.ralph/skill-suggestion" ]
+  grep -q "diagnosing-stuck-tasks" "$MOCK_WORKSPACE/.ralph/skill-suggestion"
+  # And it must NOT have escalated to RECOVER_ATTEMPT yet (we're below the
+  # hard threshold of 5).
+  ! echo "$output" | grep -q "^RECOVER_ATTEMPT$"
+}
+
+@test "soft skill suggestion is not re-emitted on subsequent failures in same iteration (0.6.0)" {
+  # Once we've suggested `diagnosing-stuck-tasks` for shell-fails, hitting
+  # the threshold again on the same command shouldn't re-emit a duplicate
+  # suggestion every turn. Hard recovery still fires at the upper threshold.
+  export RALPH_SHELL_FAIL_SUGGEST_THRESHOLD=2
+  export RALPH_SHELL_FAIL_THRESHOLD=4
+
+  local events=""
+  for _ in 1 2 3; do
+    events+=$(tool_result_json "Shell" 50 2 1 "" "pnpm test")
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+
+  # Exactly ONE SUGGEST_SKILL emission, even though the threshold was
+  # crossed on counts 2 and 3.
+  local count
+  count=$(echo "$output" | grep -c "^SUGGEST_SKILL$" || true)
+  [ "$count" -eq 1 ]
+}
+
 @test "first identical-shell-fail-2x emits RECOVER_ATTEMPT (not GUTTER) and writes hint (0.3.0)" {
   local events=""
   events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm basic-check")

@@ -80,6 +80,60 @@ _section() {
   printf '\n%s\n' "$1"
 }
 
+# Strip "<lineno>:" prefix from grep -n and the leading "- [x] " / "- [ ] "
+# checkbox marker. Returns just the task text.
+_task_strip() {
+  echo "$1" |
+    sed 's/^[0-9]*://' |
+    sed -E 's/^[[:space:]]*[-*][[:space:]]*\[(x| )\][[:space:]]*//'
+}
+
+# Pull the leading task ID (T001, T012a, etc.) out of the description so
+# we can put it in the section header for an at-a-glance ID without
+# scanning the body. Falls back to empty if the text doesn't start with
+# the conventional Spec Kit T-pattern.
+_task_id() {
+  echo "$1" | grep -oE '^T[0-9]+[a-z]?' | head -1
+}
+
+# Print one labeled section: header + body. Body is wrapped to leave a
+# right margin so text doesn't run all the way to the terminal edge.
+# Wrap width = terminal_cols - right_margin - mb_safety, where the
+# multibyte-safety buffer absorbs the BSD fold quirk (it counts UTF-8
+# byte length, so lines with `→` / `—` chars run a few cols wider than
+# the requested width). Continuation lines start at column 0, matching
+# the body's first line — single-column flow, no indent alignment.
+_print_task_section() {
+  local label="$1"
+  local text="$2"
+  local id
+  id=$(_task_id "$text")
+  if [[ -n "$id" ]]; then
+    _section "$label ($id)"
+  else
+    _section "$label"
+  fi
+
+  # stty fails when stdin isn't a TTY (subshell, pipe); the trailing
+  # `|| true` keeps the script alive under set -o pipefail in that case.
+  local term_cols=""
+  term_cols=$(stty size 2>/dev/null | awk '{print $2}' || true)
+  if [[ -z "$term_cols" ]] || [[ "$term_cols" -le 0 ]]; then
+    term_cols=${COLUMNS:-100}
+  fi
+
+  local right_margin=10
+  local mb_safety=5
+  local wrap_at=$((term_cols - right_margin - mb_safety))
+
+  if [[ $wrap_at -lt 30 ]]; then
+    # Terminal too narrow to wrap helpfully — emit raw and let it soft-wrap.
+    printf '%s\n' "$text"
+  else
+    printf '%s\n' "$text" | fold -s -w "$wrap_at"
+  fi
+}
+
 # -----------------------------------------------------------------------------
 # Header
 # -----------------------------------------------------------------------------
@@ -155,72 +209,22 @@ if [[ -f "$activity_log" ]]; then
   fi
 fi
 
-# Task triplet: previous (last [x]), current (first [ ]), next (second [ ]).
-# 'current' is the task the agent is mid-flight on — agents flip [ ] → [x]
-# only after committing, so the first unchecked task is what they're
-# working on right now (or the next pickup if mid-transition between
-# tasks, which is a sub-second window in practice). Lines are omitted
-# when their slot is empty: no 'previous' before the first commit; no
-# 'next' when current is the last task.
-#
-# Long task descriptions wrap at the terminal width (or 100 cols when
-# stdout is not a tty), with continuation lines indented to align under
-# the first text column. RALPH_STATUS_WIDTH overrides if you want a
-# narrower wrap (e.g. for piping through less -S).
-
-_term_width() {
-  if [[ -n "${RALPH_STATUS_WIDTH:-}" ]]; then
-    echo "$RALPH_STATUS_WIDTH"
-    return
+# Token usage
+if [[ -f "$activity_log" ]]; then
+  _last_tokens=$(awk '/TOKENS:/ { m=$0 } END { if (m) print m }' "$activity_log" |
+    sed -E 's/.*TOKENS: ([0-9]+) \/ ([0-9]+) \(([0-9]+%)\).*/\1 \/ \2 (\3)/')
+  if [[ -n "$_last_tokens" ]]; then
+    printf '  tokens:    %s\n' "$_last_tokens"
   fi
-  if [[ -n "${COLUMNS:-}" ]] && [[ "$COLUMNS" -gt 40 ]]; then
-    echo "$COLUMNS"
-    return
-  fi
-  local cols
-  cols=$(tput cols 2>/dev/null || echo 0)
-  if [[ "$cols" -gt 40 ]]; then
-    echo "$cols"
-    return
-  fi
-  echo 100
-}
+fi
 
-# Strip "<lineno>:" prefix from grep -n and the leading "- [x] " / "- [ ] "
-# checkbox marker. Returns just the task text.
-_task_strip() {
-  echo "$1" |
-    sed 's/^[0-9]*://' |
-    sed -E 's/^[[:space:]]*[-*][[:space:]]*\[(x| )\][[:space:]]*//'
-}
-
-# Print "  <label>:<pad><wrapped text>" with continuation lines aligned
-# under the start of the text. fold -s wraps on whitespace and never
-# splits a word. The first-line write is split out so we don't have to
-# pre-compute byte vs. screen widths for printf.
-_print_task_row() {
-  local label="$1"
-  local text="$2"
-  local prefix
-  prefix=$(printf '  %-10s ' "$label:")
-  local indent
-  indent=$(printf '%*s' "${#prefix}" '')
-
-  local width
-  width=$(_term_width)
-  local wrap_at=$((width - ${#prefix}))
-  [[ $wrap_at -lt 30 ]] && wrap_at=30
-
-  local first=1
-  while IFS= read -r _line; do
-    if [[ $first -eq 1 ]]; then
-      printf '%s%s\n' "$prefix" "$_line"
-      first=0
-    else
-      printf '%s%s\n' "$indent" "$_line"
-    fi
-  done < <(printf '%s\n' "$text" | fold -s -w "$wrap_at")
-}
+# -----------------------------------------------------------------------------
+# PREVIOUS / CURRENT / NEXT — task triplet as separate labeled sections.
+# 'current' is the task the agent is mid-flight on (agents flip [ ] →
+# [x] only after committing, so the first unchecked task is in-flight).
+# Sections are omitted when empty: no PREVIOUS before the first commit,
+# no NEXT when current is the last task.
+# -----------------------------------------------------------------------------
 
 if [[ -f "$task_file_path" ]]; then
   task_file=$(cat "$task_file_path")
@@ -229,18 +233,9 @@ if [[ -f "$task_file_path" ]]; then
     _curr_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | head -1 || true)
     _next_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | sed -n '2p' || true)
 
-    [[ -n "$_prev_task" ]] && _print_task_row previous "$(_task_strip "$_prev_task")"
-    [[ -n "$_curr_task" ]] && _print_task_row current "$(_task_strip "$_curr_task")"
-    [[ -n "$_next_task" ]] && _print_task_row next "$(_task_strip "$_next_task")"
-  fi
-fi
-
-# Token usage
-if [[ -f "$activity_log" ]]; then
-  _last_tokens=$(awk '/TOKENS:/ { m=$0 } END { if (m) print m }' "$activity_log" |
-    sed -E 's/.*TOKENS: ([0-9]+) \/ ([0-9]+) \(([0-9]+%)\).*/\1 \/ \2 (\3)/')
-  if [[ -n "$_last_tokens" ]]; then
-    printf '  tokens:    %s\n' "$_last_tokens"
+    [[ -n "$_prev_task" ]] && _print_task_section PREVIOUS "$(_task_strip "$_prev_task")"
+    [[ -n "$_curr_task" ]] && _print_task_section CURRENT "$(_task_strip "$_curr_task")"
+    [[ -n "$_next_task" ]] && _print_task_section NEXT "$(_task_strip "$_next_task")"
   fi
 fi
 

@@ -399,6 +399,31 @@ main() {
   fi
   echo "✓ Model: $MODEL"
 
+  # 0.6.0: detect optional MCP plugins (Playwright) and surface them to the
+  # agent via RALPH_EXTRA_PLUGIN_DIRS, which agent-adapter.sh expands into
+  # `--plugin-dir` flags on the claude invocation. Honors any user-supplied
+  # value and appends to it. Currently scans for the official Playwright
+  # plugin install path; extend the list as more useful plugins become
+  # available. Cursor-agent doesn't take --plugin-dir today, so this is a
+  # claude-only enrichment.
+  if [[ "$RALPH_AGENT_CLI" == "claude" ]]; then
+    local _pw_dir
+    _pw_dir=$(find "$HOME/.claude/plugins/cache" -maxdepth 5 -type d -name "playwright" -path "*claude-plugins*" 2>/dev/null | head -1)
+    if [[ -n "$_pw_dir" ]]; then
+      # Resolve to the versioned subdirectory if present (e.g. .../playwright/unknown).
+      local _pw_versioned
+      _pw_versioned=$(find "$_pw_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
+      [[ -n "$_pw_versioned" ]] && _pw_dir="$_pw_versioned"
+      if [[ -n "${RALPH_EXTRA_PLUGIN_DIRS:-}" ]]; then
+        RALPH_EXTRA_PLUGIN_DIRS="$RALPH_EXTRA_PLUGIN_DIRS:$_pw_dir"
+      else
+        RALPH_EXTRA_PLUGIN_DIRS="$_pw_dir"
+      fi
+      export RALPH_EXTRA_PLUGIN_DIRS
+      echo "✓ Playwright plugin detected — agent will have browser-flow tools available"
+    fi
+  fi
+
   # Prompt source selector
   local pair
   pair=$(select_prompt_source "$WORKSPACE")

@@ -104,6 +104,22 @@ agent_build_cmd() {
       # Unset ANTHROPIC_API_KEY so the CLI uses the logged-in subscription
       # rather than a stray API key injected by env wrappers (e.g. env-run).
       local cmd="unset ANTHROPIC_API_KEY; claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model '$esc_model'"
+      # 0.6.0: optional extra plugin-dirs for browser-flow / UI debugging.
+      # RALPH_EXTRA_PLUGIN_DIRS is a colon-separated list (RALPH_SETUP detects
+      # Playwright at startup and populates this; users may override). Empty
+      # by default. Each path becomes one `--plugin-dir <path>` flag so the
+      # agent has the corresponding MCP tools available without baking the
+      # path into the framing prompt.
+      if [[ -n "${RALPH_EXTRA_PLUGIN_DIRS:-}" ]]; then
+        local _plugin_dir
+        local IFS=:
+        for _plugin_dir in $RALPH_EXTRA_PLUGIN_DIRS; do
+          [[ -z "$_plugin_dir" ]] && continue
+          local esc_dir
+          esc_dir=$(printf '%s' "$_plugin_dir" | sed "$sq_esc")
+          cmd="$cmd --plugin-dir '$esc_dir'"
+        done
+      fi
       if [[ -n "$session_id" ]]; then
         cmd="$cmd --resume '$esc_session'"
       fi

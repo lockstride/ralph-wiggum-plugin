@@ -185,45 +185,31 @@ seed_report() {
   printf '%s' "$body" >"$report"
 }
 
-# Render the orchestrator prompt into .ralph/effective-prompt.md with the
-# VERIFIER and REWORK role bodies inlined. Uses bash parameter expansion
-# (not sed) because role bodies are multi-line.
+# Render a thin framing prompt that points the agent at the
+# `running-acceptance-evaluation` skill and supplies the per-run paths
+# (ground truth, report). The orchestrator workflow itself, plus the
+# VERIFIER and REWORK role bodies, all live as plugin skills under
+# `skills/running-acceptance-evaluation/`, `skills/verifying-acceptance-criteria/`,
+# and `skills/addressing-acceptance-gaps/` (0.6.0+). The framing prompt
+# is intentionally minimal — everything load-bearing is in the skills.
 render_orchestrator_prompt() {
   local workspace="$1" ground_truth="$2" report="$3"
-  local tpl_dir
+
+  local tpl_dir framing_tpl
   tpl_dir="$(_default_templates_dir)"
+  framing_tpl="$tpl_dir/evaluator-framing.md"
 
-  local orchestrator_tpl="$tpl_dir/evaluator-orchestrator.md"
-  local verifier_tpl="$tpl_dir/evaluator-verifier-role.md"
-  local rework_tpl="$tpl_dir/evaluator-rework-role.md"
+  if [[ ! -f "$framing_tpl" ]]; then
+    echo "❌ Eval framing template not found: $framing_tpl" >&2
+    return 1
+  fi
 
-  local t
-  for t in "$orchestrator_tpl" "$verifier_tpl" "$rework_tpl"; do
-    if [[ ! -f "$t" ]]; then
-      echo "❌ Template not found: $t" >&2
-      return 1
-    fi
-  done
+  local body
+  body=$(_render_template "$framing_tpl" \
+    GROUND_TRUTH_PATH "$ground_truth" \
+    REPORT_PATH "$report")
 
-  local verifier_body rework_body orchestrator_body
-  verifier_body=$(cat "$verifier_tpl")
-  rework_body=$(cat "$rework_tpl")
-  orchestrator_body=$(cat "$orchestrator_tpl")
-
-  # First: substitute paths in the role bodies (they reference the ground
-  # truth and report the same way the orchestrator does).
-  verifier_body="${verifier_body//\{\{GROUND_TRUTH_PATH\}\}/$ground_truth}"
-  verifier_body="${verifier_body//\{\{REPORT_PATH\}\}/$report}"
-  rework_body="${rework_body//\{\{GROUND_TRUTH_PATH\}\}/$ground_truth}"
-  rework_body="${rework_body//\{\{REPORT_PATH\}\}/$report}"
-
-  # Then: substitute role bodies + paths into the orchestrator template.
-  orchestrator_body="${orchestrator_body//\{\{MODE_VERIFIER_ROLE\}\}/$verifier_body}"
-  orchestrator_body="${orchestrator_body//\{\{MODE_REWORK_ROLE\}\}/$rework_body}"
-  orchestrator_body="${orchestrator_body//\{\{GROUND_TRUTH_PATH\}\}/$ground_truth}"
-  orchestrator_body="${orchestrator_body//\{\{REPORT_PATH\}\}/$report}"
-
-  _write_effective_prompt "$workspace" "$orchestrator_body"
+  _write_effective_prompt "$workspace" "$body"
 }
 
 # =============================================================================

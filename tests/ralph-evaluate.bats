@@ -169,7 +169,7 @@ teardown() {
 # render_orchestrator_prompt
 # -----------------------------------------------------------------------------
 
-@test "render_orchestrator_prompt: writes effective-prompt.md with paths substituted" {
+@test "render_orchestrator_prompt: writes thin framing pointing at running-acceptance-evaluation skill (0.6.0)" {
   local report="$MOCK_WORKSPACE/.ralph/acceptance-report.md"
   mkdir -p "$(dirname "$report")"
   touch "$report"
@@ -178,16 +178,14 @@ teardown() {
 
   local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
   [ -f "$effective" ]
+  # Framing must reference the orchestrator skill by name.
+  grep -q "running-acceptance-evaluation" "$effective"
+  # Per-run paths are substituted in the framing.
   grep -q "$MOCK_WORKSPACE/PROMPT.md" "$effective"
   grep -q "$report" "$effective"
-  # All placeholders should be resolved
-  ! grep -q '{{GROUND_TRUTH_PATH}}' "$effective"
-  ! grep -q '{{REPORT_PATH}}' "$effective"
-  ! grep -q '{{MODE_VERIFIER_ROLE}}' "$effective"
-  ! grep -q '{{MODE_REWORK_ROLE}}' "$effective"
 }
 
-@test "render_orchestrator_prompt: includes both mode role bodies" {
+@test "render_orchestrator_prompt: framing references both role skills by name (0.6.0)" {
   local report="$MOCK_WORKSPACE/.ralph/acceptance-report.md"
   mkdir -p "$(dirname "$report")"
   touch "$report"
@@ -195,13 +193,13 @@ teardown() {
   render_orchestrator_prompt "$MOCK_WORKSPACE" "$MOCK_WORKSPACE/PROMPT.md" "$report" >/dev/null
 
   local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
-  # Verifier body has the "You are the acceptance verifier" heading.
-  grep -q "acceptance verifier" "$effective"
-  # Rework body has the "You are the acceptance rework agent" heading.
-  grep -q "acceptance rework agent" "$effective"
+  # Both role skills are mentioned in the framing so the orchestrator
+  # skill knows what sub-agents should invoke.
+  grep -q "verifying-acceptance-criteria" "$effective"
+  grep -q "addressing-acceptance-gaps" "$effective"
 }
 
-@test "render_orchestrator_prompt: nested path placeholders in role bodies are also substituted" {
+@test "render_orchestrator_prompt: framing is short — orchestrator content lives in the skill (0.6.0)" {
   local report="$MOCK_WORKSPACE/.ralph/acceptance-report.md"
   mkdir -p "$(dirname "$report")"
   touch "$report"
@@ -209,10 +207,10 @@ teardown() {
   render_orchestrator_prompt "$MOCK_WORKSPACE" "$MOCK_WORKSPACE/PROMPT.md" "$report" >/dev/null
 
   local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
-  # The verifier-role template references {{GROUND_TRUTH_PATH}} in prose — make
-  # sure that substitution cascaded into the nested body as well.
-  local gt_count
-  gt_count=$(grep -c "$MOCK_WORKSPACE/PROMPT.md" "$effective")
-  # Expect the path to appear multiple times (orchestrator body + verifier + rework).
-  [ "$gt_count" -ge 3 ]
+  # Pre-0.6.0 the orchestrator template inlined ~150 lines including both
+  # role bodies. Post-0.6.0 the framing is a thin pointer (< 50 lines)
+  # because everything load-bearing moved to skills.
+  local lines
+  lines=$(wc -l < "$effective" | tr -d ' ')
+  [ "$lines" -lt 80 ]
 }

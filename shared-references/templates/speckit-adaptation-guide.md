@@ -1,130 +1,94 @@
 # Spec Kit → Ralph Loop: Prompt Adaptation Guide
 
 This guide transforms a `speckit.implement.md` slash command into a loop-compatible
-prompt for unattended Ralph iterations. It contains durable transformation rules
-and a concrete example pair.
+prompt for unattended Ralph iterations.
+
+**Design principle**: trust the model. The skill itself (`speckit.implement.md`)
+is ~10 high-level steps that work well in interactive mode because the user is
+in the loop providing course correction. In unattended mode the user isn't
+there, so we add a few load-bearing rules — but resist the urge to add a rule
+every time the agent does something dumb. Cumulative rules crush the agent's
+ability to reason. Specialist behavior (gate discipline, stuck-debugging,
+meta-review) lives in plugin **skills** the agent invokes when needed, not in
+the framing prompt.
 
 ## Transformation Rules
 
 These rules describe the structural difference between interactive and unattended
 execution. They are stable across versions of speckit.implement.md.
 
-1. **Strip interactive features**: Remove user prompts, "STOP and ask", confirmation gates, and any step that waits for user input. In unattended mode there is no user to ask.
-2. **Strip one-time project setup**: Remove ignore file creation/verification (step 4 in the outline), tech stack detection, and any project scaffolding. These are done once before the loop starts, not on every iteration.
-3. **Strip extension hooks**: Remove all `.specify/extensions.yml` processing (before and after implementation hooks). Hooks require interactive slash command invocation.
-4. **Strip the `$ARGUMENTS` / user input section**: The loop prompt replaces this with its own context.
-5. **Replace "halt execution"**: Where the original says "halt" or "stop and ask", instead log the issue to `.ralph/errors.log` and emit `<ralph>GUTTER</ralph>` if structurally blocked.
-6. **Keep the execution outline**: Preserve context loading (step 3), task parsing (step 5), phase-by-phase execution (steps 6-7), progress tracking (step 8), and completion validation (step 9). These are the core logic.
-7. **Add iteration handoff**: Read `.ralph/handoff.md` at session start (if it exists and is fresh). Write it at session end (< 30 lines, navigation pointers only).
-8. **Add gate wrapper**: All test/check commands must use `{{GATE_RUN}}` wrapper. Basic gate: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`. Final gate: `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`. Never pipe or redirect gate output.
-9. **Add commit-per-task**: Commit after each completed task using Conventional Commits: `<type>(<scope>): <description> (T###)`. Types: feat / fix / refactor / test / chore / docs. Scope matches the project's `git log --oneline` convention. Stage files by explicit path only — never `git add .` or `git add -A`. Never include `Co-authored-by` or other agent-identifying footers.
-10. **Add completion signal**: `<promise>ALL_TASKS_DONE</promise>` when all tasks checked AND final gate passes.
-11. **Add stuck signal**: `<ralph>GUTTER</ralph>` if stuck 3+ times on the same issue.
-12. **Preserve `{{PLACEHOLDER}}` variables**: Keep `{{TASK_FILE}}`, `{{PLAN_FILE}}`, `{{SPEC_FILE}}`, `{{CONSTITUTION_PATH}}`, `{{GATE_RUN}}`, `{{BASIC_CHECK_COMMAND}}`, `{{FINAL_CHECK_COMMAND}}` as-is — the loop substitutes them later.
-13. **Total output must stay under 120 lines.**
+1. **Strip interactive features**: Remove user prompts, "STOP and ask", confirmation gates, and any step that waits for user input.
+2. **Strip one-time project setup**: Remove ignore file creation/verification, tech stack detection, project scaffolding. Done once before the loop, not on every iteration.
+3. **Strip extension hooks**: Remove all `.specify/extensions.yml` processing.
+4. **Strip the `$ARGUMENTS` section**: The loop replaces this.
+5. **Replace "halt execution"**: Log to `.ralph/errors.log` and emit `<ralph>GUTTER</ralph>` if structurally blocked.
+6. **Keep the execution outline**: Context loading, task parsing, phase-by-phase execution, completion validation. These are the core logic.
+7. **Add iteration handoff**: Read `.ralph/handoff.md` at start (if fresher than the latest commit). Write it at end (< 30 lines, navigation-only).
+8. **Reference the `running-gates` skill** for gate invocation. Don't inline the no-pipe rule, retry budget, or failure-diagnosis protocol — those live in the skill. The framing prompt only needs to say: "Run gates via `{{GATE_RUN}}`. See the `running-gates` skill for the contract."
+9. **Reference the `diagnosing-stuck-tasks` skill** for stuck cases. Don't inline diagnostic protocols. The framing prompt only needs to say: "If a gate fails after one fix-and-retry, invoke `diagnosing-stuck-tasks` instead of looping."
+10. **Add commit-per-task**: Conventional Commits `<type>(<scope>): <description> (T###)`. Stage by exact path. No agent-identifying footers.
+11. **Add completion signal**: `<promise>ALL_TASKS_DONE</promise>` when all `[x]` AND final gate passes.
+12. **Add DO-NOT-END-YOUR-TURN rule**: After every commit, immediately read the next task. Models naturally end turns at "polite stopping points" (post-commit) — that's wrong here because there's no human to receive the polite handoff and the cold-start tax of a new iteration is 10–30k tokens.
+13. **Preserve `{{PLACEHOLDER}}` variables**: `{{TASK_FILE}}`, `{{PLAN_FILE}}`, `{{SPEC_FILE}}`, `{{CONSTITUTION_PATH}}`, `{{GATE_RUN}}`, `{{BASIC_CHECK_COMMAND}}`, `{{FINAL_CHECK_COMMAND}}` — the loop substitutes them.
+14. **Reference `{{ACTIVITY_TAIL}}`**: A `Recent activity` section in the prompt body shows the last ~50 events from `.ralph/activity.log`. The loop populates this on each iteration. Surface it so the agent can spot meta-patterns (same gate failing 3×, same file thrashed) it would otherwise miss.
+15. **Total output must stay under 50 lines.** Trust the model. The skills carry the weight.
 
 ---
 
 ## Example Pair
 
-### Input: speckit.implement.md (v0.6.1)
+### Input: speckit.implement.md (any recent version)
 
-The source skill at this version has this structure:
-- Pre-execution checks (hooks) — **strip**
-- Outline steps 1-10:
-  - Step 1: Run check-prerequisites.sh — **keep** (simplified)
-  - Step 2: Check checklists — **keep** (replace interactive gate with log+continue)
-  - Step 3: Load context — **keep**
-  - Step 4: Project setup verification — **strip** (one-time setup)
-  - Step 5: Parse tasks.md — **keep**
-  - Step 6-7: Execute implementation — **keep** (core logic)
-  - Step 8: Progress tracking — **keep** (add commit-per-task)
-  - Step 9: Completion validation — **keep** (add ALL_TASKS_DONE signal)
-  - Step 10: Post-hooks — **strip**
+The skill is ~10 high-level steps with extensive prose. Strip per rules 1–4
+above. Keep the core execution outline. Add the loop wrappers.
 
-SHA-256 of the v0.6.1 source: (computed at generation time)
-
-### Output: Loop-adapted prompt
+### Output: Loop-adapted prompt (~40 lines)
 
 ```markdown
 # Spec Kit Implementation (Loop-Adapted)
 
-You are executing tasks from a Spec Kit spec in an unattended loop. Work one
-phase per iteration. Commit after each task. The next iteration resumes from
-your last commit.
+You are executing tasks from a Spec Kit spec in an unattended Ralph loop.
+Work every remaining unchecked task in a single continuous turn. Commit
+after each task. The loop handles context rotation and rate limits.
 
-## Paths (resolved by the loop)
-
+## Paths
 - **Tasks**: `{{TASK_FILE}}`
 - **Plan**: `{{PLAN_FILE}}`
 - **Spec**: `{{SPEC_FILE}}`
 - **Constitution**: `{{CONSTITUTION_PATH}}`
-- **Basic gate**: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`
-- **Final gate**: `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
+- **Gate runner**: `{{GATE_RUN}}` — see the `running-gates` skill for the contract
 
-## Iteration Handoff
+## Recent activity
+{{ACTIVITY_TAIL}}
 
-**At start**: If `.ralph/handoff.md` exists and is fresher than the latest commit,
-read it first. Trust its file pointers and architectural facts.
+If the snapshot above shows you've been running the same gate or editing
+the same file repeatedly without progress, do NOT continue the same
+approach — invoke the `diagnosing-stuck-tasks` skill instead.
 
-**At end**: After your last commit, write `.ralph/handoff.md` (< 30 lines):
-
-```
-## Last completed
-<task ID> (<commit SHA short>) — <one-line summary>
-
-## Next task: <task ID>
-**Read these files first** (max 6):
-- <path> ← <why>
-
-## Architectural facts (max 5 bullets)
-- <fact>
-```
+## Iteration handoff
+- **At start**: If `.ralph/handoff.md` exists and is fresher than the latest commit, read it first.
+- **At end**: After your last commit, write `.ralph/handoff.md` (< 30 lines: last completed, next task, files-to-read, max-5 architectural facts).
 
 ## Execution
+1. Run `.specify/scripts/bash/check-prerequisites.sh --json --require-tasks --include-tasks` for FEATURE_DIR and AVAILABLE_DOCS.
+2. Read `{{TASK_FILE}}` and `{{PLAN_FILE}}`. Read data-model.md / contracts/ / research.md / quickstart.md if they exist.
+3. For each unchecked task in `{{TASK_FILE}}`, in phase order:
+   a. Read only the files the task references.
+   b. Implement the minimum change. TDD where applicable (red → green in one commit).
+   c. Run the appropriate gate via `{{GATE_RUN}}` (see `running-gates` skill for basic-vs-final selection and the no-pipe rule).
+   d. If the gate fails: fix and re-run **once**. If it still fails, invoke the `diagnosing-stuck-tasks` skill — do NOT keep looping fix-then-fail.
+   e. Mark `[x]` in `{{TASK_FILE}}` only after the gate exits 0.
+   f. Commit: `git add <exact paths> && git commit -m "<type>(<scope>): <description> (T###)"`.
+   g. Check `.ralph/stop-requested`. If absent, your next tool call MUST be a read of the next unchecked task. No summary. No turn-end.
+4. When all tasks are `[x]` AND the final gate passes, emit `<promise>ALL_TASKS_DONE</promise>`.
 
-1. **Check prerequisites**: Run `.specify/scripts/bash/check-prerequisites.sh --json --require-tasks --include-tasks` to get FEATURE_DIR and AVAILABLE_DOCS.
-
-2. **Check checklists** (if FEATURE_DIR/checklists/ exists): Scan for incomplete items. If any checklist fails, log the incomplete items to `.ralph/errors.log` and continue — do not halt.
-
-3. **Load context**:
-   - **REQUIRED**: Read `{{TASK_FILE}}` and `{{PLAN_FILE}}`
-   - **IF EXISTS**: Read data-model.md, contracts/, research.md, quickstart.md
-
-4. **Find the next unchecked task** in `{{TASK_FILE}}`. Respect phase ordering (Setup → Foundational → US1 → US2 → …), but **do not stop at phase boundaries**. Work every remaining unchecked task across every remaining phase in a single iteration. Only yield when `ALL_TASKS_DONE`, a rotation WARN, `.ralph/stop-requested`, or a GUTTER condition fires.
-
-5. **For each unchecked task:**
-   a. Read only the files the task references
-   b. Follow TDD: write failing test first, then implementation
-   c. Run exactly ONE gate via `{{GATE_RUN}}` — never basic-then-final on the same code. The final gate is a strict superset of basic:
-      - **Final gate** if the task touches risky areas (module wiring, auth, DB schema, barrel exports) OR this is the last unchecked task in the current phase
-      - **Basic gate** otherwise (pure unit tests, in-memory logic, docs, type-only changes, self-contained refactors that aren't the last task in the phase)
-      - Never pipe or redirect gate output — the wrapper handles logging
-   d. If gate fails: read `.ralph/gates/<label>-latest.log` to diagnose. Fix and re-run. You have a 3-try budget per task before emitting `<ralph>GUTTER</ralph>`; a single failure is a normal debug step, not a stuck pattern.
-   e. Mark task `[x]` in `{{TASK_FILE}}`
-   f. Commit: `git add <explicit file paths> && git commit -m "<type>(<scope>): <description> (T###)"` using Conventional Commits (feat / fix / refactor / test / chore / docs). No `Co-authored-by` or other agent-identifying footers.
-   g. Check `.ralph/stop-requested` — if it exists, yield cleanly (no new task); otherwise continue to the next unchecked task (across phase boundaries as needed).
-
-6. **Phase-boundary verification**: When every task in the current phase is `[x]`, the last task already ran the final gate (per step 5c) and that IS the phase verification — do not run a second gate here. Commit any residual changes. Then **advance into the next phase in the same iteration** — do not hand off to a fresh iteration just because the phase is done.
-
-7. **Progress tracking**:
-   - Mark completed tasks as `[x]` in `{{TASK_FILE}}`
-   - Halt on non-parallel task failures
-   - For parallel tasks `[P]`, continue with successful ones, log failures
-
-8. **Completion**: When ALL tasks are `[x]` AND `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}` passes, emit `<promise>ALL_TASKS_DONE</promise>`.
-
-## Error Handling
-
-- Any test failure is a regression you introduced — fix it, do not ignore it
-- If stuck 3+ times on the same issue: emit `<ralph>GUTTER</ralph>`
-- If structurally blocked (constitution violation, missing dependency): log to `.ralph/errors.log` with the task ID and what the human needs to decide
+## Stop conditions
+The ONLY four valid turn-ends: `ALL_TASKS_DONE`, rotation `WARN` from the loop, `.ralph/stop-requested` exists, or `<ralph>GUTTER</ralph>` for genuinely stuck. A successful commit is NOT a stop condition.
 
 ## Constitution
+Ground every decision in `{{CONSTITUTION_PATH}}`. If a task would violate it, mark blocked and emit `<ralph>GUTTER</ralph>`.
 
-Ground every decision in `{{CONSTITUTION_PATH}}`. If a task would violate it, mark the task blocked and emit `<ralph>GUTTER</ralph>`.
-
-Begin by finding the next unchecked phase in `{{TASK_FILE}}`.
+Begin by reading `.ralph/handoff.md` if it exists, then continue from the first unchecked task.
 ```
 
 ---
@@ -135,3 +99,7 @@ The prompt resolver reads this guide and the current `speckit.implement.md`,
 then produces a loop-adapted prompt following the transformation rules and
 using the example as structural reference. The output is written to
 `<spec_dir>/ralph-prompt.md` and cached until `speckit.implement.md` changes.
+
+Generated prompts that exceed 50 lines should be re-tightened — the goal is
+to give the agent room to reason, not to enumerate every protocol. When in
+doubt, push detail into a skill rather than into the framing prompt.

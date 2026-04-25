@@ -254,6 +254,115 @@ PROMPT
   grep -q "alpha" "$effective"
 }
 
+@test "PROMPT.md mode appends loop-extras (activity tail + skill pointers) (0.6.0)" {
+  # User's PROMPT.md is plain markdown — no template substitution. The
+  # loop-extras block is appended after the user content so PROMPT.md
+  # users get the same self-observation and skill discoverability that
+  # spec-mode templates include via {{ACTIVITY_TAIL}}.
+  cat > "$MOCK_WORKSPACE/PROMPT.md" <<'PROMPT'
+# My custom prompt
+Do the work.
+PROMPT
+
+  # Seed an activity.log so we can confirm the tail content lands in the prompt
+  cat > "$MOCK_WORKSPACE/.ralph/activity.log" <<'LOG'
+[10:00:00] 🟢 SHELL git status → exit 0
+[10:00:42] 🧪 GATE end label=basic exit=0 duration=32s
+LOG
+
+  resolve_prompt "$MOCK_WORKSPACE" "prompt" "" >/dev/null
+
+  local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  # User's content survives
+  grep -q "Do the work" "$effective"
+  # Loop-extras section is appended
+  grep -q "Recent activity" "$effective"
+  grep -q "GATE end label=basic exit=0" "$effective"
+  grep -q "Specialist skills available" "$effective"
+  grep -q "diagnosing-stuck-tasks" "$effective"
+  grep -q "running-gates" "$effective"
+  grep -q "reviewing-loop-progress" "$effective"
+}
+
+@test "--prompt-file mode appends loop-extras (0.6.0)" {
+  cat > "$MOCK_WORKSPACE/custom.md" <<'PROMPT'
+# Custom prompt
+do stuff
+PROMPT
+
+  resolve_prompt "$MOCK_WORKSPACE" "file" "$MOCK_WORKSPACE/custom.md" >/dev/null
+
+  local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  grep -q "do stuff" "$effective"
+  grep -q "Recent activity" "$effective"
+  grep -q "Specialist skills available" "$effective"
+  # First-iteration fallback message when no activity.log exists
+  grep -q "no prior activity" "$effective"
+}
+
+@test "renders {{ACTIVITY_TAIL}} placeholder with last 50 lines of activity.log (0.6.0)" {
+  # When activity.log exists, ACTIVITY_TAIL should be substituted with its
+  # tail. When it doesn't exist, a friendly placeholder message renders.
+  create_mock_speckit_implement
+  local hash
+  hash=$(shasum -a 256 "$MOCK_WORKSPACE/.claude/commands/speckit.implement.md" | cut -d' ' -f1)
+
+  cat > "$MOCK_SPEC_DIR/ralph-prompt.md" <<'PROMPT'
+# Test prompt
+Recent activity:
+{{ACTIVITY_TAIL}}
+End.
+PROMPT
+  echo "$hash" > "$MOCK_SPEC_DIR/.ralph-prompt-hash"
+  (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "add cache")
+
+  # First run: no activity.log → fallback message
+  resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" >/dev/null 2>&1
+  grep -q "no prior activity" "$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+
+  # Seed an activity.log with distinctive content
+  cat > "$MOCK_WORKSPACE/.ralph/activity.log" <<'LOG'
+[10:00:00] 🟢 SHELL git status → exit 0
+[10:00:05] 🟢 READ /tmp/foo.ts (10 lines, 1KB)
+[10:00:10] 🧪 GATE start label=basic cmd=pnpm basic-check
+[10:00:42] 🧪 GATE end label=basic exit=0 duration=32s
+LOG
+
+  resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" >/dev/null 2>&1
+
+  # Effective prompt should now include the seeded log lines
+  grep -q "GATE start label=basic" "$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  grep -q "GATE end label=basic exit=0" "$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  # And the placeholder itself should be gone
+  ! grep -q '{{ACTIVITY_TAIL}}' "$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+}
+
+@test "_render_template handles multi-line replacement values (0.6.0 regression)" {
+  # The pre-0.6.0 sed-based renderer broke on multi-line values. The
+  # bash parameter-expansion replacement handles them cleanly.
+  local tmpl
+  tmpl=$(mktemp)
+  cat > "$tmpl" <<'TEMPLATE'
+Header
+{{MULTILINE}}
+Footer
+TEMPLATE
+
+  local multi
+  multi=$'line one\nline two\nline three'
+
+  local rendered
+  rendered=$(_render_template "$tmpl" MULTILINE "$multi")
+
+  echo "$rendered" | grep -q "^line one$"
+  echo "$rendered" | grep -q "^line two$"
+  echo "$rendered" | grep -q "^line three$"
+  echo "$rendered" | grep -q "^Header$"
+  echo "$rendered" | grep -q "^Footer$"
+
+  rm "$tmpl"
+}
+
 @test "cached prompt preserves placeholders for later substitution" {
   create_mock_speckit_implement
 

@@ -51,6 +51,10 @@ RATE_LIMITED=0
 # Gutter detection — temp files (macOS bash 3.x has no assoc arrays)
 FAILURES_FILE=$(mktemp)
 WRITES_FILE=$(mktemp)
+# 0.6.0: tracks which skills we've already suggested this iteration so we
+# don't spam the same suggestion every turn after the threshold trips.
+# One-line-per-skill format; cleared by reset_failure_counters_on_task_boundary.
+SUGGESTED_SKILLS_FILE=$(mktemp)
 
 # 0.5.3: independent heartbeat emitter pid. Set in main() once the sidecar
 # is spawned; left empty here so the EXIT trap can no-op safely if main()
@@ -72,7 +76,7 @@ _cleanup_parser() {
     pkill -P "$HB_SIDECAR_PID" 2>/dev/null || true
     kill "$HB_SIDECAR_PID" 2>/dev/null || true
   fi
-  rm -f "$FAILURES_FILE" "$WRITES_FILE"
+  rm -f "$FAILURES_FILE" "$WRITES_FILE" "${SUGGESTED_SKILLS_FILE:-}"
 }
 trap _cleanup_parser EXIT
 
@@ -104,6 +108,15 @@ MAX_READS_WITHOUT_WRITE="${RALPH_MAX_READS_WITHOUT_WRITE:-40}"
 # bail-out behaviour.
 SHELL_FAIL_THRESHOLD="${RALPH_SHELL_FAIL_THRESHOLD:-5}"
 FILE_THRASH_THRESHOLD="${RALPH_FILE_THRASH_THRESHOLD:-5}"
+
+# 0.6.0: Soft-suggestion threshold for shell-failures and file-thrash. Fires
+# BEFORE the hard recovery threshold and writes `.ralph/skill-suggestion`
+# pointing the agent at `diagnosing-stuck-tasks`. Same session, no kill —
+# the agent's next turn picks up the suggestion. Default 3 catches early
+# stuck patterns (1 fix attempt + 2 retries) before the 5-strike hard
+# escalation kicks in.
+SHELL_FAIL_SUGGEST_THRESHOLD="${RALPH_SHELL_FAIL_SUGGEST_THRESHOLD:-3}"
+FILE_THRASH_SUGGEST_THRESHOLD="${RALPH_FILE_THRASH_SUGGEST_THRESHOLD:-3}"
 
 get_health_emoji() {
   local tokens=$1
@@ -254,6 +267,36 @@ check_gutter() {
   fi
 }
 
+# 0.6.0: Soft suggestion — write a one-shot marker that the running agent's
+# next turn picks up. Does NOT kill the agent; same session continues. The
+# agent reads `.ralph/skill-suggestion` per its prompt and is expected to
+# invoke the named skill. Used for early stuck-pattern signals (3 same-cmd
+# failures) where we want the agent to pivot strategy without paying the
+# cold-start tax of a fresh iteration. Pre-0.6.0 the only escalation path
+# was RECOVER_ATTEMPT (kill + restart with hint), which was correct for
+# hard recovery but expensive for "you might be on the wrong track."
+SKILL_SUGGESTION_FILE="$RALPH_DIR/skill-suggestion"
+
+_write_skill_suggestion() {
+  local skill="$1"
+  local trigger="$2"
+  local detail="$3"
+  cat >"$SKILL_SUGGESTION_FILE" <<EOF
+## Loop suggestion (consume once, then delete this file)
+
+**Skill to invoke**: \`${skill}\`
+
+**Why**: ${trigger}
+
+**Context**: ${detail}
+
+The loop detected a pattern that suggests you should switch cognitive postures.
+Read the skill's SKILL.md and follow its workflow before continuing the
+procedural execute-gate-commit cycle. After the skill completes (or you decide
+to override its recommendation), delete this file with \`rm .ralph/skill-suggestion\`.
+EOF
+}
+
 # 0.3.0: Recovery-hint helpers. Each writes a trigger-specific block to
 # .ralph/recovery-hint.md, which build_prompt() prepends to the next
 # iteration's framing prompt and deletes (consume-once).
@@ -320,6 +363,20 @@ track_shell_failure() {
     # RALPH_SHELL_FAIL_THRESHOLD) so a normal red-state debug loop
     # (run gate → read log → fix → re-run) doesn't burn its only
     # recovery attempt on the first real iteration.
+    # 0.6.0: soft-suggestion at the lower threshold before hard recovery.
+    # Writes `.ralph/skill-suggestion` pointing at `diagnosing-stuck-tasks`
+    # and emits SUGGEST_SKILL to stdout. Loop does NOT kill the agent;
+    # the agent's prompt directs it to read the suggestion and switch modes.
+    if [[ $count -ge $SHELL_FAIL_SUGGEST_THRESHOLD ]] && [[ $count -lt $SHELL_FAIL_THRESHOLD ]]; then
+      if ! grep -qxF "diagnosing-stuck-tasks" "$SUGGESTED_SKILLS_FILE" 2>/dev/null; then
+        _write_skill_suggestion "diagnosing-stuck-tasks" \
+          "Same gate command has failed ${count} times" \
+          "Command: ${cmd}"
+        echo "diagnosing-stuck-tasks" >>"$SUGGESTED_SKILLS_FILE"
+        log_activity "💡 Skill suggestion: diagnosing-stuck-tasks (shell-fail ${count}x)"
+        echo "SUGGEST_SKILL" 2>/dev/null || true
+      fi
+    fi
     if [[ $count -ge $SHELL_FAIL_THRESHOLD ]]; then
       if [[ $RECOVERY_ATTEMPTED -eq 0 ]]; then
         _write_recovery_hint_shell "$cmd" "$exit_code"
@@ -347,6 +404,11 @@ track_shell_failure() {
 reset_failure_counters_on_task_boundary() {
   : >"$FAILURES_FILE"
   CONSECUTIVE_READS=0
+  # 0.6.0: also clear the per-iteration suggested-skill marker so the
+  # next stuck pattern (probably on a different command) gets a fresh
+  # suggestion. The skill-suggestion file itself is consumed by the
+  # agent, not us.
+  : >"$SUGGESTED_SKILLS_FILE"
   # Tell run_iteration to clear any latched GUTTER/WARN signals. The
   # consumer treats RECOVER as "the bad thing is over; keep going".
   echo "RECOVER" 2>/dev/null || true
@@ -363,6 +425,17 @@ track_file_write() {
     $1 >= cutoff && $2 == path { count++ }
     END { print count+0 }
   ' "$WRITES_FILE")
+  # 0.6.0: soft-suggestion at lower threshold for thrash too.
+  if [[ $count -ge $FILE_THRASH_SUGGEST_THRESHOLD ]] && [[ $count -lt $FILE_THRASH_THRESHOLD ]]; then
+    if ! grep -qxF "diagnosing-stuck-tasks" "$SUGGESTED_SKILLS_FILE" 2>/dev/null; then
+      _write_skill_suggestion "diagnosing-stuck-tasks" \
+        "Same file rewritten ${count} times in 10 minutes" \
+        "Path: ${path}"
+      echo "diagnosing-stuck-tasks" >>"$SUGGESTED_SKILLS_FILE"
+      log_activity "💡 Skill suggestion: diagnosing-stuck-tasks (file thrash ${count}x on $path)"
+      echo "SUGGEST_SKILL" 2>/dev/null || true
+    fi
+  fi
   if [[ $count -ge $FILE_THRASH_THRESHOLD ]]; then
     log_error "THRASHING: $path written ${count}x in 10 min"
     # 0.3.0: First trip in an iteration emits RECOVER_ATTEMPT; second

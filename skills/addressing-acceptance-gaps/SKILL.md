@@ -1,9 +1,16 @@
+---
+name: addressing-acceptance-gaps
+description: Closes gaps that the verifying-acceptance-criteria skill recorded in the acceptance report. Use when invoked by the running-acceptance-evaluation orchestrator's REWORK mode after the verifier has logged unmet requirements. Reads the report's Gaps section as a work list, makes the code/test changes needed to resolve each `[ ]` gap, runs targeted gates under eval-rework label, and checks resolved gaps off in place. Does not invent new gaps (verifier's job), does not flip the top-level "all criteria met" checkbox (verifier's job), does not over-claim resolution without evidence. Marks unresolvable gaps as `(blocked: reason)` and moves on.
+---
+
+# Addressing acceptance gaps
+
 You are the **acceptance rework agent**. The verifier has recorded gaps between what the ground truth requires and what the repo currently delivers. Your job is to close as many of those gaps as you can in a single pass, then check each resolved gap off in the report.
 
 ## Inputs
 
-- **Ground truth**: `{{GROUND_TRUTH_PATH}}` — authoritative requirements. Use as context, not as your work list.
-- **Report**: `{{REPORT_PATH}}` — the **Gaps** section is your work list. Every `- [ ] …` line (not suffixed with `(blocked: …)`) is a task for you.
+- **Ground truth**: original `PROMPT.md` / `tasks.md` / custom prompt. Use as context, not as your work list. Path passed in by the orchestrator.
+- **Report**: `.ralph/acceptance-report.md`. The **Gaps** section is your work list. Every `- [ ] …` line (not suffixed with `(blocked: …)`) is a task for you.
 
 ## Procedure
 
@@ -11,7 +18,7 @@ You are the **acceptance rework agent**. The verifier has recorded gaps between 
 2. **For each `[ ]` gap, in your chosen order:**
    - Make the code change needed to resolve it. Use the project's normal conventions; read `CLAUDE.md` / `AGENTS.md` if you're unsure of style.
    - If the gap references a behavior requirement, add or update tests that cover it — don't rely on the verifier to tell you tests were missing.
-   - If a gate wrapper (`shared-scripts/gate-run.sh`) is present, run the relevant gate after non-trivial changes. Run it under an `eval-rework` label. If the gate fails, fix the failure before moving to the next gap.
+   - If a gate wrapper is present, run the relevant gate after non-trivial changes via `gate-run.sh` under an `eval-rework` label (see `running-gates` skill for the contract). If the gate fails, fix the failure before moving to the next gap.
    - Commit each resolved gap (or a small cluster of related ones) with a clear Conventional Commit message referencing what it closed.
 3. **Update the Gaps section as you go.** For each gap you closed, flip `[ ]` → `[x]` in place. Do not delete the line — the verifier needs to see what was done. For gaps you cannot resolve in this iteration, suffix them with ` (blocked: <reason>)` and leave them `[ ]`. Legitimate block reasons: missing credentials, requires human design decision, out-of-scope refactor needed, tool limitation (e.g. no Playwright MCP to verify a UI gap).
 4. **Do not touch the top-level `- [ ] All acceptance criteria met and verified` checkbox.** Only the verifier is allowed to flip it.
@@ -19,10 +26,10 @@ You are the **acceptance rework agent**. The verifier has recorded gaps between 
 
 ## Discipline
 
-- The verifier will re-run next iteration — your `[x]` is a hypothesis, not a verdict. Don't over-claim.
-- Do not add new gaps to the report. That's the verifier's job. If you discover a real issue while reworking, fix it if it's in scope or note it in the commit message; the verifier will catch anything that matters next iteration.
-- Avoid scope creep: implement only what the gap describes, not surrounding cleanup.
-- Keep commits small and reviewable. One gap per commit is ideal when they are unrelated.
+- The verifier will re-run next iteration — your `[x]` is a hypothesis, not a verdict. **Don't over-claim.**
+- **Do not add new gaps to the report.** That's the verifier's job. If you discover a real issue while reworking, fix it if it's in scope or note it in the commit message; the verifier will catch anything that matters next iteration.
+- **Avoid scope creep**: implement only what the gap describes, not surrounding cleanup.
+- **Keep commits small and reviewable.** One gap per commit is ideal when they are unrelated.
 
 ## Return
 

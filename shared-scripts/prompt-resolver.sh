@@ -83,12 +83,26 @@ _resolve_guardrails_preamble() {
 # Write the resolved prompt body to .ralph/effective-prompt.md.
 # Prepends the universal guardrails preamble so PROMPT.md, --prompt-file,
 # and spec modes all carry the same anti-pattern rules.
+#
+# 0.6.0: optional third argument $append_loop_extras. When "true", appends
+# a "Recent activity" section (last 50 events from activity.log) and a
+# "Skills available" pointer block to the body. Used by PROMPT.md and
+# --prompt-file modes so user-supplied prompts get the same self-observation
+# and skill-pointer benefits the spec-mode template gets via {{ACTIVITY_TAIL}}
+# placeholder substitution. Spec mode passes "false" (the template handles
+# both itself).
 _write_effective_prompt() {
   local workspace="$1"
   local body="$2"
+  local append_loop_extras="${3:-false}"
   local rel="${RALPH_EFFECTIVE_PROMPT:-.ralph/effective-prompt.md}"
   local out="$workspace/$rel"
   mkdir -p "$(dirname "$out")"
+
+  if [[ "$append_loop_extras" == "true" ]]; then
+    body="${body}$(_loop_extras_block "$workspace")"
+  fi
+
   local preamble
   preamble=$(_resolve_guardrails_preamble)
   if [[ -n "$preamble" ]]; then
@@ -99,8 +113,68 @@ _write_effective_prompt() {
   echo "$out"
 }
 
+# 0.6.0: build the loop-extras block that PROMPT.md / --prompt-file modes
+# get appended to the user's prompt. Mirrors what spec-mode templates
+# include via {{ACTIVITY_TAIL}} substitution + the inline skills section,
+# so non-spec users still benefit from self-observation and skill
+# discoverability without having to manually template their PROMPT.md.
+_loop_extras_block() {
+  local workspace="$1"
+  local activity_tail=""
+  local _activity_log_path="$workspace/.ralph/activity.log"
+  if [[ -f "$_activity_log_path" ]]; then
+    activity_tail=$(tail -n 50 "$_activity_log_path" 2>/dev/null || true)
+  fi
+  if [[ -z "$activity_tail" ]]; then
+    activity_tail="(no prior activity — this is the first iteration)"
+  fi
+
+  cat <<EOF
+
+
+---
+
+## Recent activity (last 50 events from .ralph/activity.log)
+
+\`\`\`
+$activity_tail
+\`\`\`
+
+If the snapshot above shows you've been running the same gate or editing
+the same file repeatedly without progress, do NOT continue the same
+approach — invoke the \`diagnosing-stuck-tasks\` skill instead.
+
+## Specialist skills available
+
+The plugin provides three skills you can invoke (via the Skill tool) when
+the situation calls for a different cognitive posture than executing the
+prompt above:
+
+- \`running-gates\` — gate-invocation contract (how to call gate-run.sh,
+  no-pipe rule, retry budget, failure-diagnosis protocol). Reference any
+  time you're about to run a verification command.
+- \`diagnosing-stuck-tasks\` — exploratory mode when the same gate keeps
+  failing or you've been on the same task too long. The loop sometimes
+  prompts you to invoke this via \`.ralph/skill-suggestion\`.
+- \`reviewing-loop-progress\` — lightweight meta-reflection. "Am I still
+  on the right track?" One paragraph, then act.
+
+If \`.ralph/skill-suggestion\` exists, the loop has detected a stuck
+pattern and is suggesting a specific skill — read that file and invoke
+the named skill before continuing.
+EOF
+}
+
 # Substitute {{VAR}} placeholders in a template using a simple key/value map.
 # Args: template_path KEY1 VAL1 KEY2 VAL2 ...
+#
+# 0.6.0: uses bash parameter expansion instead of sed. The previous sed
+# implementation broke on multi-line values (newlines in the replacement
+# get interpreted as new sed commands and corrupt the output) — fine when
+# all placeholders were single-line, but the new {{ACTIVITY_TAIL}}
+# placeholder substitutes ~50 lines of activity log. Bash's `${var//search/replace}`
+# handles multi-line values correctly because the replacement side is
+# always literal (no glob/regex interpretation).
 _render_template() {
   local template="$1"
   shift
@@ -114,10 +188,9 @@ _render_template() {
     local key="$1"
     local val="$2"
     shift 2
-    # Escape for sed (delimiter is |)
-    local esc_val
-    esc_val=$(printf '%s' "$val" | sed -e 's/[\/&|]/\\&/g')
-    content=$(printf '%s' "$content" | sed "s|{{${key}}}|${esc_val}|g")
+    local placeholder="{{${key}}}"
+    # shellcheck disable=SC2295 # placeholder is literal-pattern by intent
+    content="${content//$placeholder/$val}"
   done
   printf '%s' "$content"
 }
@@ -132,7 +205,10 @@ resolve_prompt_promptmd() {
   fi
   mkdir -p "$workspace/.ralph"
   echo "$prompt_file" >"$workspace/.ralph/task-file-path"
-  _write_effective_prompt "$workspace" "$(cat "$prompt_file")"
+  # 0.6.0: append loop extras (activity tail + skill pointers) so PROMPT.md
+  # users get the same self-observation and skill discoverability that
+  # spec-mode templates include via placeholder substitution.
+  _write_effective_prompt "$workspace" "$(cat "$prompt_file")" "true"
 }
 
 # Mode 2: custom prompt file at a user-supplied path
@@ -153,7 +229,9 @@ resolve_prompt_file() {
   fi
   mkdir -p "$workspace/.ralph"
   echo "$path" >"$workspace/.ralph/task-file-path"
-  _write_effective_prompt "$workspace" "$(cat "$path")"
+  # 0.6.0: append loop extras (activity tail + skill pointers) — see
+  # resolve_prompt_promptmd for rationale.
+  _write_effective_prompt "$workspace" "$(cat "$path")" "true"
 }
 
 # Generate a loop-adapted prompt from speckit.implement.md using the
@@ -211,7 +289,7 @@ Use the example output in the guide as a structural reference — match its form
 section structure, and level of detail.
 
 Output ONLY the adapted prompt content (markdown). Do not include any preamble,
-explanation, or commentary. Keep the output under 120 lines. Preserve all
+explanation, or commentary. Keep the output under 50 lines. Preserve all
 {{PLACEHOLDER}} variables exactly as written — they will be substituted later.
 GENPROMPT
   )
@@ -244,8 +322,12 @@ GENPROMPT
     echo "  ❌ Generated prompt too short ($line_count lines)" >&2
     return 1
   fi
-  if [[ $line_count -gt 150 ]]; then
-    echo "  ⚠️  Generated prompt is $line_count lines (target: ≤120)" >&2
+  # 0.6.0 trimmed the target from 120 → 50 lines. Specialist behavior moved to
+  # plugin skills (running-gates, diagnosing-stuck-tasks, reviewing-loop-progress)
+  # so the framing prompt no longer needs to inline gate-discipline / diagnosis
+  # protocols. Warn if the generated prompt drifts back over 75 lines.
+  if [[ $line_count -gt 75 ]]; then
+    echo "  ⚠️  Generated prompt is $line_count lines (target: ≤50)" >&2
   fi
 
   # Write the generated prompt and hash
@@ -451,6 +533,20 @@ resolve_prompt_spec() {
     template="$templates_dir/speckit-prompt.md"
   fi
 
+  # 0.6.0: render the {{ACTIVITY_TAIL}} placeholder with the last ~50 events
+  # from .ralph/activity.log. Lets the agent see its own recent pattern (same
+  # gate failing 3×, same file thrashed) which it would otherwise miss.
+  # ~500 token cost on a populated log; degrades gracefully to a placeholder
+  # message when activity.log doesn't exist yet (first iteration).
+  local activity_tail=""
+  local _activity_log_path="$workspace/.ralph/activity.log"
+  if [[ -f "$_activity_log_path" ]]; then
+    activity_tail=$(tail -n 50 "$_activity_log_path" 2>/dev/null || true)
+  fi
+  if [[ -z "$activity_tail" ]]; then
+    activity_tail="(no prior activity — this is the first iteration)"
+  fi
+
   local rendered
   if ! rendered=$(_render_template "$template" \
     SPEC_DIR "$spec_dir" \
@@ -463,7 +559,8 @@ resolve_prompt_spec() {
     PUSH_GUIDANCE "$push_guidance" \
     TASK_FILE "$task_file" \
     PLAN_FILE "$plan_file" \
-    SPEC_FILE "$spec_file"); then
+    SPEC_FILE "$spec_file" \
+    ACTIVITY_TAIL "$activity_tail"); then
     return 1
   fi
 
