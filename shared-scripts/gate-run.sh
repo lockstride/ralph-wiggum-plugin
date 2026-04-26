@@ -56,6 +56,7 @@ WHY
     • Prints a bounded summary (header + tail + failure-pattern matches)
     • Exits with the real command status via PIPESTATUS (pipefail-safe)
     • Writes an exit-code breadcrumb at .ralph/gates/<label>-latest.exit
+    • Writes a command breadcrumb at .ralph/gates/<label>-latest.cmd
     • Maintains a .ralph/gates/<label>-latest.log pointer for quick reading
 
 LABELS (fixed set — pick the closest match; use 'custom' for anything else)
@@ -467,6 +468,15 @@ _log_activity "🧪 GATE end label=$label exit=$cmd_status duration=${duration}s
 # .ralph/gates/<label>-latest.exit. The most recently-modified file
 # across all labels represents the last gate the agent ran.
 printf '%s' "$cmd_status" >"$gates_dir/$label-latest.exit"
+
+# 0.6.4: Sibling breadcrumb recording the actual command that was run for
+# this label. Consumed by the loop's COMPLETE guard to verify the
+# pinned final-gate command was the one that produced the green result —
+# closes the spoof where an agent labels a cheap command as `final`.
+# Stored space-joined (the same form a user types in `.ralph/final-check-command`)
+# so the comparison in `_complete_allowed` is a plain string match after
+# whitespace normalization. No newline.
+printf '%s' "$*" >"$gates_dir/$label-latest.cmd"
 
 # 0.6.1: Long-gate single-failure SUGGEST_SKILL trigger.
 #

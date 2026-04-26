@@ -63,7 +63,16 @@ fi
 # RALPH_MAX_ITERATIONS is honored as a deprecated alias (one minor
 # release of compatibility) so existing call sites and env files keep
 # working.
-MAX_LOOPS="${MAX_LOOPS:-${RALPH_MAX_LOOPS:-${MAX_ITERATIONS:-${RALPH_MAX_ITERATIONS:-20}}}}"
+#
+# 0.6.4: lowered default from 20 to 10. Under the flow framing one loop
+# is expected to chew through most/all of a spec; double-digit respawns
+# is now a smell, not steady state. The driver's stall thresholds
+# (3 consecutive natural-end zero-progress, 10 consecutive DEFER, 2
+# RECOVER_ATTEMPT) all trip well before 10 in any genuinely stuck
+# scenario, so 10 is just the "you really shouldn't be here" backstop.
+# Operators on smaller-context models (or genuinely huge specs) can
+# override via --loops or MAX_LOOPS.
+MAX_LOOPS="${MAX_LOOPS:-${RALPH_MAX_LOOPS:-${MAX_ITERATIONS:-${RALPH_MAX_ITERATIONS:-10}}}}"
 
 # Feature flags (set by caller)
 USE_BRANCH="${USE_BRANCH:-}"
@@ -1272,15 +1281,76 @@ _most_recent_gate_exit() {
 }
 
 # Return 0 if the main loop is allowed to honour a tasks-complete /
-# COMPLETE signal, non-zero if it should be blocked (most recent gate was
-# red). The fallback case (no gate breadcrumbs) returns 0 so projects that
-# don't yet use gate-run.sh or that ran before 0.3.3 aren't regressed.
+# COMPLETE signal, non-zero if it should be blocked.
+#
+# Two layers of check:
+#
+#   1. (0.6.4) Pinned-final-command bar. When .ralph/gates/final-latest.cmd
+#      exists (the agent has run a `final` gate), the canonical final
+#      command — read from .ralph/final-check-command, default
+#      "pnpm all-check" to match prompt-resolver.sh's default — must
+#      match what was actually run, AND that run's exit code must be 0.
+#      Closes the spoof where an agent runs `gate-run.sh final pnpm
+#      basic-check` to satisfy a label-only check.
+#
+#   2. Pre-0.6.4 fallback. When no `final` gate has ever been run
+#      (no final-latest.cmd breadcrumb), the most-recent gate across
+#      all labels must have exited 0. Preserves backward compat for
+#      flows that run only e2e/lint/custom gates and never invoke
+#      a `final` label, and for older plugin state lacking the .cmd
+#      breadcrumb.
+#
+# When this function returns non-zero, $_COMPLETE_BLOCK_REASON is set to
+# a short, human-readable phrase the caller logs verbatim — single
+# source of truth for the BLOCKED message in activity.log/progress.md.
+_COMPLETE_BLOCK_REASON=""
+
 _complete_allowed() {
   local workspace="$1"
+  _COMPLETE_BLOCK_REASON=""
+
+  local final_cmd_file="$workspace/.ralph/gates/final-latest.cmd"
+  local final_exit_file="$workspace/.ralph/gates/final-latest.exit"
+
+  if [[ -f "$final_cmd_file" ]]; then
+    # Pinned-cmd path. Default mirrors prompt-resolver.sh:resolve_prompt's
+    # FINAL_CHECK_COMMAND default ("pnpm all-check"). Keep the two in sync
+    # if either changes.
+    local pinned_cmd="pnpm all-check"
+    if [[ -f "$workspace/.ralph/final-check-command" ]]; then
+      pinned_cmd=$(tr -d '\n' <"$workspace/.ralph/final-check-command")
+      # Collapse runs of whitespace and trim, so "pnpm  all-check\n" matches
+      # "pnpm all-check".
+      pinned_cmd=$(echo "$pinned_cmd" | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//')
+    fi
+    local actual_cmd
+    actual_cmd=$(tr -d '\n' <"$final_cmd_file")
+    actual_cmd=$(echo "$actual_cmd" | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//')
+
+    if [[ "$actual_cmd" != "$pinned_cmd" ]]; then
+      _COMPLETE_BLOCK_REASON="final gate must run \"$pinned_cmd\" but last label=final ran \"$actual_cmd\""
+      return 1
+    fi
+    local final_exit=""
+    [[ -f "$final_exit_file" ]] && final_exit=$(cat "$final_exit_file" 2>/dev/null)
+    if [[ "$final_exit" != "0" ]]; then
+      _COMPLETE_BLOCK_REASON="final gate \"$pinned_cmd\" exited ${final_exit:-?}"
+      return 1
+    fi
+    return 0
+  fi
+
+  # Fallback path (pre-0.6.4 behavior).
   local exit_code
   exit_code=$(_most_recent_gate_exit "$workspace")
-  [[ -z "$exit_code" ]] && return 0
-  [[ "$exit_code" == "0" ]]
+  if [[ -z "$exit_code" ]]; then
+    return 0
+  fi
+  if [[ "$exit_code" != "0" ]]; then
+    _COMPLETE_BLOCK_REASON="most recent gate exited $exit_code"
+    return 1
+  fi
+  return 0
 }
 
 # =============================================================================
@@ -1374,13 +1444,13 @@ run_ralph_loop() {
     if [[ "$task_status" == "COMPLETE" ]]; then
       # 0.3.3 Completion Bar guard: refuse to exit the loop with a red gate,
       # even if every checkbox is [x]. Forces the agent to fix verification
-      # failures rather than marking around them.
+      # failures rather than marking around them. 0.6.4 extended this to
+      # also reject a green-but-spoofed gate (cheaper command relabeled
+      # as `final`) — see _complete_allowed.
       if ! _complete_allowed "$workspace"; then
-        local _last_exit
-        _last_exit=$(_most_recent_gate_exit "$workspace")
-        log_activity "$workspace" "🛑 COMPLETE BLOCKED — all tasks checked but most recent gate exited $_last_exit. Agent must get the gate to green (or escalate via <ralph>GUTTER</ralph>) before the loop can exit.$task_suffix"
-        log_progress "$workspace" "**Loop $loop_label ended** — 🛑 COMPLETE BLOCKED (gate red, exit=$_last_exit)"
-        echo "🛑 Checkboxes all [x] but most recent gate exited $_last_exit — not honouring COMPLETE. Continuing..."
+        log_activity "$workspace" "🛑 COMPLETE BLOCKED — all tasks checked but $_COMPLETE_BLOCK_REASON. Agent must satisfy the bar (or escalate via <ralph>GUTTER</ralph>) before the loop can exit.$task_suffix"
+        log_progress "$workspace" "**Loop $loop_label ended** — 🛑 COMPLETE BLOCKED ($_COMPLETE_BLOCK_REASON)"
+        echo "🛑 Checkboxes all [x] but $_COMPLETE_BLOCK_REASON — not honouring COMPLETE. Continuing..."
         # Reset stall/zero-progress counters — a red-gate block is not an
         # API hiccup, and work may have progressed this loop.
         stall_count=0
@@ -1421,13 +1491,11 @@ run_ralph_loop() {
         if [[ "$task_status" == "COMPLETE" || "$task_status" == "NO_TASKS" || "$task_status" == "NO_TASK_FILE" ]]; then
           # 0.3.3 Completion Bar guard — same check as the task-status
           # path above. An agent-emitted <promise>ALL_TASKS_DONE</promise>
-          # does not override a red final gate.
+          # does not override a red (or spoofed) final gate.
           if ! _complete_allowed "$workspace"; then
-            local _last_exit
-            _last_exit=$(_most_recent_gate_exit "$workspace")
-            log_activity "$workspace" "🛑 COMPLETE BLOCKED — agent signaled COMPLETE but most recent gate exited $_last_exit.$task_suffix"
-            log_progress "$workspace" "**Loop $loop_label ended** — 🛑 COMPLETE BLOCKED (agent signaled; gate red, exit=$_last_exit)"
-            echo "🛑 Agent signaled COMPLETE but most recent gate exited $_last_exit — not honouring. Continuing..."
+            log_activity "$workspace" "🛑 COMPLETE BLOCKED — agent signaled COMPLETE but $_COMPLETE_BLOCK_REASON.$task_suffix"
+            log_progress "$workspace" "**Loop $loop_label ended** — 🛑 COMPLETE BLOCKED (agent signaled; $_COMPLETE_BLOCK_REASON)"
+            echo "🛑 Agent signaled COMPLETE but $_COMPLETE_BLOCK_REASON — not honouring. Continuing..."
             stall_count=0
             DEFER_COUNT=0
             loop_n=$((loop_n + 1))

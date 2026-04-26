@@ -113,7 +113,7 @@ Usage:
 Options:
   --cli <claude|cursor-agent>  Skip CLI picker
   -m, --model <id>             Skip model picker
-  -n, --loops N                Max loops cap (safety net; default 20).
+  -n, --loops N                Max loops cap (safety net; default 10).
                                One loop typically completes a whole
                                spec — this is the upper bound on respawns.
                                (--iterations is the deprecated alias.)
@@ -292,10 +292,10 @@ get_max_loops() {
     return
   fi
   if [[ "$HAS_GUM" == "true" ]]; then
-    gum input --header "Max loops:" --placeholder "20" --value "20"
+    gum input --header "Max loops:" --placeholder "10" --value "10"
   else
-    read -rp "Max loops [20]: " value
-    echo "${value:-20}"
+    read -rp "Max loops [10]: " value
+    echo "${value:-10}"
   fi
 }
 

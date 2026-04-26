@@ -319,6 +319,84 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Pinned-final-command bar (0.6.4) — close the cheap-command-relabeled-as-
+# `final` spoof. When .ralph/gates/final-latest.cmd exists, the cmd MUST
+# match .ralph/final-check-command (default "pnpm all-check") AND the
+# corresponding final-latest.exit must be 0.
+# ---------------------------------------------------------------------------
+
+@test "_complete_allowed: pinned cmd matches default and exit 0 → allow (0.6.4)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'pnpm all-check' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
+  printf '0'              >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: pinned cmd mismatch → block, even if exit 0 (0.6.4)" {
+  # The exact spoof we're closing: agent ran `gate-run.sh final pnpm
+  # basic-check` to satisfy the label-only guard. Cheap, green, wrong.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'pnpm basic-check' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
+  printf '0'                >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [[ "$_COMPLETE_BLOCK_REASON" == *"pnpm all-check"* ]]
+  [[ "$_COMPLETE_BLOCK_REASON" == *"pnpm basic-check"* ]]
+}
+
+@test "_complete_allowed: pinned cmd matches but exit non-zero → block (0.6.4)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'pnpm all-check' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
+  printf '1'              >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [[ "$_COMPLETE_BLOCK_REASON" == *"exited 1"* ]]
+}
+
+@test "_complete_allowed: .ralph/final-check-command override is honored (0.6.4)" {
+  # Non-pnpm project — operator overrides the canonical via the existing
+  # breadcrumb file. Pinning logic must read the override, not the default.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'cargo test --release' >"$MOCK_WORKSPACE/.ralph/final-check-command"
+  printf 'cargo test --release' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
+  printf '0'                    >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: override mismatches actual → block (0.6.4)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'cargo test --release' >"$MOCK_WORKSPACE/.ralph/final-check-command"
+  printf 'cargo check'          >"$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
+  printf '0'                    >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: whitespace differences in pinned cmd are tolerated (0.6.4)" {
+  # Operators may type "pnpm  all-check" or have a trailing newline in the
+  # file; the breadcrumb is space-joined "$*". Both sides get normalized
+  # before comparison.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'pnpm  all-check\n' >"$MOCK_WORKSPACE/.ralph/final-check-command"
+  printf 'pnpm all-check'    >"$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
+  printf '0'                 >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: no final breadcrumb → falls back to most-recent check (0.6.4 compat)" {
+  # Project that only runs basic/e2e, never `final` — must keep working
+  # with pre-0.6.4 semantics. final-latest.cmd absent, basic exit 0
+  # → allow.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf '0' >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: no final breadcrumb but basic gate red → block (0.6.4 compat)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf '1' >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [[ "$_COMPLETE_BLOCK_REASON" == *"most recent gate exited 1"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # _fmt_iter — loop label with per-loop retry suffix (0.3.7)
 # ---------------------------------------------------------------------------
 
@@ -669,12 +747,16 @@ EOF
   )
 }
 
-@test "MAX_LOOPS default is 20 when no env var is set (0.6.3)" {
+@test "MAX_LOOPS default is 10 when no env var is set (0.6.4)" {
+  # 0.6.3 default was 20 (carryover from per-task iteration era). 0.6.4
+  # lowers to 10 because under the flow framing one loop should chew
+  # through most/all of a spec — double-digit respawns is a smell, not
+  # steady state. Stall thresholds catch genuine stuckness well before 10.
   (
     unset MAX_LOOPS RALPH_MAX_LOOPS MAX_ITERATIONS RALPH_MAX_ITERATIONS
     # shellcheck disable=SC1090
     source "$SCRIPTS_DIR/ralph-common.sh"
-    [ "$MAX_LOOPS" = "20" ]
+    [ "$MAX_LOOPS" = "10" ]
   )
 }
 

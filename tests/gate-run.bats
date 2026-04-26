@@ -147,6 +147,23 @@ teardown() {
   [ "$(cat "$MOCK_WORKSPACE/.ralph/gates/final-latest.exit")" = "0" ]
 }
 
+@test "writes cmd breadcrumb alongside the exit breadcrumb (0.6.4)" {
+  # The .cmd file lets the loop's COMPLETE guard verify the right command
+  # was actually run, not just that *some* command labeled `final` was.
+  bash "$SCRIPTS_DIR/gate-run.sh" final echo hello world || true
+  [ -f "$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd" ]
+  # Stored space-joined raw, no newline — easy plain-string compare against
+  # the user-facing .ralph/final-check-command file content.
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd")" = "echo hello world" ]
+}
+
+@test "cmd breadcrumb is per-label (0.6.4)" {
+  bash "$SCRIPTS_DIR/gate-run.sh" basic echo basic-cmd || true
+  bash "$SCRIPTS_DIR/gate-run.sh" final echo final-cmd || true
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gates/basic-latest.cmd")" = "echo basic-cmd" ]
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd")" = "echo final-cmd" ]
+}
+
 @test "concurrent runs of the same label serialize via the lock (0.5.4)" {
   # Holder grabs the lock by hand, then we kick off a second invocation
   # with a tiny lock-wait timeout. The second one must give up with exit

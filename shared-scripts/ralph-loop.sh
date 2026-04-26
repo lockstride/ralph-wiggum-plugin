@@ -18,7 +18,7 @@
 # Flags:
 #   --cli <claude|cursor-agent>   Agent CLI (default: claude)
 #   -m, --model <id>               Model name (default: per-CLI default)
-#   -n, --loops N                  Max loops (safety cap; default: 20).
+#   -n, --loops N                  Max loops (safety cap; default: 10).
 #                                  --iterations is the deprecated alias.
 #   --prompt | --prompt-md         Use PROMPT.md at workspace root
 #   --prompt-file <path>           Use custom prompt file
