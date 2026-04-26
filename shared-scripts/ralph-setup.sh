@@ -37,7 +37,7 @@ fi
 WORKSPACE=""
 CLI_FROM_FLAG=""
 MODEL_FROM_FLAG=""
-ITER_FROM_FLAG=""
+LOOP_FROM_FLAG=""
 PROMPT_MODE=""
 PROMPT_VALUE=""
 BRANCH_FROM_FLAG=""
@@ -46,7 +46,7 @@ OPEN_PR_FLAG=""
 # Env var gives a durable opt-in for shells that always want the eval pass;
 # the flag gives per-invocation control.
 CHAIN_EVALUATE="${RALPH_CHAIN_EVALUATE:-false}"
-EVAL_ITER_FROM_FLAG=""
+EVAL_LOOP_FROM_FLAG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cli)
@@ -57,8 +57,11 @@ while [[ $# -gt 0 ]]; do
       MODEL_FROM_FLAG="$2"
       shift 2
       ;;
-    -n | --iterations)
-      ITER_FROM_FLAG="$2"
+    -n | --loops | --iterations)
+      # 0.6.3: --iterations is a deprecated alias for --loops. Same
+      # semantics (max-loops cap) but new spelling matches the rest of
+      # the plugin's "loop" terminology.
+      LOOP_FROM_FLAG="$2"
       shift 2
       ;;
     --prompt | --prompt-md)
@@ -91,8 +94,9 @@ while [[ $# -gt 0 ]]; do
       CHAIN_EVALUATE=true
       shift
       ;;
-    --eval-iterations)
-      EVAL_ITER_FROM_FLAG="$2"
+    --eval-loops | --eval-iterations)
+      # 0.6.3: --eval-iterations is a deprecated alias for --eval-loops.
+      EVAL_LOOP_FROM_FLAG="$2"
       shift 2
       ;;
     -v | --version)
@@ -109,7 +113,10 @@ Usage:
 Options:
   --cli <claude|cursor-agent>  Skip CLI picker
   -m, --model <id>             Skip model picker
-  -n, --iterations N           Skip iterations picker
+  -n, --loops N                Max loops cap (safety net; default 20).
+                               One loop typically completes a whole
+                               spec — this is the upper bound on respawns.
+                               (--iterations is the deprecated alias.)
   --prompt, --prompt-md        Use PROMPT.md
   --prompt-file <path>         Use custom prompt file
   --spec [name]                Use Spec Kit spec (default: newest)
@@ -117,7 +124,8 @@ Options:
   --pr                         Open PR when complete (requires --branch)
   --evaluate                   Chain acceptance evaluation loop on COMPLETE
                                (equivalent env var: RALPH_CHAIN_EVALUATE=1)
-  --eval-iterations N          Cap for the eval loop when chained (default 5)
+  --eval-loops N               Cap for the eval loop when chained (default 5).
+                               (--eval-iterations is the deprecated alias.)
   -v, --version                Show version
   -h, --help                   Show this help
 
@@ -278,15 +286,15 @@ select_model() {
   echo "$selected"
 }
 
-get_max_iterations() {
-  if [[ -n "$ITER_FROM_FLAG" ]]; then
-    echo "$ITER_FROM_FLAG"
+get_max_loops() {
+  if [[ -n "$LOOP_FROM_FLAG" ]]; then
+    echo "$LOOP_FROM_FLAG"
     return
   fi
   if [[ "$HAS_GUM" == "true" ]]; then
-    gum input --header "Max iterations:" --placeholder "20" --value "20"
+    gum input --header "Max loops:" --placeholder "20" --value "20"
   else
-    read -rp "Max iterations [20]: " value
+    read -rp "Max loops [20]: " value
     echo "${value:-20}"
   fi
 }
@@ -440,8 +448,8 @@ main() {
   echo "✓ Effective prompt: $out"
   echo ""
 
-  MAX_ITERATIONS=$(get_max_iterations)
-  echo "✓ Max iterations: $MAX_ITERATIONS"
+  MAX_LOOPS=$(get_max_loops)
+  echo "✓ Max loops: $MAX_LOOPS"
 
   if [[ -n "$BRANCH_FROM_FLAG" ]]; then
     USE_BRANCH="$BRANCH_FROM_FLAG"
@@ -455,7 +463,7 @@ main() {
   # Re-derive thresholds for selected CLI + model ([1m] suffix → 700K)
   ROTATE_THRESHOLD="$(agent_default_rotate_threshold "$RALPH_AGENT_CLI" "$MODEL")"
   WARN_THRESHOLD="$(agent_default_warn_threshold "$RALPH_AGENT_CLI" "$MODEL")"
-  export RALPH_AGENT_CLI MODEL MAX_ITERATIONS USE_BRANCH OPEN_PR ROTATE_THRESHOLD WARN_THRESHOLD
+  export RALPH_AGENT_CLI MODEL MAX_LOOPS USE_BRANCH OPEN_PR ROTATE_THRESHOLD WARN_THRESHOLD
 
   echo ""
 
@@ -476,11 +484,11 @@ main() {
   echo "Summary:"
   echo "  • CLI:        $RALPH_AGENT_CLI"
   echo "  • Model:      $MODEL"
-  echo "  • Iterations: $MAX_ITERATIONS max"
+  echo "  • Loops:      $MAX_LOOPS max"
   echo "  • Prompt:     $PROMPT_MODE${PROMPT_VALUE:+ ($PROMPT_VALUE)}"
   [[ -n "$USE_BRANCH" ]] && echo "  • Branch:     $USE_BRANCH"
   [[ "${OPEN_PR:-false}" == "true" ]] && echo "  • Open PR:    Yes"
-  [[ "$CHAIN_EVALUATE" == "true" ]] && echo "  • Chain eval: Yes${EVAL_ITER_FROM_FLAG:+ (-n $EVAL_ITER_FROM_FLAG)}"
+  [[ "$CHAIN_EVALUATE" == "true" ]] && echo "  • Chain eval: Yes${EVAL_LOOP_FROM_FLAG:+ (-n $EVAL_LOOP_FROM_FLAG)}"
   echo "─────────────────────────────────────────────────────────────────"
   echo ""
 
@@ -504,7 +512,7 @@ main() {
       file) eval_args+=(--prompt-file "$PROMPT_VALUE") ;;
       spec) [[ -n "$PROMPT_VALUE" ]] && eval_args+=(--spec "$PROMPT_VALUE") || eval_args+=(--spec) ;;
     esac
-    [[ -n "$EVAL_ITER_FROM_FLAG" ]] && eval_args+=(-n "$EVAL_ITER_FROM_FLAG")
+    [[ -n "$EVAL_LOOP_FROM_FLAG" ]] && eval_args+=(-n "$EVAL_LOOP_FROM_FLAG")
     "$SCRIPT_DIR/ralph-evaluate.sh" "${eval_args[@]}" "$WORKSPACE"
     main_rc=$?
   fi

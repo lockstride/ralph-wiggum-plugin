@@ -17,9 +17,9 @@ Any arguments you pass after `/ralph-evaluate` are forwarded to the launcher:
 - `/ralph-evaluate --prompt-file custom.md` → ground truth = a specific file
 - `/ralph-evaluate --spec` → ground truth = newest `specs/*/tasks.md`
 - `/ralph-evaluate --prompt --fresh` → delete existing report and start over
-- `/ralph-evaluate --prompt -n 8 --cli claude -m opus` → 8-iter cap on Opus
+- `/ralph-evaluate --prompt -n 8 --cli claude -m opus` → 8-loop cap on Opus
 
-The loop exits cleanly when the verifier flips the report's top-level "All acceptance criteria met and verified" checkbox to `[x]`, or when the iteration cap (default 5) is hit. To also auto-run this after a main Ralph loop completes, pass `--evaluate` to `/ralph`.
+The loop exits cleanly when the verifier flips the report's top-level "All acceptance criteria met and verified" checkbox to `[x]`, or when the loop cap (default 5) is hit. To also auto-run this after a main Ralph loop completes, pass `--evaluate` to `/ralph`.
 
 **Blast radius**: same as the main Ralph loop — the agent runs with all tool approvals pre-granted. Sub-agents spawned via the Task tool inherit that scope. Use only in a dedicated worktree.
 

@@ -37,10 +37,13 @@ teardown() {
   # Framing should be concise. History:
   #   0.3.3 added Completion Bar          (cap was 35)
   #   0.3.6 added Gate Runner section     (cap bumped to 55)
+  #   0.6.3 expanded the Stop conditions  (cap bumped to 70)
+  #         section so the four real stop conditions are explicit and
+  #         reframed gate-failure guidance away from a procedure.
   # The Gate Runner block only renders when gate-run.sh exists next to
   # ralph-common.sh (it does in-tree). If it ever needs to grow further,
   # update this cap AND AGENTS.md §Prompt Architecture in the same commit.
-  [ "$framing_lines" -le 55 ]
+  [ "$framing_lines" -le 70 ]
 }
 
 @test "build_prompt includes Completion Bar (0.3.3)" {
@@ -62,7 +65,8 @@ teardown() {
   output=$(build_prompt "$MOCK_WORKSPACE" 1)
 
   echo "$output" | grep -q "State Files"
-  echo "$output" | grep -q "Signals"
+  # 0.6.3 renamed "Signals" to "Stop conditions" — same intent, clearer name.
+  echo "$output" | grep -q "Stop conditions"
   echo "$output" | grep -q "Loop Hygiene"
   echo "$output" | grep -q "Task Execution"
 }
@@ -75,10 +79,14 @@ teardown() {
   output=$(build_prompt "$MOCK_WORKSPACE" 1)
 
   echo "$output" | grep -q "## Gate Runner"
-  # The three load-bearing pieces of the protocol:
+  # 0.6.3: load-bearing pieces of the new (less prescriptive) protocol.
+  # The "do NOT re-run" recipe was replaced by an "understand why, then
+  # act" framing — same intent (don't reflexively retry), more latitude
+  # for the agent to inspect screenshots / curl / lsof / config as the
+  # situation demands.
   echo "$output" | grep -q "Never pipe"
   echo "$output" | grep -qE "\.ralph/gates/<label>-latest\.log"
-  echo "$output" | grep -qE "do NOT re-run"
+  echo "$output" | grep -qE "understand why"
   # Points at --help so agents can self-discover the full surface:
   echo "$output" | grep -q -- "--help"
 }
@@ -123,11 +131,11 @@ teardown() {
   ! echo "$output" | grep -qi "Sign:"
 }
 
-@test "build_prompt includes iteration number" {
+@test "build_prompt includes loop number" {
   local output
   output=$(build_prompt "$MOCK_WORKSPACE" 7)
 
-  echo "$output" | grep -q "Iteration 7"
+  echo "$output" | grep -q "Loop 7"
 }
 
 @test "build_prompt includes user body from effective prompt" {
@@ -138,30 +146,30 @@ teardown() {
 }
 
 @test "build_prompt prepends recovery hint when present (0.3.0)" {
-  # Simulate a prior iteration's stream-parser having written a hint
+  # Simulate a prior loop's stream-parser having written a hint
   cat > "$MOCK_WORKSPACE/.ralph/recovery-hint.md" <<EOF
-## Recovery Hint from Prior Iteration
+## Recovery Hint from Prior Loop
 
-Your prior iteration ran \`pnpm test\` twice with exit code 1. Do not retry it.
+Your prior loop ran \`pnpm test\` twice with exit code 1. Do not retry it.
 EOF
 
   local output
   output=$(build_prompt "$MOCK_WORKSPACE" 5)
 
   # Hint section appears
-  echo "$output" | grep -q "Recovery Hint from Prior Iteration"
+  echo "$output" | grep -q "Recovery Hint from Prior Loop"
   echo "$output" | grep -q "pnpm test"
-  # Hint appears between the iteration header and State Files (recovery is authoritative steering)
+  # Hint appears between the loop header and State Files (recovery is authoritative steering)
   echo "$output" | awk '
-    /^# Ralph Iteration 5/ { saw_header=1 }
-    /Recovery Hint from Prior Iteration/ { if (saw_header && !saw_state) saw_hint=1 }
+    /^# Ralph Loop 5/ { saw_header=1 }
+    /Recovery Hint from Prior Loop/ { if (saw_header && !saw_state) saw_hint=1 }
     /^## State Files/ { saw_state=1 }
     END { exit (saw_hint && saw_state) ? 0 : 1 }
   '
 }
 
 @test "build_prompt deletes recovery hint after consumption (consume-once) (0.3.0)" {
-  echo "## Recovery Hint from Prior Iteration" > "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
+  echo "## Recovery Hint from Prior Loop" > "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
   echo "Some hint body" >> "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
 
   build_prompt "$MOCK_WORKSPACE" 1 >/dev/null
@@ -178,7 +186,7 @@ EOF
   output=$(build_prompt "$MOCK_WORKSPACE" 1)
 
   # No recovery section in output
-  if echo "$output" | grep -q "Recovery Hint from Prior Iteration"; then
+  if echo "$output" | grep -q "Recovery Hint from Prior Loop"; then
     fail "build_prompt should not include a Recovery Hint section when no hint file exists"
   fi
 }
@@ -311,10 +319,10 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# _fmt_iter — iteration label with per-iteration retry suffix (0.3.7)
+# _fmt_iter — loop label with per-loop retry suffix (0.3.7)
 # ---------------------------------------------------------------------------
 
-@test "_fmt_iter: retry 0 returns bare iteration number (0.3.7)" {
+@test "_fmt_iter: retry 0 returns bare loop number (0.3.7)" {
   [ "$(_fmt_iter 1 0)" = "1" ]
   [ "$(_fmt_iter 7 0)" = "7" ]
   # Omitted retry arg defaults to 0
@@ -443,7 +451,7 @@ EOF
   # exit status of the last command executed in list-2, or zero if none
   # was executed." That means `while read; do :; done < fifo; rc=$?` ALWAYS
   # reports rc=0, regardless of whether read EOF'd (1) or timed out (142).
-  # The pre-0.3.9 run_iteration used that broken idiom, which made the
+  # The pre-0.3.9 run_loop used that broken idiom, which made the
   # timeout branch of _classify_heartbeat_exit unreachable and caused
   # every heartbeat-scale quiet period to surface as a PARSER EXIT.
   #
@@ -606,4 +614,90 @@ EOF
   rm -f "$fake_script"
 
   echo "$out" | grep -q "^parser=alive$"
+}
+
+# -----------------------------------------------------------------------------
+# 0.6.3: terminology + flow-vs-loop driver semantics
+#
+# The driver renamed `iteration` → `loop` in code and log messages. The
+# `--iterations` flag and `MAX_ITERATIONS` / `RALPH_MAX_ITERATIONS` env vars
+# are kept as deprecated aliases for one minor release. The framing prompt
+# is now flow-oriented: "loop", not "iteration N of an autonomous loop";
+# the agent is told ending the turn between commits costs 10–30k tokens.
+# -----------------------------------------------------------------------------
+
+@test "MAX_LOOPS env var sets the loop ceiling (0.6.3)" {
+  # Re-source after setting the env to exercise the cascade in
+  # ralph-common.sh. Use a subshell so the rest of the test file is
+  # unaffected.
+  (
+    unset MAX_LOOPS RALPH_MAX_LOOPS MAX_ITERATIONS RALPH_MAX_ITERATIONS
+    export MAX_LOOPS=42
+    # shellcheck disable=SC1090
+    source "$SCRIPTS_DIR/ralph-common.sh"
+    [ "$MAX_LOOPS" = "42" ]
+  )
+}
+
+@test "RALPH_MAX_LOOPS is honored as a fallback (0.6.3)" {
+  (
+    unset MAX_LOOPS RALPH_MAX_LOOPS MAX_ITERATIONS RALPH_MAX_ITERATIONS
+    export RALPH_MAX_LOOPS=17
+    # shellcheck disable=SC1090
+    source "$SCRIPTS_DIR/ralph-common.sh"
+    [ "$MAX_LOOPS" = "17" ]
+  )
+}
+
+@test "MAX_ITERATIONS is honored as a deprecated alias for MAX_LOOPS (0.6.3 compat)" {
+  (
+    unset MAX_LOOPS RALPH_MAX_LOOPS MAX_ITERATIONS RALPH_MAX_ITERATIONS
+    export MAX_ITERATIONS=11
+    # shellcheck disable=SC1090
+    source "$SCRIPTS_DIR/ralph-common.sh"
+    [ "$MAX_LOOPS" = "11" ]
+  )
+}
+
+@test "RALPH_MAX_ITERATIONS is honored as a deprecated alias for MAX_LOOPS (0.6.3 compat)" {
+  (
+    unset MAX_LOOPS RALPH_MAX_LOOPS MAX_ITERATIONS RALPH_MAX_ITERATIONS
+    export RALPH_MAX_ITERATIONS=9
+    # shellcheck disable=SC1090
+    source "$SCRIPTS_DIR/ralph-common.sh"
+    [ "$MAX_LOOPS" = "9" ]
+  )
+}
+
+@test "MAX_LOOPS default is 20 when no env var is set (0.6.3)" {
+  (
+    unset MAX_LOOPS RALPH_MAX_LOOPS MAX_ITERATIONS RALPH_MAX_ITERATIONS
+    # shellcheck disable=SC1090
+    source "$SCRIPTS_DIR/ralph-common.sh"
+    [ "$MAX_LOOPS" = "20" ]
+  )
+}
+
+@test "build_prompt framing uses flow-not-iteration language (0.6.3)" {
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+
+  # Header reads "Ralph Loop 1", not "Ralph Iteration 1".
+  echo "$output" | grep -q "^# Ralph Loop 1"
+  ! echo "$output" | grep -q "^# Ralph Iteration"
+
+  # The framing names the four real stop conditions and explicitly tells
+  # the agent that ending its turn between commits is the wrong move.
+  echo "$output" | grep -q "ALL_TASKS_DONE"
+  echo "$output" | grep -q "GUTTER"
+  echo "$output" | grep -q "WARN"
+  echo "$output" | grep -q "stop-requested"
+  echo "$output" | grep -qi "cold-start tax"
+}
+
+@test "run_iteration is renamed to run_loop (0.6.3)" {
+  # Both names should NOT exist; only the new name. Catches accidental
+  # leftover function references after the rename.
+  declare -F run_loop >/dev/null
+  ! declare -F run_iteration >/dev/null
 }

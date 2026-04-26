@@ -1,15 +1,15 @@
 #!/bin/bash
-# Ralph Wiggum: Single Iteration (Human-in-the-Loop)
+# Ralph Wiggum: Single Loop (Human-in-the-Loop)
 #
-# Runs exactly ONE iteration of the Ralph loop, then stops.
+# Runs exactly ONE Ralph loop, then stops.
 # Useful for smoke-testing your prompt / spec before going AFK.
 #
 # Usage:
-#   ./ralph-once.sh --cli claude --spec                 # one iter on newest spec
-#   ./ralph-once.sh --prompt-file PROMPT.md              # one iter on a file
-#   ./ralph-once.sh --cli cursor-agent -m composer-1     # one iter with model
+#   ./ralph-once.sh --cli claude --spec                 # one loop on newest spec
+#   ./ralph-once.sh --prompt-file PROMPT.md              # one loop on a file
+#   ./ralph-once.sh --cli cursor-agent -m composer-1     # one loop with model
 #
-# Flags mirror ralph-loop.sh (minus iterations/branch/pr/completion-promise).
+# Flags mirror ralph-loop.sh (minus loops/branch/pr/completion-promise).
 
 set -euo pipefail
 
@@ -86,10 +86,10 @@ main() {
   fi
 
   echo "═══════════════════════════════════════════════════════════════════"
-  echo "🐛 Ralph Wiggum: Single Iteration (Human-in-the-Loop)"
+  echo "🐛 Ralph Wiggum: Single Loop (Human-in-the-Loop)"
   echo "═══════════════════════════════════════════════════════════════════"
   echo ""
-  echo "  This runs ONE iteration, then stops for review."
+  echo "  This runs ONE loop, then stops for review."
   echo ""
 
   if [[ -z "$PROMPT_MODE" ]]; then
@@ -126,29 +126,30 @@ main() {
 
   cd "$WORKSPACE"
   if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-    echo "📦 Committing uncommitted changes before iteration..."
+    echo "📦 Committing uncommitted changes before loop..."
     git add -A
-    git commit -m "ralph: checkpoint before single iteration" || true
+    git commit -m "ralph: checkpoint before single loop" || true
   fi
 
   echo ""
-  echo "🚀 Running single iteration..."
+  echo "🚀 Running single loop..."
+
   echo ""
 
   local signal
-  signal=$(run_iteration "$WORKSPACE" "1" "" "$SCRIPT_DIR")
+  signal=$(run_loop "$WORKSPACE" "1" "" "$SCRIPT_DIR")
 
   task_status=$(check_task_complete "$WORKSPACE")
 
   echo ""
   echo "═══════════════════════════════════════════════════════════════════"
-  echo "📋 Single Iteration Complete"
+  echo "📋 Single Loop Complete"
   echo "═══════════════════════════════════════════════════════════════════"
   echo ""
   case "$signal" in
     COMPLETE)
       if [[ "$task_status" == "COMPLETE" || "$task_status" == "NO_TASKS" || "$task_status" == "NO_TASK_FILE" ]]; then
-        echo "🎉 Task completed in a single iteration!"
+        echo "🎉 Task completed in a single loop!"
       else
         echo "⚠️  Agent signaled complete but criteria remain unchecked."
       fi

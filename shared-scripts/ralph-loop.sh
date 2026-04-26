@@ -18,7 +18,8 @@
 # Flags:
 #   --cli <claude|cursor-agent>   Agent CLI (default: claude)
 #   -m, --model <id>               Model name (default: per-CLI default)
-#   -n, --iterations N             Max iterations (default: 20)
+#   -n, --loops N                  Max loops (safety cap; default: 20).
+#                                  --iterations is the deprecated alias.
 #   --prompt | --prompt-md         Use PROMPT.md at workspace root
 #   --prompt-file <path>           Use custom prompt file
 #   --spec [name]                  Use Spec Kit spec dir (default: most recent)
@@ -62,8 +63,9 @@ while [[ $# -gt 0 ]]; do
       MODEL="$2"
       shift 2
       ;;
-    -n | --iterations)
-      MAX_ITERATIONS="$2"
+    -n | --loops | --iterations)
+      # 0.6.3: --iterations kept as a deprecated alias for --loops.
+      MAX_LOOPS="$2"
       shift 2
       ;;
     --prompt | --prompt-md)
@@ -165,7 +167,7 @@ main() {
   echo "Workspace: $WORKSPACE"
   echo "CLI:       $RALPH_AGENT_CLI"
   echo "Model:     $MODEL"
-  echo "Max iter:  $MAX_ITERATIONS"
+  echo "Max loops: $MAX_LOOPS"
   [[ -n "$USE_BRANCH" ]] && echo "Branch:    $USE_BRANCH"
   [[ "$OPEN_PR" == "true" ]] && echo "Open PR:   Yes"
   echo ""

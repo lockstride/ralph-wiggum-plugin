@@ -22,10 +22,10 @@ Ralph 0.6.0 ships **six** plugin skills — three for the main implementation lo
 
 **File:** `skills/diagnosing-stuck-tasks/SKILL.md`
 
-**What it does:** Switches the agent into exploratory diagnosis mode. Suspends the procedural execute-gate-commit cycle. The agent reads the full failure log (not the bounded summary), questions whether the test itself is wrong, lists 2–3 alternative root causes, runs layer-bypassing diagnostics (`curl` directly against endpoints, Playwright if available), then either commits to a new approach or emits `<ralph>GUTTER</ralph>`. Findings written to `.ralph/diagnosis.md` for the next iteration.
+**What it does:** Switches the agent into exploratory diagnosis mode. Suspends the procedural execute-gate-commit cycle. The agent reads the full failure log (not the bounded summary), questions whether the test itself is wrong, lists 2–3 alternative root causes, runs layer-bypassing diagnostics (`curl` directly against endpoints, Playwright if available), then either commits to a new approach or emits `<ralph>GUTTER</ralph>`. Findings written to `.ralph/diagnosis.md` for the next loop.
 
 **When invoked (auto-suggested by the loop):**
-- Same `gate-run.sh` command has failed 3+ times in this iteration (`RALPH_SHELL_FAIL_SUGGEST_THRESHOLD`, default 3).
+- Same `gate-run.sh` command has failed 3+ times in this loop (`RALPH_SHELL_FAIL_SUGGEST_THRESHOLD`, default 3).
 - Same file rewritten 3+ times within 10 minutes (`RALPH_FILE_THRASH_SUGGEST_THRESHOLD`, default 3).
 - Stream-parser writes `.ralph/skill-suggestion` with the trigger context. Agent's prompt directs it to read that file and invoke the skill before continuing.
 
@@ -58,11 +58,11 @@ These three drive the post-completion `ralph-evaluate` loop. Pre-0.6.0 the orche
 
 **File:** `skills/running-acceptance-evaluation/SKILL.md`
 
-**What it does:** The orchestrator workflow for the eval loop. Per iteration: read the ground truth + acceptance report, decide between VERIFIER and REWORK based on the report's gap state, delegate to a sub-agent via the Task tool (sub-agent then invokes one of the two role skills below). Stays lean across iterations — does not read source files, run tests, or invoke Playwright itself.
+**What it does:** The orchestrator workflow for the eval loop. Per loop: read the ground truth + acceptance report, decide between VERIFIER and REWORK based on the report's gap state, delegate to a sub-agent via the Task tool (sub-agent then invokes one of the two role skills below). Stays lean across loops — does not read source files, run tests, or invoke Playwright itself.
 
 **When invoked:** By the eval loop's framing prompt (written by `ralph-evaluate.sh` to `.ralph/effective-prompt.md`). The framing is intentionally minimal — it tells the agent the per-run paths and to invoke this skill. All workflow logic lives in the skill body.
 
-**Override:** Edit `skills/running-acceptance-evaluation/SKILL.md`. The skill is invoked once per eval iteration; structural changes affect all subsequent iterations of the current run.
+**Override:** Edit `skills/running-acceptance-evaluation/SKILL.md`. The skill is invoked once per eval loop; structural changes affect all subsequent loops of the current run.
 
 **Disable:** Removing the skill breaks the eval loop entirely. To suppress eval, just don't pass `--evaluate` (or `RALPH_CHAIN_EVALUATE=1`) to the main `ralph` launcher.
 
@@ -72,7 +72,7 @@ These three drive the post-completion `ralph-evaluate` loop. Pre-0.6.0 the orche
 
 **What it does:** Independent re-check of the entire ground-truth requirements list against the current repo state. Skeptical by default — does not trust `progress.md`, `handoff.md`, or the main loop's self-assessment. Records every unmet requirement as a gap line in the acceptance report. The only role allowed to flip the top-level "All acceptance criteria met" checkbox to `[x]`. Records findings only; does not modify code.
 
-**When invoked:** By the orchestrator skill's VERIFIER mode, via Task-tool sub-agent. The sub-agent's prompt instructs it to invoke this skill. Sub-agent isolation matters here — fresh context window means the verifier reads requirements without bias from prior iteration findings or rework commits.
+**When invoked:** By the orchestrator skill's VERIFIER mode, via Task-tool sub-agent. The sub-agent's prompt instructs it to invoke this skill. Sub-agent isolation matters here — fresh context window means the verifier reads requirements without bias from prior loop findings or rework commits.
 
 **Override:** Edit `skills/verifying-acceptance-criteria/SKILL.md` to change verification thoroughness, gate-label conventions, or what counts as "affirmatively verified."
 
@@ -94,7 +94,7 @@ These three drive the post-completion `ralph-evaluate` loop. Pre-0.6.0 the orche
 
 3. **Invocation** — agent calls the `Skill` tool with the matching name. The skill's body becomes part of the conversation context. The agent follows the skill's workflow, then returns to the main loop's procedural cycle (or escalates via GUTTER per the skill's guidance).
 
-4. **Cleanup** — after invocation, the agent deletes `.ralph/skill-suggestion` so the same trigger doesn't re-prompt next turn. The per-iteration suggested-skills tracker is cleared on every successful commit (`reset_failure_counters_on_task_boundary`).
+4. **Cleanup** — after invocation, the agent deletes `.ralph/skill-suggestion` so the same trigger doesn't re-prompt next turn. The per-loop suggested-skills tracker is cleared on every successful commit (`reset_failure_counters_on_task_boundary`).
 
 ## Cross-CLI portability
 

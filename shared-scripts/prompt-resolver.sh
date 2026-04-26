@@ -2,7 +2,7 @@
 # Ralph Wiggum: Prompt Source Resolver
 #
 # Selects and renders the "effective prompt" that the loop feeds the
-# agent on every iteration. Three modes:
+# agent on every loop. Three modes:
 #
 #   1) PROMPT.md in repo root  — plain prompt file (agrimsingh convention)
 #   2) Custom prompt file      — user-supplied path
@@ -11,7 +11,7 @@
 #
 # The rendered prompt is written to .ralph/effective-prompt.md and
 # stays git-ignored. ralph-common.sh reads it from there every
-# iteration, so you can edit it mid-run if needed.
+# loop, so you can edit it mid-run if needed.
 #
 # Usage (sourced by ralph-setup.sh):
 #   source prompt-resolver.sh
@@ -126,7 +126,7 @@ _loop_extras_block() {
     activity_tail=$(tail -n 50 "$_activity_log_path" 2>/dev/null || true)
   fi
   if [[ -z "$activity_tail" ]]; then
-    activity_tail="(no prior activity — this is the first iteration)"
+    activity_tail="(no prior activity — this is the first loop)"
   fi
 
   cat <<EOF
@@ -461,7 +461,7 @@ resolve_prompt_spec() {
   local plugin_root
   plugin_root=$(cd "$_PR_SCRIPT_DIR/.." && pwd)
 
-  # Ensure .ralph/gates exists before the first iteration so gate-run.sh
+  # Ensure .ralph/gates exists before the first loop so gate-run.sh
   # (and anything else writing there) has a home. Cheap and idempotent.
   mkdir -p "$workspace/.ralph/gates"
 
@@ -544,7 +544,7 @@ resolve_prompt_spec() {
 
         # Loud STALE marker first when the GUIDE changed (plugin upgrade
         # we didn't initiate) so postmortems can `grep STALE activity.log`
-        # to find every iteration that started under a stale-cache condition.
+        # to find every loop that started under a stale-cache condition.
         # Speckit-only changes are user-initiated, not "stale" — they get
         # the regen line but no STALE marker.
         if [[ "$guide_changed" == "true" ]]; then
@@ -591,14 +591,14 @@ resolve_prompt_spec() {
   # from .ralph/activity.log. Lets the agent see its own recent pattern (same
   # gate failing 3×, same file thrashed) which it would otherwise miss.
   # ~500 token cost on a populated log; degrades gracefully to a placeholder
-  # message when activity.log doesn't exist yet (first iteration).
+  # message when activity.log doesn't exist yet (first loop).
   local activity_tail=""
   local _activity_log_path="$workspace/.ralph/activity.log"
   if [[ -f "$_activity_log_path" ]]; then
     activity_tail=$(tail -n 50 "$_activity_log_path" 2>/dev/null || true)
   fi
   if [[ -z "$activity_tail" ]]; then
-    activity_tail="(no prior activity — this is the first iteration)"
+    activity_tail="(no prior activity — this is the first loop)"
   fi
 
   local rendered

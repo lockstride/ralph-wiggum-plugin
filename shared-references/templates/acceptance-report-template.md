@@ -4,7 +4,7 @@
 
 **Status:** UNVERIFIED
 **Ground truth:** {{GROUND_TRUTH_PATH}}
-**Last iteration:** _(filled by orchestrator)_
+**Last loop:** _(filled by orchestrator)_
 **Last mode:** _(filled by orchestrator)_
 
 ## Gaps
@@ -13,4 +13,4 @@ _Verifier appends `[ ]` items here, citing file:line. Rework checks them off as 
 
 ## History
 
-_Append-only. One line per iteration: `iter N - MODE - summary`._
+_Append-only. One line per loop: `loop N - MODE - summary`._

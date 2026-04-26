@@ -8,15 +8,15 @@
 # Usage:
 #   eval "$(agent_build_cmd "$CLI" "$MODEL" "$PROMPT")" 2>&1 \
 #     | agent_normalize "$CLI" \
-#     | ./stream-parser.sh /path/to/workspace [iteration]
+#     | ./stream-parser.sh /path/to/workspace [loop_label]
 #
 # Emits on stdout (one per line):
 #   ROTATE          — token threshold reached, stop and rotate context
 #   WARN            — approaching limit, agent should wrap up
 #   RECOVER_ATTEMPT — recoverable stuck pattern hit (2× same shell fail or
-#                     5× file thrash) for the FIRST time this iteration.
+#                     5× file thrash) for the FIRST time this loop.
 #                     Loop kills agent, prepends .ralph/recovery-hint.md
-#                     to the next iteration prompt, retries (0.3.0).
+#                     to the next loop prompt, retries (0.3.0).
 #   GUTTER          — stuck pattern detected after recovery already used,
 #                     OR agent self-signal, OR non-retryable API error.
 #   COMPLETE        — agent emitted <ralph>COMPLETE</ralph>
@@ -29,7 +29,7 @@
 set -euo pipefail
 
 WORKSPACE="${1:-.}"
-ITERATION="${2:-}"
+LOOP_LABEL="${2:-}"
 RALPH_DIR="$WORKSPACE/.ralph"
 mkdir -p "$RALPH_DIR"
 
@@ -51,7 +51,7 @@ RATE_LIMITED=0
 # Gutter detection — temp files (macOS bash 3.x has no assoc arrays)
 FAILURES_FILE=$(mktemp)
 WRITES_FILE=$(mktemp)
-# 0.6.0: tracks which skills we've already suggested this iteration so we
+# 0.6.0: tracks which skills we've already suggested this loop so we
 # don't spam the same suggestion every turn after the threshold trips.
 # One-line-per-skill format; cleared by reset_failure_counters_on_task_boundary.
 SUGGESTED_SKILLS_FILE=$(mktemp)
@@ -81,9 +81,9 @@ _cleanup_parser() {
 trap _cleanup_parser EXIT
 
 # 0.3.0: Active-recovery state. The first recoverable stuck pattern in an
-# iteration emits RECOVER_ATTEMPT (not GUTTER); subsequent stuck patterns
-# in the same iteration emit GUTTER as before. The loop's per-invocation
-# budget caps total recovery attempts across iterations.
+# loop emits RECOVER_ATTEMPT (not GUTTER); subsequent stuck patterns
+# in the same loop emit GUTTER as before. The loop's per-invocation
+# budget caps total recovery attempts across loops.
 RECOVERY_ATTEMPTED=0
 RECOVERY_HINT_FILE="$RALPH_DIR/recovery-hint.md"
 
@@ -101,7 +101,7 @@ MAX_READS_WITHOUT_WRITE="${RALPH_MAX_READS_WITHOUT_WRITE:-40}"
 # (shell-fail) and 5 (file-thrash) in the body of their respective
 # detectors, which killed agents on the most ordinary red-state workflow:
 # run gate, read log, make targeted fix, re-run gate — if the fix didn't
-# work, that was attempt #2 and the loop killed the iteration with no
+# work, that was attempt #2 and the loop killed the loop with no
 # third try. The new 4 / 5 defaults give the agent a realistic debug
 # budget without letting genuine infinite loops run forever. Raise via
 # env var for longer debug sessions, lower (back to 2) for aggressive
@@ -272,7 +272,7 @@ check_gutter() {
 # agent reads `.ralph/skill-suggestion` per its prompt and is expected to
 # invoke the named skill. Used for early stuck-pattern signals (3 same-cmd
 # failures) where we want the agent to pivot strategy without paying the
-# cold-start tax of a fresh iteration. Pre-0.6.0 the only escalation path
+# cold-start tax of a fresh loop. Pre-0.6.0 the only escalation path
 # was RECOVER_ATTEMPT (kill + restart with hint), which was correct for
 # hard recovery but expensive for "you might be on the wrong track."
 SKILL_SUGGESTION_FILE="$RALPH_DIR/skill-suggestion"
@@ -299,14 +299,14 @@ EOF
 
 # 0.3.0: Recovery-hint helpers. Each writes a trigger-specific block to
 # .ralph/recovery-hint.md, which build_prompt() prepends to the next
-# iteration's framing prompt and deletes (consume-once).
+# loop's framing prompt and deletes (consume-once).
 _write_recovery_hint_shell() {
   local cmd="$1"
   local exit_code="$2"
   cat >"$RECOVERY_HINT_FILE" <<EOF
-## Recovery Hint from Prior Iteration
+## Recovery Hint from Prior Loop
 
-Your prior iteration ran the following command twice with the same exit code (\`${exit_code}\`) before being killed by the recovery system:
+Your prior loop ran the following command twice with the same exit code (\`${exit_code}\`) before being killed by the recovery system:
 
 \`\`\`
 ${cmd}
@@ -325,11 +325,11 @@ _write_recovery_hint_thrash() {
   local path="$1"
   local count="$2"
   cat >"$RECOVERY_HINT_FILE" <<EOF
-## Recovery Hint from Prior Iteration
+## Recovery Hint from Prior Loop
 
-Your prior iteration rewrote \`${path}\` ${count} times within 10 minutes before being killed by the recovery system.
+Your prior loop rewrote \`${path}\` ${count} times within 10 minutes before being killed by the recovery system.
 
-- **Stop editing that file in this iteration** until you understand why prior edits did not settle.
+- **Stop editing that file in this loop** until you understand why prior edits did not settle.
 - Run \`git diff HEAD -- ${path}\` and read your own changes carefully.
 - Consider that the failing test or symptom may originate elsewhere — repeatedly rewriting the same file is a strong sign you are debugging the wrong layer.
 
@@ -354,15 +354,15 @@ track_shell_failure() {
     # 0.1.16: the counter is reset to zero on any successful `git commit`
     # (task boundary) via reset_failure_counters_on_task_boundary, so this
     # counts failures within the current task, not the whole session.
-    # 0.3.0: First trip in an iteration emits RECOVER_ATTEMPT (the loop
+    # 0.3.0: First trip in a loop emits RECOVER_ATTEMPT (the loop
     # kills the agent and re-spawns it with a recovery hint prepended).
-    # Second trip in the same iteration falls through to GUTTER — the
+    # Second trip in the same loop falls through to GUTTER — the
     # agent already had its one chance.
     #
     # 0.4.0: threshold raised from 2 → 4 (configurable via
     # RALPH_SHELL_FAIL_THRESHOLD) so a normal red-state debug loop
     # (run gate → read log → fix → re-run) doesn't burn its only
-    # recovery attempt on the first real iteration.
+    # recovery attempt on the first real loop.
     # 0.6.0: soft-suggestion at the lower threshold before hard recovery.
     # Writes `.ralph/skill-suggestion` pointing at `diagnosing-stuck-tasks`
     # and emits SUGGEST_SKILL to stdout. Loop does NOT kill the agent;
@@ -385,7 +385,7 @@ track_shell_failure() {
         RECOVERY_ATTEMPTED=1
         echo "RECOVER_ATTEMPT" 2>/dev/null || true
       else
-        log_error "⚠️ GUTTER: same command failed ${count}x (recovery already used this iteration)"
+        log_error "⚠️ GUTTER: same command failed ${count}x (recovery already used this loop)"
         echo "GUTTER" 2>/dev/null || true
       fi
     fi
@@ -399,17 +399,17 @@ track_shell_failure() {
 #
 # Without this reset, a session that survived a transient gate failure
 # early on (fixed, gate green, committed) would still surface GUTTER at
-# iteration-end because FAILURES_FILE accumulates across the entire
+# loop-end because FAILURES_FILE accumulates across the entire
 # session and the run-loop's `signal` variable never clears once set.
 reset_failure_counters_on_task_boundary() {
   : >"$FAILURES_FILE"
   CONSECUTIVE_READS=0
-  # 0.6.0: also clear the per-iteration suggested-skill marker so the
+  # 0.6.0: also clear the per-loop suggested-skill marker so the
   # next stuck pattern (probably on a different command) gets a fresh
   # suggestion. The skill-suggestion file itself is consumed by the
   # agent, not us.
   : >"$SUGGESTED_SKILLS_FILE"
-  # Tell run_iteration to clear any latched GUTTER/WARN signals. The
+  # Tell run_loop to clear any latched GUTTER/WARN signals. The
   # consumer treats RECOVER as "the bad thing is over; keep going".
   echo "RECOVER" 2>/dev/null || true
 }
@@ -438,7 +438,7 @@ track_file_write() {
   fi
   if [[ $count -ge $FILE_THRASH_THRESHOLD ]]; then
     log_error "THRASHING: $path written ${count}x in 10 min"
-    # 0.3.0: First trip in an iteration emits RECOVER_ATTEMPT; second
+    # 0.3.0: First trip in a loop emits RECOVER_ATTEMPT; second
     # trip falls through to GUTTER. See track_shell_failure for rationale.
     if [[ $RECOVERY_ATTEMPTED -eq 0 ]]; then
       _write_recovery_hint_thrash "$path" "$count"
@@ -447,7 +447,7 @@ track_file_write() {
       RECOVERY_ATTEMPTED=1
       echo "RECOVER_ATTEMPT" 2>/dev/null || true
     else
-      log_error "⚠️ GUTTER: file thrash on $path (recovery already used this iteration)"
+      log_error "⚠️ GUTTER: file thrash on $path (recovery already used this loop)"
       echo "GUTTER" 2>/dev/null || true
     fi
   fi
@@ -541,10 +541,10 @@ process_line() {
           # `git add <paths> && git commit -m "..."` as a single shell call,
           # which the prior `^git ` anchor missed entirely. Without this fix,
           # reset_failure_counters_on_task_boundary never fires, the per-task
-          # shell-failure counter accumulates across the whole iteration, and
-          # an iteration with N successful commits + a few unrelated transient
+          # shell-failure counter accumulates across the whole loop, and
+          # a loop with N successful commits + a few unrelated transient
           # failures eventually trips the recovery threshold for no real
-          # reason. Field log: 14 successful commits in one iteration produced
+          # reason. Field log: 14 successful commits in one loop produced
           # exactly one `COMMIT` activity-log line.
           if [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git[[:space:]]+commit ]]; then
             if [[ $exit_code -eq 0 ]]; then
@@ -612,7 +612,7 @@ process_line() {
       # `reviewing-loop-progress` skill (one-paragraph "what am I actually
       # doing" reflection) is the right intervention here, not the heavier
       # `diagnosing-stuck-tasks` (reserved for repeated gate failures).
-      # Deduped per-iteration via SUGGESTED_SKILLS_FILE so the same stall
+      # Deduped per-loop via SUGGESTED_SKILLS_FILE so the same stall
       # pattern doesn't spam suggestions every 40 ops.
       if [[ $CONSECUTIVE_READS -ge $MAX_READS_WITHOUT_WRITE ]]; then
         log_error "⚠️ READ-WITHOUT-WRITE STALL: $CONSECUTIVE_READS consecutive reads/shells without a write (informational only)"
@@ -701,8 +701,8 @@ process_line() {
 
 main() {
   local iter_label=""
-  if [[ -n "$ITERATION" ]]; then
-    iter_label=" (Iteration $ITERATION)"
+  if [[ -n "$LOOP_LABEL" ]]; then
+    iter_label=" (Loop $LOOP_LABEL)"
   fi
 
   {

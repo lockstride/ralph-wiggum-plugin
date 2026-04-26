@@ -10,7 +10,7 @@ The wrapper solves all three in one call.
 
 ## Why an autonomous-loop agent should care
 
-If you are driving this plugin's Ralph loop, your prompt framing already points at the wrapper. **Read this file once** to internalize the protocol; afterwards the inline reminders in your iteration prompt are enough.
+If you are driving this plugin's Ralph loop, your prompt framing already points at the wrapper. **Read this file once** to internalize the protocol; afterwards the inline reminders in your loop prompt are enough.
 
 If you are not in Ralph and just reading this because you landed here from the README or a grep result, the wrapper is still useful standalone — `gate-run.sh basic pnpm test` gives you the same benefits.
 
@@ -177,7 +177,7 @@ Prompts generated from `speckit.implement.md` get a `{{GATE_RUN}}` placeholder r
 
 ### In non-Spec Kit loops
 
-The `build_prompt()` framing in `ralph-common.sh` auto-detects `gate-run.sh` sitting next to it and injects a compact `## Gate Runner` section into every iteration prompt. Custom-prompt and `PROMPT.md` loops therefore get the same "don't pipe, don't re-run to verify" guidance that Spec Kit loops do.
+The `build_prompt()` framing in `ralph-common.sh` auto-detects `gate-run.sh` sitting next to it and injects a compact `## Gate Runner` section into every loop prompt. Custom-prompt and `PROMPT.md` loops therefore get the same "don't pipe, don't re-run to verify" guidance that Spec Kit loops do.
 
 ### Standalone (no Ralph)
 

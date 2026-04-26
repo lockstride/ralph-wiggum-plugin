@@ -53,8 +53,17 @@ else
   WARN_THRESHOLD="${WARN_THRESHOLD:-70000}"
 fi
 
-# Iteration limits
-MAX_ITERATIONS="${MAX_ITERATIONS:-20}"
+# Loop ceiling (safety cap, not a target).
+#
+# 0.6.3: renamed from MAX_ITERATIONS. The change isn't just cosmetic —
+# the unit of work is the LOOP, and a healthy run completes a whole
+# spec in ONE loop. This number is the upper bound on how many times
+# the driver will respawn the agent process before giving up; it's a
+# safety net for runaway recovery cycles, not a per-task counter.
+# RALPH_MAX_ITERATIONS is honored as a deprecated alias (one minor
+# release of compatibility) so existing call sites and env files keep
+# working.
+MAX_LOOPS="${MAX_LOOPS:-${RALPH_MAX_LOOPS:-${MAX_ITERATIONS:-${RALPH_MAX_ITERATIONS:-20}}}}"
 
 # Feature flags (set by caller)
 USE_BRANCH="${USE_BRANCH:-}"
@@ -84,9 +93,13 @@ get_ralph_dir() {
   echo "$workspace/.ralph"
 }
 
-get_iteration() {
+# 0.6.3: helpers carry the new "loop" terminology. The actual driver
+# (run_ralph_loop) tracks the live loop number in a local variable —
+# these persisted helpers exist so external tooling can ask "what loop
+# are we on?" without parsing activity.log. Unused by the driver itself.
+get_loop() {
   local workspace="${1:-.}"
-  local state_file="$workspace/.ralph/.iteration"
+  local state_file="$workspace/.ralph/.loop"
   if [[ -f "$state_file" ]]; then
     cat "$state_file"
   else
@@ -94,20 +107,20 @@ get_iteration() {
   fi
 }
 
-set_iteration() {
+set_loop() {
   local workspace="${1:-.}"
-  local iteration="$2"
+  local loop_n="$2"
   local ralph_dir="$workspace/.ralph"
   mkdir -p "$ralph_dir"
-  echo "$iteration" >"$ralph_dir/.iteration"
+  echo "$loop_n" >"$ralph_dir/.loop"
 }
 
-increment_iteration() {
+increment_loop() {
   local workspace="${1:-.}"
   local current
-  current=$(get_iteration "$workspace")
+  current=$(get_loop "$workspace")
   local next=$((current + 1))
-  set_iteration "$workspace" "$next"
+  set_loop "$workspace" "$next"
   echo "$next"
 }
 
@@ -356,12 +369,12 @@ _write_task_summary() {
 # PROMPT BUILDING
 # =============================================================================
 
-# Build the framing prompt sent on every iteration. This wraps the
-# user-supplied prompt body (from prompt-resolver.sh) with the Ralph
+# Build the framing prompt sent at the start of every loop. This wraps
+# the user-supplied prompt body (from prompt-resolver.sh) with the Ralph
 # state-file protocol.
 build_prompt() {
   local workspace="$1"
-  local iteration="$2"
+  local loop_n="$2"
   local user_prompt_file="$workspace/$RALPH_EFFECTIVE_PROMPT"
 
   local user_body="(no effective prompt — put instructions in .ralph/effective-prompt.md)"
@@ -369,12 +382,12 @@ build_prompt() {
     user_body=$(cat "$user_prompt_file")
   fi
 
-  # 0.3.0: Active-recovery hint. If the prior iteration tripped a
-  # recoverable stuck pattern (same shell-fail 2x, file thrash 5x), the
-  # stream-parser wrote a hint to .ralph/recovery-hint.md and the loop
-  # killed/restarted the agent. Prepend the hint here and delete the file
-  # — recovery hints are consume-once. Subsequent iterations without a
-  # hint produce a normal prompt.
+  # 0.3.0: Active-recovery hint. If the prior loop tripped a recoverable
+  # stuck pattern (same shell-fail 2x, file thrash 5x), the stream-parser
+  # wrote a hint to .ralph/recovery-hint.md and the driver killed/
+  # restarted the agent. Prepend the hint here and delete the file —
+  # recovery hints are consume-once. Subsequent loops without a hint
+  # produce a normal prompt.
   local hint_file="$workspace/.ralph/recovery-hint.md"
   local hint_block=""
   if [[ -f "$hint_file" ]]; then
@@ -408,12 +421,15 @@ Run every test / lint / build via the wrapper \`$gate_run_cmd <label> <cmd>\`:
 - **Never pipe, redirect, or filter the gate command.** The wrapper already
   prints a bounded summary and persists the full log. Piping (\`| grep\`,
   \`| tail\`, \`> /tmp/…\`) hides the exit code and forces an expensive re-run.
-- **On failure:** do NOT re-run the gate. Read the persisted log at
-  \`.ralph/gates/<label>-latest.log\` with targeted \`Read\` offsets or \`Grep\`,
-  fix the smallest thing, then re-run once. Exit code lives at
-  \`.ralph/gates/<label>-latest.exit\` (breadcrumb file).
-- **On success:** do NOT re-read the log. The summary you already saw is
-  authoritative. Commit and move on.
+- **If a gate fails: understand why, then act.** The persisted log at
+  \`.ralph/gates/<label>-latest.log\` is one source. Cypress/Playwright
+  failures usually have screenshots at predictable paths — those are
+  often faster to diagnose from than the log alone. The exit code lives
+  at \`.ralph/gates/<label>-latest.exit\`. Use whatever combination of
+  artifact reads, layer-bypassing diagnostics (\`curl\`, \`lsof\`), or
+  config inspection actually answers the question.
+- **On success:** the summary you already saw is authoritative. Commit
+  and move on.
 - Run \`$gate_run_cmd --help\` from your shell tool if you need the full
   contract (env vars, exit codes, failure-pattern matching, timeouts).
 GATE_EOF
@@ -421,16 +437,20 @@ GATE_EOF
   fi
 
   cat <<EOF
-# Ralph Iteration $iteration
+# Ralph Loop $loop_n
 $hint_block
-You are iteration $iteration of an autonomous loop. No memory of prior iterations.
-Git log and tasks.md checkboxes are the authoritative record of what is done.
+You are running inside a Ralph loop. Git log and tasks.md checkboxes
+are the authoritative record of what is done. The loop expects you to
+flow through the work — commit after each task, immediately read the
+next one, keep going. Exiting your turn between commits forces a fresh
+agent process (~10–30k tokens of cold-start tax). Don't do that unless
+you've hit one of the four real stop conditions below.
 
 ## Completion Bar (hard — read before anything else)
 
 - A task/phase is NOT complete until its verification gate exits 0. No exceptions.
 - "Pre-existing failure" is NEVER a reason to mark a task [x], emit a completion signal, or commit. If a check fails, fix it. If you cannot fix it, emit \`<ralph>GUTTER</ralph>\` with root cause in \`.ralph/errors.log\` — NEVER mark [x] around it.
-- Before flipping \`[ ]\` → \`[x]\`, self-check: did the gate for this task exit 0 in THIS iteration?
+- Before flipping \`[ ]\` → \`[x]\`, self-check: did the gate for this task exit 0 in THIS loop?
 
 ## State Files (read before anything else)
 
@@ -440,20 +460,26 @@ Git log and tasks.md checkboxes are the authoritative record of what is done.
 
 Do **not** read \`.ralph/activity.log\` (human monitoring only).
 
-## Signals
+## Stop conditions (the only four)
 
-- All tasks done + final gate passes → \`<promise>ALL_TASKS_DONE</promise>\`
-- Stuck 3+ times on same issue → \`<ralph>GUTTER</ralph>\`
+End your turn ONLY on:
+- \`<promise>ALL_TASKS_DONE</promise>\` — every task [x] AND final gate green
+- \`<ralph>GUTTER</ralph>\` — genuinely stuck after honest investigation
+- The loop sends \`WARN\` (rotation imminent) — wrap up your current edit
+- \`.ralph/stop-requested\` exists — yield cleanly
+
+A successful commit is NOT a stop condition. After a commit, your next
+tool call is a Read of the next unchecked task.
 
 ## Loop Hygiene
 
 - **Never** \`git add .ralph/\` — it is gitignored; \`git add\` on it returns exit 1 and aborts the commit.
 - Commit after each task — commits are your memory across rotations.
 - Never \`--amend\`, \`--force\`, or \`reset --hard\`. Fix mistakes with a new commit.
-- At session end, write \`.ralph/handoff.md\` (< 30 lines, navigation pointers only).
+- Before yielding (only on the four stop conditions above), write \`.ralph/handoff.md\` (< 30 lines, navigation pointers only).
 - If context is running low, finish current edit, commit, and stop cleanly.
-- **Work every remaining unchecked task across every remaining phase** in this iteration. Do not stop at phase boundaries — the loop handles rotation and rate limits for you. Only yield on \`ALL_TASKS_DONE\`, rotation WARN, \`.ralph/stop-requested\`, or genuine GUTTER (0.4.0).
-- **After every commit, check whether \`.ralph/stop-requested\` exists.** If it does, the loop is asking you to yield cleanly: finish no new task, flush any dirty edits into a final commit if appropriate, and exit. Do not remove the marker — the loop clears it at next iteration start.
+- **Work every remaining unchecked task across every remaining phase** in this loop. Do not stop at phase boundaries — the loop handles rotation and rate limits for you.
+- **After every commit, check whether \`.ralph/stop-requested\` exists.** If it does, the loop is asking you to yield cleanly: finish no new task, flush any dirty edits into a final commit if appropriate, and exit. Do not remove the marker — the loop clears it at next loop start.
 $gate_block
 
 ## Task Execution
@@ -482,37 +508,37 @@ spinner() {
 }
 
 # =============================================================================
-# ITERATION HYGIENE HELPERS
+# LOOP HYGIENE HELPERS
 #
-# Forensic helpers that run around each iteration to catch orphan-file
+# Forensic helpers that run around each loop to catch orphan-file
 # leaks (see 0.1.10 RCA on the 005-comparison-*.md incident) and to
 # persist a post-mortem tarball outside of .ralph/ when the loop crashes.
 # =============================================================================
 
-# Capture the baseline state of the worktree at the start of an iteration:
+# Capture the baseline state of the worktree at the start of a loop:
 # current HEAD SHA and the list of currently-untracked files. Used by
-# _check_orphan_leak after the iteration to detect whether the agent
+# _check_orphan_leak after the loop to detect whether the agent
 # committed any files that were untracked at start (a strong signal that
 # `git add .` / `git add <dir>` swept up orphans).
-_capture_iteration_baseline() {
+_capture_loop_baseline() {
   local workspace="$1"
   local ralph_dir="$workspace/.ralph"
   mkdir -p "$ralph_dir"
-  (cd "$workspace" && git rev-parse HEAD 2>/dev/null) >"$ralph_dir/iteration-baseline-head" || true
+  (cd "$workspace" && git rev-parse HEAD 2>/dev/null) >"$ralph_dir/loop-baseline-head" || true
   (cd "$workspace" && git ls-files --others --exclude-standard 2>/dev/null | LC_ALL=C sort) \
-    >"$ralph_dir/iteration-baseline-untracked" || true
+    >"$ralph_dir/loop-baseline-untracked" || true
 }
 
-# After an iteration, compare the files touched by any new commits against
-# the untracked baseline. If any committed file was untracked at iteration
+# After a loop, compare the files touched by any new commits against
+# the untracked baseline. If any committed file was untracked at loop
 # start, it's a suspected orphan leak — log a warning to activity.log and
 # append a concrete finding to errors.log. Non-blocking (the commits already
 # happened); this is pure telemetry so the operator can spot the problem.
 _check_orphan_leak() {
   local workspace="$1"
   local ralph_dir="$workspace/.ralph"
-  local baseline_head="$ralph_dir/iteration-baseline-head"
-  local baseline_untracked="$ralph_dir/iteration-baseline-untracked"
+  local baseline_head="$ralph_dir/loop-baseline-head"
+  local baseline_untracked="$ralph_dir/loop-baseline-untracked"
   [[ -f "$baseline_head" ]] || return 0
   [[ -f "$baseline_untracked" ]] || return 0
   [[ -s "$baseline_untracked" ]] || return 0
@@ -534,13 +560,13 @@ _check_orphan_leak() {
 
   local leaked_inline
   leaked_inline=$(printf '%s' "$leaked" | tr '\n' ' ')
-  log_activity "$workspace" "⚠️  ORPHAN LEAK: iteration committed files that were untracked at start: $leaked_inline"
+  log_activity "$workspace" "⚠️  ORPHAN LEAK: loop committed files that were untracked at start: $leaked_inline"
   {
     echo ""
     echo "⚠️  ORPHAN FILE LEAK DETECTED"
-    echo "   iteration baseline HEAD: $before_head"
-    echo "   iteration end HEAD:      $after_head"
-    echo "   files committed that were untracked at iteration start:"
+    echo "   loop baseline HEAD: $before_head"
+    echo "   loop end HEAD:      $after_head"
+    echo "   files committed that were untracked at loop start:"
     while IFS= read -r _leak_path; do
       [[ -n "$_leak_path" ]] && echo "     - $_leak_path"
     done <<<"$leaked"
@@ -573,7 +599,7 @@ _write_postmortem() {
 
   local f
   for f in errors.log activity.log progress.md guardrails.md effective-prompt.md \
-    iteration-baseline-head iteration-baseline-untracked task-file-path \
+    loop-baseline-head loop-baseline-untracked task-file-path \
     basic-check-command final-check-command test-command; do
     [[ -f "$ralph_dir/$f" ]] && cp "$ralph_dir/$f" "$staging/" 2>/dev/null || true
   done
@@ -599,36 +625,36 @@ _write_postmortem() {
 }
 
 # =============================================================================
-# ITERATION RUNNER
+# LOOP RUNNER
 # =============================================================================
 
-# Format an iteration label for human-readable logs, folding in the per-
-# iteration retry count when it matters.
+# Format a loop label for human-readable logs, folding in the per-loop
+# retry count when it matters.
 #
-# Background (0.3.7): prior versions logged "ITERATION N" / "Session N"
-# regardless of how many times the same iteration had been retried on DEFER.
-# Operators watching a long DEFER loop saw "ITERATION 1 START" / "ITERATION
-# 1 END — ⏸️ DEFERRED" six times in a row and assumed the loop was frozen,
-# when in fact it was making real progress across retries (committing tasks,
-# advancing state). The counter only bumps on a clean natural end — DEFER
-# and a few other paths retry the same iteration number — which is correct
-# semantics but misleading in the log stream.
+# Background (0.3.7): prior versions logged "LOOP N" regardless of how
+# many times the same loop number had been retried on DEFER. Operators
+# watching a long DEFER cycle saw "LOOP 1 START" / "LOOP 1 END —
+# ⏸️ DEFERRED" six times in a row and assumed the driver was frozen,
+# when in fact it was making real progress across retries (committing
+# tasks, advancing state). The counter only bumps on a clean natural
+# end — DEFER and a few other paths retry the same loop number — which
+# is correct semantics but misleading in the log stream.
 #
 # Emits "N" when retry==0 (the common case) and "N.R" otherwise. All
-# ITERATION / Session log lines in main_loop and run_iteration now route
-# through this helper so a retry is immediately visible in both activity.log
-# and progress.md without requiring the reader to reconstruct it.
+# LOOP log lines in run_ralph_loop and run_loop route through this
+# helper so a retry is immediately visible in both activity.log and
+# progress.md without requiring the reader to reconstruct it.
 #
 # Args:
-#   $1 — iteration number
+#   $1 — loop number
 #   $2 — retry count (default 0)
 _fmt_iter() {
-  local iter="$1"
+  local loop_n="$1"
   local retry="${2:-0}"
   if [[ "$retry" -gt 0 ]]; then
-    printf '%s.%s' "$iter" "$retry"
+    printf '%s.%s' "$loop_n" "$retry"
   else
-    printf '%s' "$iter"
+    printf '%s' "$loop_n"
   fi
 }
 
@@ -649,14 +675,14 @@ _fmt_iter() {
 #                Caller must probe agent-pid liveness to disambiguate
 #                (see _probe_agent_liveness). Prior to 0.3.2 this was
 #                unconditionally treated as a parser crash and DEFERred,
-#                which mis-classified every normal iteration end.
+#                which mis-classified every normal natural-end loop.
 #
 # IMPORTANT (0.3.9): the caller must capture `read`'s actual exit status,
 # not the while-loop's. `while read; do :; done <fifo; rc=$?` silently
 # reports rc=0 because bash defines `while`'s exit as "the exit status of
 # the last command executed in list-2, or zero if none was executed" —
 # every case arm in the body returns 0, so the real EOF/timeout status
-# was being swallowed. See run_iteration's `|| { _read_rc=$?; break; }`
+# was being swallowed. See run_loop's `|| { _read_rc=$?; break; }`
 # idiom for the correct capture.
 #
 # Args:
@@ -801,60 +827,58 @@ _probe_pipeline_stages() {
   echo "parser=$parser_state"
 }
 
-# Run a single agent iteration. Returns the final signal on stdout
+# Run a single agent loop. Returns the final signal on stdout
 # (ROTATE / GUTTER / COMPLETE / DEFER / empty).
 #
 # Args:
 #   $1 — workspace
-#   $2 — iteration number
+#   $2 — loop number
 #   $3 — session_id (optional; continues a prior agent session when set)
 #   $4 — script_dir (optional; defaults to the dir containing this file)
-#   $5 — retry count for this iteration (optional; default 0). Only used
-#        for human-readable log framing via _fmt_iter — the iteration
+#   $5 — retry count for this loop (optional; default 0). Only used
+#        for human-readable log framing via _fmt_iter — the loop
 #        number the agent sees in its prompt stays numeric (N) so the
-#        model's "iteration N of an autonomous loop" framing isn't
-#        muddied by a retry suffix.
-run_iteration() {
+#        model's framing isn't muddied by a retry suffix.
+run_loop() {
   local workspace="$1"
-  local iteration="$2"
+  local loop_n="$2"
   local session_id="${3:-}"
   local script_dir="${4:-$(dirname "${BASH_SOURCE[0]}")}"
   local retry="${5:-0}"
-  local iter_label
-  iter_label=$(_fmt_iter "$iteration" "$retry")
+  local loop_label
+  loop_label=$(_fmt_iter "$loop_n" "$retry")
 
   local prompt
-  prompt=$(build_prompt "$workspace" "$iteration")
+  prompt=$(build_prompt "$workspace" "$loop_n")
 
   # Snapshot worktree state before the agent runs so _check_orphan_leak
   # can flag any untracked files the agent commits.
-  _capture_iteration_baseline "$workspace"
+  _capture_loop_baseline "$workspace"
 
-  # 0.4.0: clear any leftover stop-requested marker from a prior
-  # iteration. The marker is the gentle-DEFER cooperation channel
-  # (see the DEFER case below) and must be absent at iteration start
-  # or the agent would bail out on its first commit.
+  # 0.4.0: clear any leftover stop-requested marker from a prior loop.
+  # The marker is the gentle-DEFER cooperation channel (see the DEFER
+  # case below) and must be absent at loop start or the agent would
+  # bail out on its first commit.
   rm -f "$workspace/.ralph/stop-requested" 2>/dev/null || true
 
   local fifo="$workspace/.ralph/.parser_fifo"
   local spinner_pid="" agent_pid="" norm_filter=""
   local orphan_claims="$workspace/.ralph/.orphan-claims.pid"
 
-  # 0.4.0: at iteration start, mop up any pids left behind by a prior
-  # iteration that didn't clean up properly (e.g. killed mid-DEFER, or
-  # its trap fired before children were fully reaped). Each ralph
-  # iteration records its pipeline-stage pids to .orphan-claims.pid;
-  # on the next start we sweep that file, SIGKILL anything still
-  # running, and clear it. Without this, stale claude processes
-  # accumulate across DEFER cycles — seen repeatedly in field runs
-  # where kill -- -$agent_pid failed to reach grandchildren under
-  # certain process-group configurations.
+  # 0.4.0: at loop start, mop up any pids left behind by a prior loop
+  # that didn't clean up properly (e.g. killed mid-DEFER, or its trap
+  # fired before children were fully reaped). Each ralph loop records
+  # its pipeline-stage pids to .orphan-claims.pid; on the next start we
+  # sweep that file, SIGKILL anything still running, and clear it.
+  # Without this, stale claude processes accumulate across DEFER cycles
+  # — seen repeatedly in field runs where kill -- -$agent_pid failed to
+  # reach grandchildren under certain process-group configurations.
   if [[ -r "$orphan_claims" ]]; then
     local _stale_pid
     while IFS= read -r _stale_pid; do
       [[ -z "$_stale_pid" ]] && continue
       if kill -0 "$_stale_pid" 2>/dev/null; then
-        log_activity "$workspace" "🧹 ORPHAN SWEEP — SIGKILL stale pid $_stale_pid from prior iteration"
+        log_activity "$workspace" "🧹 ORPHAN SWEEP — SIGKILL stale pid $_stale_pid from prior loop"
         kill -9 "$_stale_pid" 2>/dev/null || true
       fi
     done <"$orphan_claims"
@@ -862,7 +886,7 @@ run_iteration() {
   fi
 
   # shellcheck disable=SC2329 # invoked indirectly via trap
-  _iteration_cleanup() {
+  _loop_cleanup() {
     # 0.4.0: strict reaping with explicit escalation ladder. The old
     # path relied on a single `kill -- -$agent_pid` which silently
     # failed to reach grandchildren under some process-group configs,
@@ -872,8 +896,8 @@ run_iteration() {
     #   3. SIGKILL any survivors.
     #   4. Mop up anything still rooted at agent_pid with pkill -9.
     #   5. Record all tracked pids to .orphan-claims.pid as a safety
-    #      net — the NEXT iteration's start-sweep picks up anything
-    #      that still survived all of this.
+    #      net — the NEXT loop's start-sweep picks up anything that
+    #      still survived all of this.
     local _descendants _pid
     _descendants=$(pgrep -P "$agent_pid" 2>/dev/null || true)
     # SIGTERM sweep
@@ -893,7 +917,7 @@ run_iteration() {
     # Broad mop-up on anything still rooted at the subshell
     pkill -9 -P "$agent_pid" 2>/dev/null || true
 
-    # Record remaining pids for the next iteration's orphan sweep.
+    # Record remaining pids for the next loop's orphan sweep.
     : >"$orphan_claims"
     for _pid in $_descendants $agent_pid; do
       if kill -0 "$_pid" 2>/dev/null; then
@@ -914,11 +938,11 @@ run_iteration() {
   # Save and install trap; restore on exit
   local _prev_trap
   _prev_trap=$(trap -p EXIT)
-  trap '_iteration_cleanup' EXIT SIGTERM SIGHUP
+  trap '_loop_cleanup' EXIT SIGTERM SIGHUP
 
   echo "" >&2
   echo "═══════════════════════════════════════════════════════════════════" >&2
-  echo "🐛 Ralph Iteration $iter_label" >&2
+  echo "🐛 Ralph Loop $loop_label" >&2
   echo "═══════════════════════════════════════════════════════════════════" >&2
   echo "" >&2
   echo "Workspace: $workspace" >&2
@@ -927,7 +951,7 @@ run_iteration() {
   echo "Monitor:   tail -f $workspace/.ralph/activity.log" >&2
   echo "" >&2
 
-  log_progress "$workspace" "**Session $iter_label started** (cli: $RALPH_AGENT_CLI, model: $MODEL)"
+  log_progress "$workspace" "**Session $loop_label started** (cli: $RALPH_AGENT_CLI, model: $MODEL)"
 
   local invoke_cmd
   invoke_cmd=$(agent_build_cmd "$RALPH_AGENT_CLI" "$MODEL" "$prompt" "$session_id")
@@ -951,7 +975,7 @@ run_iteration() {
   (
     eval "$invoke_cmd" 2>&1 |
       jq -n --unbuffered -c -f "$norm_filter" 2>>"$workspace/.ralph/errors.log" |
-      "$script_dir/stream-parser.sh" "$workspace" "$iter_label" >"$fifo"
+      "$script_dir/stream-parser.sh" "$workspace" "$loop_label" >"$fifo"
     rm -f "$norm_filter"
   ) &
   agent_pid=$!
@@ -1025,7 +1049,7 @@ run_iteration() {
         echo "💡 Skill suggestion written to .ralph/skill-suggestion (agent will pick up next turn)" >&2
         ;;
       "RECOVER_ATTEMPT")
-        # 0.3.0: Recoverable stuck pattern hit (first time this iteration).
+        # 0.3.0: Recoverable stuck pattern hit (first time this loop).
         # The stream-parser has written a recovery hint to
         # .ralph/recovery-hint.md. Kill the agent so the loop can re-spawn
         # it with the hint prepended to the framing prompt. The loop's
@@ -1039,7 +1063,7 @@ run_iteration() {
       "RECOVER")
         # 0.1.16: Emitted by stream-parser on a successful `git commit`
         # (task boundary). Clears any latched GUTTER so a transient
-        # mid-session stuck-pattern does not poison iteration-end
+        # mid-session stuck-pattern does not poison loop-end
         # reporting once the agent has recovered and committed. ROTATE,
         # COMPLETE, and DEFER are terminal and are NOT cleared — they
         # represent real decisions the loop must honour.
@@ -1089,7 +1113,7 @@ run_iteration() {
       ;;
     eof)
       # 0.3.2: FIFO hit EOF. Disambiguate clean natural end from wedged
-      # agent. Most iterations end naturally — claude CLI exits when the
+      # agent. Most loops end naturally — claude CLI exits when the
       # model finishes its turn, jq/parser EOF in turn, and we fall
       # through to the `*)` natural-end branch in the main loop. Only
       # when the agent is still alive after a short grace window does
@@ -1150,7 +1174,7 @@ run_iteration() {
         fi
       fi
       # else: clean natural end — leave signal="" so the main loop's
-      # `*)` branch increments the iteration as it did pre-0.3.1.
+      # `*)` branch increments the loop number as it did pre-0.3.1.
       ;;
   esac
 
@@ -1184,19 +1208,21 @@ run_iteration() {
   # case where kill -- -$agent_pid fails to reach a grandchild;
   # previously those survived as orphans holding API auth state and
   # consuming memory across retries. If anything survives even this,
-  # the next iteration's orphan-sweep (orphan_claims at run_iteration
+  # the next loop's orphan-sweep (orphan_claims at run_loop
   # start) picks up the pieces.
-  pkill -9 -f "$workspace.*Ralph Iteration" 2>/dev/null || true
+  # Pre-0.6.3 the marker said "Ralph Iteration"; post-0.6.3 it's "Ralph Loop".
+  # Match either so an upgrade across a long-running session still reaps.
+  pkill -9 -f "$workspace.*Ralph (Loop|Iteration)" 2>/dev/null || true
 
   # 0.5.4: also reap the gate-run.sh subtree rooted at this workspace.
   # Gate runs spawn a deep tree (bash → pnpm → nx → vitest → N node
   # workers) that the pgrep -P walk above does not fully reach when the
-  # iteration is killed mid-gate (recovery, DEFER, heartbeat timeout).
-  # Surviving gate trees collide with the next iteration's first gate on
-  # the shared $latest-link symlink, the coverage/ output dirs, and the
-  # nx daemon — producing spurious failures that look like real bugs.
+  # loop is killed mid-gate (recovery, DEFER, heartbeat timeout).
+  # Surviving gate trees collide with the next loop's first gate on the
+  # shared $latest-link symlink, the coverage/ output dirs, and the nx
+  # daemon — producing spurious failures that look like real bugs.
   # gate-run.sh's mkdir-mutex (0.5.4) catches some of this, but reaping
-  # at iteration boundaries is the cleaner fix.
+  # at loop boundaries is the cleaner fix.
   pkill -9 -f "gate-run.sh.*$workspace" 2>/dev/null || true
 
   # Restore previous trap
@@ -1281,16 +1307,22 @@ run_ralph_loop() {
   echo "🚀 Starting Ralph loop..."
   echo ""
 
-  local iteration=1
-  # 0.3.7: retry counter for the current iteration. Bumps on DEFER (the
-  # only signal that re-runs the same iteration number) and resets to 0
-  # every time iteration advances. Folded into log headers via _fmt_iter
-  # so operators can tell at a glance that "ITERATION 1.3 START" is the
-  # fourth attempt at iteration 1, not a new iteration.
+  # 0.6.3: terminology — these used to be "iterations." Renamed to "loops"
+  # so the unit of work matches the project name (the Ralph loop) and so
+  # we don't reinforce the false notion that one task = one loop. A
+  # well-behaved single agent process completes a whole spec in ONE loop.
+  # Spawning a second loop is a recovery action, not a normal cadence.
+  local loop_n=1
+  # 0.3.7: retry counter for the current loop. Bumps on DEFER (the only
+  # signal that re-runs the same loop number) and resets to 0 every time
+  # loop_n advances. Folded into log headers via _fmt_iter so operators
+  # can tell at a glance that "LOOP 1.3 START" is the fourth attempt at
+  # loop 1, not a new loop.
   local retry=0
   local session_id=""
   local stall_count=0         # DEFER/rate-limit consecutive count (threshold 10)
   local zero_progress_count=0 # natural-end with zero task delta (threshold 3)
+  local natural_end_count=0   # 0.6.3: any natural-end (with or without progress) — measures "agent bailed politely instead of staying in flow"
   local DEFER_COUNT=0
   # 0.3.0: Active-recovery budget. Each RECOVER_ATTEMPT signal from the
   # stream-parser (recoverable stuck pattern detected) consumes one slot.
@@ -1298,33 +1330,33 @@ run_ralph_loop() {
   local RECOVERY_ATTEMPTS=0
   local MAX_RECOVERY_ATTEMPTS="${RALPH_MAX_RECOVERY_ATTEMPTS:-2}"
 
-  while [[ $iteration -le $MAX_ITERATIONS ]]; do
+  while [[ $loop_n -le $MAX_LOOPS ]]; do
     local pre_counts
     pre_counts=$(count_criteria "$workspace")
     local pre_done=${pre_counts%%:*}
     local pre_total=${pre_counts##*:}
     local pre_remaining=$((pre_total - pre_done))
 
-    local iter_label
-    iter_label=$(_fmt_iter "$iteration" "$retry")
+    local loop_label
+    loop_label=$(_fmt_iter "$loop_n" "$retry")
 
     if [[ "$pre_total" -gt 0 ]]; then
-      log_activity "$workspace" "ITERATION $iter_label START — Tasks: $pre_done/$pre_total complete ($pre_remaining remaining)"
+      log_activity "$workspace" "LOOP $loop_label START — Tasks: $pre_done/$pre_total complete ($pre_remaining remaining)"
     else
-      log_activity "$workspace" "ITERATION $iter_label START"
+      log_activity "$workspace" "LOOP $loop_label START"
     fi
 
     local signal
-    signal=$(run_iteration "$workspace" "$iteration" "$session_id" "$script_dir" "$retry")
+    signal=$(run_loop "$workspace" "$loop_n" "$session_id" "$script_dir" "$retry")
 
     # Non-blocking check: did the agent commit any files that were
-    # untracked at iteration start? (orphan sweep via broad `git add`)
+    # untracked at loop start? (orphan sweep via broad `git add`)
     _check_orphan_leak "$workspace"
 
     local task_status
     task_status=$(check_task_complete "$workspace")
 
-    # Compute post-iteration task counts for the ITERATION END line
+    # Compute post-loop task counts for the LOOP END line
     local post_counts post_done post_total task_delta task_suffix
     post_counts=$(count_criteria "$workspace")
     post_done=${post_counts%%:*}
@@ -1334,7 +1366,7 @@ run_ralph_loop() {
     if [[ "$post_total" -gt 0 ]]; then
       task_suffix=" (Tasks: $post_done/$post_total complete"
       if [[ "$task_delta" -gt 0 ]]; then
-        task_suffix="$task_suffix, +$task_delta this iteration"
+        task_suffix="$task_suffix, +$task_delta this loop"
       fi
       task_suffix="$task_suffix)"
     fi
@@ -1347,29 +1379,29 @@ run_ralph_loop() {
         local _last_exit
         _last_exit=$(_most_recent_gate_exit "$workspace")
         log_activity "$workspace" "🛑 COMPLETE BLOCKED — all tasks checked but most recent gate exited $_last_exit. Agent must get the gate to green (or escalate via <ralph>GUTTER</ralph>) before the loop can exit.$task_suffix"
-        log_progress "$workspace" "**Session $iter_label ended** — 🛑 COMPLETE BLOCKED (gate red, exit=$_last_exit)"
+        log_progress "$workspace" "**Loop $loop_label ended** — 🛑 COMPLETE BLOCKED (gate red, exit=$_last_exit)"
         echo "🛑 Checkboxes all [x] but most recent gate exited $_last_exit — not honouring COMPLETE. Continuing..."
         # Reset stall/zero-progress counters — a red-gate block is not an
-        # API hiccup, and work may have progressed this iteration.
+        # API hiccup, and work may have progressed this loop.
         stall_count=0
         DEFER_COUNT=0
         # zero_progress_count deliberately unchanged; repeated blocked
-        # iterations with zero forward motion should still trip the
+        # loops with zero forward motion should still trip the
         # natural-end stall detection below.
-        iteration=$((iteration + 1))
+        loop_n=$((loop_n + 1))
         retry=0
         sleep 2
         continue
       fi
 
-      log_activity "$workspace" "ITERATION $iter_label END — ✅ COMPLETE$task_suffix"
-      log_progress "$workspace" "**Session $iter_label ended** — ✅ TASK COMPLETE"
+      log_activity "$workspace" "LOOP $loop_label END — ✅ COMPLETE$task_suffix"
+      log_progress "$workspace" "**Loop $loop_label ended** — ✅ TASK COMPLETE"
       echo ""
       echo "═══════════════════════════════════════════════════════════════════"
       echo "🎉 RALPH COMPLETE! All criteria satisfied."
       echo "═══════════════════════════════════════════════════════════════════"
       echo ""
-      echo "Completed in $iteration iteration(s)."
+      echo "Completed in $loop_n loop(s)."
 
       if [[ "$OPEN_PR" == "true" ]] && [[ -n "$USE_BRANCH" ]]; then
         echo ""
@@ -1394,65 +1426,65 @@ run_ralph_loop() {
             local _last_exit
             _last_exit=$(_most_recent_gate_exit "$workspace")
             log_activity "$workspace" "🛑 COMPLETE BLOCKED — agent signaled COMPLETE but most recent gate exited $_last_exit.$task_suffix"
-            log_progress "$workspace" "**Session $iter_label ended** — 🛑 COMPLETE BLOCKED (agent signaled; gate red, exit=$_last_exit)"
+            log_progress "$workspace" "**Loop $loop_label ended** — 🛑 COMPLETE BLOCKED (agent signaled; gate red, exit=$_last_exit)"
             echo "🛑 Agent signaled COMPLETE but most recent gate exited $_last_exit — not honouring. Continuing..."
             stall_count=0
             DEFER_COUNT=0
-            iteration=$((iteration + 1))
+            loop_n=$((loop_n + 1))
             retry=0
             session_id=""
             continue
           fi
-          log_activity "$workspace" "ITERATION $iter_label END — ✅ COMPLETE$task_suffix"
-          log_progress "$workspace" "**Session $iter_label ended** — ✅ TASK COMPLETE (agent signaled)"
+          log_activity "$workspace" "LOOP $loop_label END — ✅ COMPLETE$task_suffix"
+          log_progress "$workspace" "**Loop $loop_label ended** — ✅ TASK COMPLETE (agent signaled)"
           return 0
         else
-          log_activity "$workspace" "ITERATION $iter_label END — ⚠️ AGENT SIGNALED COMPLETE (criteria remain)$task_suffix"
-          log_progress "$workspace" "**Session $iter_label ended** — Agent signaled complete but criteria remain"
+          log_activity "$workspace" "LOOP $loop_label END — ⚠️ AGENT SIGNALED COMPLETE (criteria remain)$task_suffix"
+          log_progress "$workspace" "**Loop $loop_label ended** — Agent signaled complete but criteria remain"
           echo "⚠️  Agent signaled completion but unchecked criteria remain. Continuing..."
           stall_count=0
           zero_progress_count=0
           DEFER_COUNT=0
-          iteration=$((iteration + 1))
+          loop_n=$((loop_n + 1))
           retry=0
         fi
         ;;
       "ROTATE")
-        log_activity "$workspace" "ITERATION $iter_label END — 🔄 ROTATE$task_suffix"
-        log_progress "$workspace" "**Session $iter_label ended** — 🔄 Context rotation"
+        log_activity "$workspace" "LOOP $loop_label END — 🔄 ROTATE (context-window pressure)$task_suffix"
+        log_progress "$workspace" "**Loop $loop_label ended** — 🔄 Context rotation"
         echo "🔄 Rotating to fresh context..."
         stall_count=0
         zero_progress_count=0
         DEFER_COUNT=0
-        iteration=$((iteration + 1))
+        loop_n=$((loop_n + 1))
         retry=0
         session_id=""
         ;;
       "GUTTER")
-        log_activity "$workspace" "ITERATION $iter_label END — 🚨 GUTTER$task_suffix"
-        log_progress "$workspace" "**Session $iter_label ended** — 🚨 GUTTER"
+        log_activity "$workspace" "LOOP $loop_label END — 🚨 GUTTER$task_suffix"
+        log_progress "$workspace" "**Loop $loop_label ended** — 🚨 GUTTER"
         echo "🚨 Gutter detected. Check .ralph/errors.log for details."
         _write_postmortem "$workspace" "gutter"
         return 1
         ;;
       "RECOVER_ATTEMPT")
         # 0.3.0: Stream-parser hit a recoverable stuck pattern and wrote
-        # a hint to .ralph/recovery-hint.md. Restart the iteration with
-        # the hint prepended (build_prompt consumes the file). If the
-        # per-loop budget is exhausted, escalate to GUTTER instead.
+        # a hint to .ralph/recovery-hint.md. Restart the loop with the
+        # hint prepended (build_prompt consumes the file). If the
+        # per-driver budget is exhausted, escalate to GUTTER instead.
         if [[ $RECOVERY_ATTEMPTS -lt $MAX_RECOVERY_ATTEMPTS ]]; then
           RECOVERY_ATTEMPTS=$((RECOVERY_ATTEMPTS + 1))
-          log_activity "$workspace" "ITERATION $iter_label END — 🔁 RECOVERY ATTEMPT $RECOVERY_ATTEMPTS/$MAX_RECOVERY_ATTEMPTS$task_suffix"
-          log_progress "$workspace" "**Session $iter_label ended** — 🔁 RECOVERY ATTEMPT $RECOVERY_ATTEMPTS/$MAX_RECOVERY_ATTEMPTS"
-          echo "🔁 Recovery attempt $RECOVERY_ATTEMPTS of $MAX_RECOVERY_ATTEMPTS — restarting iteration with hint..."
+          log_activity "$workspace" "LOOP $loop_label END — 🔁 RECOVERY ATTEMPT $RECOVERY_ATTEMPTS/$MAX_RECOVERY_ATTEMPTS$task_suffix"
+          log_progress "$workspace" "**Loop $loop_label ended** — 🔁 RECOVERY ATTEMPT $RECOVERY_ATTEMPTS/$MAX_RECOVERY_ATTEMPTS"
+          echo "🔁 Recovery attempt $RECOVERY_ATTEMPTS of $MAX_RECOVERY_ATTEMPTS — restarting loop with hint..."
           # Do NOT bump stall_count/zero_progress_count — recovery is its
           # own budget, separate from natural-end and DEFER counters.
-          iteration=$((iteration + 1))
+          loop_n=$((loop_n + 1))
           retry=0
           session_id=""
         else
-          log_activity "$workspace" "ITERATION $iter_label END — 🚨 GUTTER (recovery budget exhausted: $MAX_RECOVERY_ATTEMPTS attempts)$task_suffix"
-          log_progress "$workspace" "**Session $iter_label ended** — 🚨 GUTTER (recovery budget exhausted)"
+          log_activity "$workspace" "LOOP $loop_label END — 🚨 GUTTER (recovery budget exhausted: $MAX_RECOVERY_ATTEMPTS attempts)$task_suffix"
+          log_progress "$workspace" "**Loop $loop_label ended** — 🚨 GUTTER (recovery budget exhausted)"
           echo "🚨 Recovery budget exhausted ($MAX_RECOVERY_ATTEMPTS attempts) — escalating to GUTTER."
           # Discard any leftover hint so the next ralph invocation starts clean.
           rm -f "$workspace/.ralph/recovery-hint.md" 2>/dev/null || true
@@ -1465,18 +1497,18 @@ run_ralph_loop() {
         # Kept lenient (threshold 10) because rate limits can take minutes to clear.
         # Does NOT increment zero_progress_count — that's reserved for the agent
         # genuinely doing nothing useful, not for API hiccups.
-        log_activity "$workspace" "ITERATION $iter_label END — ⏸️ DEFERRED$task_suffix"
-        log_progress "$workspace" "**Session $iter_label ended** — ⏸️ DEFERRED"
+        log_activity "$workspace" "LOOP $loop_label END — ⏸️ DEFERRED$task_suffix"
+        log_progress "$workspace" "**Loop $loop_label ended** — ⏸️ DEFERRED"
         DEFER_COUNT=$((DEFER_COUNT + 1))
         stall_count=$((stall_count + 1))
-        # 0.3.7: bump the per-iteration retry counter. Iteration number
-        # stays the same (DEFER means "retry this iteration"), but the
-        # retry suffix surfaces progress in activity.log/progress.md.
+        # 0.3.7: bump the per-loop retry counter. Loop number stays the
+        # same (DEFER means "retry this loop"), but the retry suffix
+        # surfaces progress in activity.log/progress.md.
         retry=$((retry + 1))
         if [[ $stall_count -ge 10 ]]; then
-          log_activity "$workspace" "LOOP END — 🚨 STALL: $stall_count consecutive empty/deferred iterations"
-          log_progress "$workspace" "**Loop ended** — 🚨 STALL: $stall_count consecutive empty/deferred iterations, likely rate limited"
-          echo "🚨 Stall detected: $stall_count consecutive iterations with no progress (likely rate limited)."
+          log_activity "$workspace" "RALPH STOP — 🚨 STALL: $stall_count consecutive empty/deferred loops"
+          log_progress "$workspace" "**Ralph stopped** — 🚨 STALL: $stall_count consecutive empty/deferred loops, likely rate limited"
+          echo "🚨 Stall detected: $stall_count consecutive loops with no progress (likely rate limited)."
           echo "   Wait for your rate limit to reset and re-run."
           _write_postmortem "$workspace" "stall-defer"
           return 1
@@ -1488,9 +1520,19 @@ run_ralph_loop() {
         sleep "$defer_delay"
         ;;
       *)
-        # Natural end (no signal). Uses zero_progress_count (threshold 3)
-        # because repeated zero-delta iterations here mean the agent is
-        # silently bailing out — not an API issue.
+        # Natural end (no signal). The agent ended its turn without emitting
+        # a control signal — typically after a commit, sometimes after
+        # exhausting a sub-task it considered "done."
+        #
+        # 0.6.3: this is the case the framing prompt is supposed to make
+        # rare. A well-flowing ralph loop completes a whole spec in ONE
+        # loop, never returning to this branch. Each occurrence here is the
+        # agent "bailing politely" — costing a process-spawn cold start
+        # (~10-30k tokens of re-read framing + handoff + tasks + plan)
+        # without any necessary boundary. Tracked via natural_end_count
+        # so operators can grep activity.log for the bail-out rate per spec
+        # and see whether the framing prompt's flow framing is working.
+        natural_end_count=$((natural_end_count + 1))
         if [[ "$task_status" == INCOMPLETE:* ]]; then
           local remaining_count=${task_status#INCOMPLETE:}
           if [[ "$task_delta" -eq 0 ]]; then
@@ -1501,24 +1543,24 @@ run_ralph_loop() {
             DEFER_COUNT=0
           fi
           if [[ $zero_progress_count -ge 3 ]]; then
-            log_activity "$workspace" "LOOP END — 🚨 STALL: $zero_progress_count consecutive natural-end iterations with zero task progress"
-            log_progress "$workspace" "**Loop ended** — 🚨 STALL: $zero_progress_count consecutive natural-end iterations with zero task progress"
-            echo "🚨 Stall detected: $zero_progress_count consecutive iterations completed zero tasks and exited naturally."
+            log_activity "$workspace" "RALPH STOP — 🚨 STALL: $zero_progress_count consecutive natural-end loops with zero task progress"
+            log_progress "$workspace" "**Ralph stopped** — 🚨 STALL: $zero_progress_count consecutive natural-end loops with zero task progress"
+            echo "🚨 Stall detected: $zero_progress_count consecutive loops completed zero tasks and exited naturally."
             echo "   The agent is silently bailing out — check .ralph/errors.log and .ralph/progress.md for why."
             _write_postmortem "$workspace" "stall-natural"
             return 1
           fi
-          log_activity "$workspace" "ITERATION $iter_label END — NATURAL ($remaining_count remaining)$task_suffix"
-          log_progress "$workspace" "**Session $iter_label ended** — Agent finished naturally ($remaining_count remaining)"
-          echo "📋 Agent finished but $remaining_count criteria remaining. Starting next iteration..."
+          log_activity "$workspace" "LOOP $loop_label END — 🛌 NATURAL END (agent ended turn; $remaining_count remaining; bail #$natural_end_count this run)$task_suffix"
+          log_progress "$workspace" "**Loop $loop_label ended** — 🛌 Agent ended turn naturally ($remaining_count remaining)"
+          echo "🛌 Agent ended its turn but $remaining_count criteria remaining. Starting another loop (cold start, ~10-30k tokens)..."
         else
-          log_activity "$workspace" "ITERATION $iter_label END — NATURAL (no checkbox tracking)$task_suffix"
-          log_progress "$workspace" "**Session $iter_label ended** — Agent finished naturally (no checkbox tracking)"
+          log_activity "$workspace" "LOOP $loop_label END — 🛌 NATURAL END (no checkbox tracking; bail #$natural_end_count this run)$task_suffix"
+          log_progress "$workspace" "**Loop $loop_label ended** — 🛌 Agent ended turn naturally (no checkbox tracking)"
           stall_count=0
           zero_progress_count=0
           DEFER_COUNT=0
         fi
-        iteration=$((iteration + 1))
+        loop_n=$((loop_n + 1))
         retry=0
         ;;
     esac
@@ -1531,13 +1573,13 @@ run_ralph_loop() {
   final_done=${final_counts%%:*}
   final_total=${final_counts##*:}
   if [[ "$final_total" -gt 0 ]]; then
-    log_activity "$workspace" "LOOP END — ⚠️ Max iterations ($MAX_ITERATIONS) reached (Tasks: $final_done/$final_total complete)"
+    log_activity "$workspace" "RALPH STOP — ⚠️ Max loops ($MAX_LOOPS) reached (Tasks: $final_done/$final_total complete; bails: $natural_end_count)"
   else
-    log_activity "$workspace" "LOOP END — ⚠️ Max iterations ($MAX_ITERATIONS) reached"
+    log_activity "$workspace" "RALPH STOP — ⚠️ Max loops ($MAX_LOOPS) reached"
   fi
-  log_progress "$workspace" "**Loop ended** — ⚠️ Max iterations ($MAX_ITERATIONS) reached"
-  echo "⚠️  Max iterations ($MAX_ITERATIONS) reached. Check progress manually."
-  _write_postmortem "$workspace" "max-iterations"
+  log_progress "$workspace" "**Ralph stopped** — ⚠️ Max loops ($MAX_LOOPS) reached"
+  echo "⚠️  Max loops ($MAX_LOOPS) reached. Check progress manually."
+  _write_postmortem "$workspace" "max-loops"
   return 1
 }
 

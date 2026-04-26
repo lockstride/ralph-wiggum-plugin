@@ -123,7 +123,7 @@ teardown() {
 
 @test "basic default timeout is 600s and final is 900s (0.3.9)" {
   # Regression test for the 0.3.9 default re-target (basic 360→600,
-  # final 600→900 — sized for agent-mode red-state iterations where
+  # final 600→900 — sized for agent-mode red-state loops where
   # failing tests slow the gate ~2× over green-path clean runs).
   # Verifies the help text, env-var docs, and live resolution all
   # agree, so a future edit to just one site can't silently diverge.
@@ -183,7 +183,7 @@ teardown() {
 # Pre-0.6.3 the gate command was wrapped in `timeout(1)`, which sends SIGTERM
 # only to its immediate child. Cypress / nuxt-dev / docker-compose
 # grandchildren survived, got reparented to PID 1, and squat on ports +
-# locks for the next iteration. A real session showed a 16-min dead zone
+# locks for the next loop. A real session showed a 16-min dead zone
 # where the next final gate couldn't acquire its lock or hit the 15-min
 # hard timeout because of orphaned containers.
 #

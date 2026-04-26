@@ -185,9 +185,9 @@ _log_activity() {
 # 0.5.4: per-label mkdir-mutex. Prevents two concurrent gate runs of the
 # same label from racing on the shared $latest_link symlink, the shared
 # coverage/ output dirs, and the long-lived nx daemon. Concurrent runs are
-# almost always orphans from a killed iteration whose deep pnpm/nx/vitest
+# almost always orphans from a killed loop whose deep pnpm/nx/vitest
 # subtree survived the loop's pgrep-based reaper — when that happens, the
-# new iteration's first gate would clobber and corrupt the orphan's output
+# new loop's first gate would clobber and corrupt the orphan's output
 # (or vice versa) and report a spurious failure. The mutex serializes the
 # two so the orphan finishes (or is reaped by the next sweep) before the
 # new run starts. mkdir is atomic across POSIX filesystems and works without
@@ -239,7 +239,7 @@ start_epoch=$(date +%s)
 # 0.3.9: Raised again. In-worktree measurements showed `pnpm basic-check`
 # takes ~4:15 on main but >6 min in a red-state worktree (failing tests
 # slow Vitest's retry-and-report path; lint/format still finish quickly).
-# Agent-mode iterations legitimately contain broken states — the default
+# Agent-mode loops legitimately contain broken states — the default
 # has to accommodate that, not the green-path best case. New defaults:
 #
 #   basic  10 min (600 s) — clean ~4 min, red-state ~6–8 min
@@ -267,7 +267,7 @@ fi
 # Pre-0.6.3 the gate command was wrapped in `timeout(1)`, which sends SIGTERM
 # only to its immediate child. For a gate like `pnpm all-check`, that child is
 # pnpm itself; the cypress / nuxt-dev / docker-compose grandchildren survive,
-# get reparented to PID 1, and squat on ports + locks for the next iteration.
+# get reparented to PID 1, and squat on ports + locks for the next loop.
 # A real production session showed a 16-minute dead zone where successive
 # final gates couldn't acquire the gate-runner lock or hit the 15-min hard
 # timeout because of orphaned containers from a prior timed-out gate.

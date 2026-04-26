@@ -297,7 +297,7 @@ PROMPT
   grep -q "do stuff" "$effective"
   grep -q "Recent activity" "$effective"
   grep -q "Specialist skills available" "$effective"
-  # First-iteration fallback message when no activity.log exists
+  # First-loop fallback message when no activity.log exists
   grep -q "no prior activity" "$effective"
 }
 

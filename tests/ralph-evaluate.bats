@@ -61,13 +61,17 @@ teardown() {
   [ "$FRESH" = "true" ]
 }
 
-@test "parse_args: -n and --iterations capture eval-iter cap" {
+@test "parse_args: -n, --loops, and --iterations all capture the eval loop cap (0.6.3 alias)" {
   EVAL_ITER_FROM_FLAG=""
   parse_args -n 8
   [ "$EVAL_ITER_FROM_FLAG" = "8" ]
 
   EVAL_ITER_FROM_FLAG=""
-  parse_args --iterations 12
+  parse_args --loops 10
+  [ "$EVAL_ITER_FROM_FLAG" = "10" ]
+
+  EVAL_ITER_FROM_FLAG=""
+  parse_args --iterations 12  # deprecated alias, still honored
   [ "$EVAL_ITER_FROM_FLAG" = "12" ]
 }
 

@@ -1,10 +1,10 @@
 # Universal Loop Guardrails
 
-These rules apply to **every** Ralph iteration regardless of prompt mode (PROMPT.md, custom prompt file, or spec mode). The mode-specific prompt below may extend them; it must not contradict them.
+These rules apply to **every** Ralph loop regardless of prompt mode (PROMPT.md, custom prompt file, or spec mode). The mode-specific prompt below may extend them; it must not contradict them.
 
 ## Command-variant spirals (general anti-pattern)
 
-When a shell command exits 0, **the output it produced is the answer.** Re-running the same script with different reporters / flags / pipes / parsers to slice that output more narrowly is the single most common form of token waste in unattended loops. Past iterations have burned 2+ minutes running 15 variants of the same coverage command, just trying to extract one number that was already in the first run's output.
+When a shell command exits 0, **the output it produced is the answer.** Re-running the same script with different reporters / flags / pipes / parsers to slice that output more narrowly is the single most common form of token waste in unattended loops. Past loops have burned 2+ minutes running 15 variants of the same coverage command, just trying to extract one number that was already in the first run's output.
 
 **Hard rules:**
 

@@ -47,7 +47,7 @@ Look for: is the current task what you've actually been working on? Sometimes yo
 Write a one-paragraph assessment to your assistant text (do not write a file). Format:
 
 ```
-**Loop progress review (T### / iter N):**
+**Loop progress review (T### / loop N):**
 
 What I've been doing: <one sentence>
 What's working: <one sentence>

@@ -62,12 +62,12 @@ Three watchdogs prevent the loop from hanging indefinitely.
 
 Emitted by the stream parser to the loop on stdout:
 
-- `ROTATE` — token threshold hit; loop kills the agent and starts a fresh iteration.
+- `ROTATE` — token threshold hit; loop kills the agent and starts a fresh loop.
 - `WARN` — approaching the threshold; agent is told to wrap up.
 - `GUTTER` — hard stuck pattern, OR agent self-signals via `<ralph>GUTTER</ralph>`. Loop ends with a postmortem bundle.
-- `RECOVER_ATTEMPT` (0.3.0+) — soft stuck pattern (5 same-cmd failures or 5 same-file thrashes) tripped for the first time this iteration. Loop kills the agent and restarts with `.ralph/recovery-hint.md` prepended.
+- `RECOVER_ATTEMPT` (0.3.0+) — soft stuck pattern (5 same-cmd failures or 5 same-file thrashes) tripped for the first time this loop. Loop kills the agent and restarts with `.ralph/recovery-hint.md` prepended.
 - `SUGGEST_SKILL` (0.6.0+) — early stuck pattern (3 same-cmd failures or 3 same-file thrashes), below the hard recovery threshold. Loop writes `.ralph/skill-suggestion` pointing at `diagnosing-stuck-tasks` and continues — same agent session, no kill.
-- `RECOVER` — emitted on every successful `git commit`. Clears any latched GUTTER and resets the per-iteration shell-failure counter.
+- `RECOVER` — emitted on every successful `git commit`. Clears any latched GUTTER and resets the per-loop shell-failure counter.
 - `COMPLETE` — agent emits `<ralph>COMPLETE</ralph>` or `<promise>ALL_TASKS_DONE</promise>`. The parser re-checks the real checkbox state before honoring.
 - `DEFER` — retryable API / network error (rate limit, 5xx, timeout). Loop waits with exponential backoff (15s → 120s + 0–25% jitter) and retries.
 - `HEARTBEAT` — synthetic liveness ping from the parser sidecar (0.5.3+). Resets the loop's `read -t` timer; never causes any agent-side action.
@@ -76,14 +76,14 @@ Emitted by the stream parser to the loop on stdout:
 
 The acceptance evaluator is a separate Ralph loop that runs *after* the main loop completes, with an independent orchestrator prompt and a sub-agent delegation pattern. The high-level "what / when" is in [the README](../README.md#spec-kit-mode); this section covers the implementation.
 
-**Orchestrator → sub-agent delegation.** The orchestrator stays lean (reads the report, picks a mode, dispatches) so context pollution across iterations stays bounded. The sub-agent does the heavy lifting (file reads, gate runs, Playwright probes, report edits). This requires the driving CLI to support sub-agent spawning (`claude` does natively; `cursor-agent` falls back to in-context orchestration).
+**Orchestrator → sub-agent delegation.** The orchestrator stays lean (reads the report, picks a mode, dispatches) so context pollution across loops stays bounded. The sub-agent does the heavy lifting (file reads, gate runs, Playwright probes, report edits). This requires the driving CLI to support sub-agent spawning (`claude` does natively; `cursor-agent` falls back to in-context orchestration).
 
-**Modes.** Per iteration, the orchestrator picks one based on the current state of `.ralph/acceptance-report.md`:
+**Modes.** Per loop, the orchestrator picks one based on the current state of `.ralph/acceptance-report.md`:
 
 - **VERIFIER** — independently checks every requirement (file reads, grep for conventions, Playwright MCP for UI behavior if available, gate runs under `eval-*` labels). Records every unmet requirement as a `[ ]` line in the report's **Gaps** section. Only the verifier may flip the report's top-level `- [ ] All acceptance criteria met and verified` checkbox to `[x]`, and only after a clean independent pass.
 - **REWORK** — works the verifier's Gaps list, resolving as many as possible and checking them off. Unresolvable ones get a `(blocked: reason)` suffix.
 
-**Exit conditions.** Cleanly when the verifier flips the top-level checkbox. Otherwise at the iteration cap (default 5; override with `--eval-iterations N` or `RALPH_EVAL_ITERATIONS`).
+**Exit conditions.** Cleanly when the verifier flips the top-level checkbox. Otherwise at the loop cap (default 5; override with `--eval-loops N` or `RALPH_EVAL_LOOPS` — the older `--eval-iterations` / `RALPH_EVAL_ITERATIONS` names are kept as deprecated aliases).
 
 **Artifacts.**
 - `.ralph/acceptance-report.md` — the report the orchestrator maintains. Git-ignored. Copy out after the loop exits if you want a persistent audit trail.
@@ -104,7 +104,7 @@ The generation:
 2. Compares to the cached hash at `<spec_dir>/.ralph-prompt-hash`.
 3. On hash match: uses the cached prompt at `<spec_dir>/ralph-prompt.md` directly.
 4. On hash miss (or no cache): invokes `claude -p --model sonnet --effort low` with the adaptation guide (`shared-references/templates/speckit-adaptation-guide.md`) plus the source skill, expecting an adapted prompt back. Caches the result + new hash. Commits both files.
-5. The cached prompt is then rendered through `_render_template`: placeholders like `{{TASK_FILE}}`, `{{GATE_RUN}}`, `{{ACTIVITY_TAIL}}` get substituted. Final output goes to `.ralph/effective-prompt.md`, which is what the agent sees on every iteration.
+5. The cached prompt is then rendered through `_render_template`: placeholders like `{{TASK_FILE}}`, `{{GATE_RUN}}`, `{{ACTIVITY_TAIL}}` get substituted. Final output goes to `.ralph/effective-prompt.md`, which is what the agent sees on every loop.
 
 Override knobs:
 - `RALPH_SKIP_GENERATION=1` — force use of the built-in fallback template.

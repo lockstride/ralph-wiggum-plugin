@@ -1,105 +1,65 @@
 ---
 name: diagnosing-stuck-tasks
-description: Switches the Ralph agent into exploratory diagnosis mode when the same gate keeps failing or the same task has been in flight too long. Use when the loop emits a SUGGEST_SKILL signal pointing here, when the same gate-run.sh command has failed 3+ times, when a single task has consumed more than 20 minutes without a commit, or when the agent is otherwise about to spin in a fix-then-fail loop. Suspends the procedural execute-gate-commit cycle, reads the full failure log, questions whether the test itself is wrong, lists 2-3 alternative root causes, runs layer-bypassing diagnostic commands (curl / playwright), then either commits to a new approach or emits GUTTER. Writes findings to `.ralph/diagnosis.md` for the next iteration.
+description: Permission to step out of the procedural execute-gate-commit cycle when the loop's normal flow isn't getting unstuck. Use when the loop emits a SUGGEST_SKILL signal pointing here, when the same gate has failed multiple times, when a task has been in flight much longer than usual without progress, or when you notice yourself about to attempt the same fix-then-fail cycle a third time. Suspends the procedural rules so you can investigate however the situation demands. Writes findings to `.ralph/diagnosis.md` so the next loop benefits from what you learned.
 ---
 
 # Diagnosing stuck tasks
 
-You are switching cognitive postures: from "execute the next prescribed step" to "step back and investigate." The procedural rules of the main loop (one gate per task, commit after every task, do not end your turn) are temporarily relaxed so you can reason about the problem itself.
+You are switching cognitive postures: from "execute the next prescribed step" to "understand why this isn't working." The procedural rules of the main loop are temporarily relaxed.
 
-## When to invoke
+## When this fires
 
-The loop suggests this skill when one of the following triggers fires:
+The loop suggests this skill when:
 
-- Same `gate-run.sh` command has failed 3+ times in this iteration
-- Same file has been rewritten 5+ times within 10 minutes (file thrash)
-- The current task has been in flight more than 20 minutes with no commit
-- You yourself notice you've made the same edit-then-fail cycle 2-3 times
+- The same `gate-run.sh` command has failed 3+ times in this loop
+- The same file has been rewritten 5+ times within 10 minutes
+- The current task has been in flight much longer than its peers without a commit
+- You notice yourself about to make the same edit-then-fail cycle a third time
 
-The loop will write `.ralph/skill-suggestion` with the trigger context. Read it as your first action.
+The loop writes `.ralph/skill-suggestion` with the trigger context. Read it as your first action.
 
-## Diagnosis workflow
+## What changes
 
-Copy this checklist and check off items as you go:
+The procedural rules don't apply in this mode. Specifically:
 
-```
-Diagnosis Progress:
-- [ ] Step 1: Read the suggestion context and the full latest gate log
-- [ ] Step 2: State the problem in one sentence
-- [ ] Step 3: List 2-3 candidate root causes (not just the obvious one)
-- [ ] Step 4: Run layer-bypassing diagnostics for each candidate
-- [ ] Step 5: Decide: pick the right candidate, or escalate to GUTTER
-- [ ] Step 6: Write findings to .ralph/diagnosis.md
-```
+- You can run things other than `{{GATE_RUN}}` to understand the failure faster — `curl`, `lsof`, `docker ps`, direct script execution, whatever answers the question.
+- You can read screenshots, network logs, container state, env files — anything the gate wrapper isn't surfacing.
+- You can edit env vars, spin up subsystems manually, bypass parts of the test infrastructure to isolate where the failure actually lives.
+- You don't commit during diagnosis. Diagnostic edits are throwaway. The fix comes after you understand.
+- You take as much time as you need. The 3-try gate budget doesn't apply — you're not retrying, you're investigating.
 
-### Step 1: Read context
+The intent is **understanding**, not execution. Once you understand, the actual fix is usually small and the procedural cycle resumes naturally.
 
-- `Read .ralph/skill-suggestion` if it exists — the loop's reason for invoking you.
-- `Read .ralph/gates/<label>-latest.log` **in full** (not tail). The bounded summary you saw before is no longer enough; you need the surrounding context.
-- `tail -n 50 .ralph/activity.log` — your own recent actions. Look for repeated patterns.
+## Useful instincts
 
-### Step 2: State the problem in one sentence
+A few things that often pay off in stuck cases — not a procedure to follow, just patterns worth knowing:
 
-Write a one-sentence problem statement. Examples:
-- "Cypress integration test asserts redirect away from /sign-in but the URL stays on /sign-in for 30s."
-- "Vitest unit test for `RegisterHandler` expects `findByEmail` to be called but it isn't."
-- "Build fails because `@nx/eslint-plugin` 22.7.0 doesn't export `flatConfig`."
+- **The symptom is rarely the cause.** A test that asserts "URL not /sign-in" might be failing because of a session cookie, a workspace lookup, a downstream middleware bounce — none of which are in the test file. Trace the actual call graph instead of staring at the assertion.
+- **Run the smallest thing that reproduces.** If the full gate takes 10 min and a `curl` against the failing endpoint takes 2 sec, prefer the `curl`. If a single test file isolates the bug, run just that file. Don't iterate against the slowest possible reproduction.
+- **The screenshot is often the answer.** Cypress / Playwright write screenshots to `<project>/cypress/screenshots/<spec>/<test> (failed).png`. The image typically shows the URL bar, the network panel, and the page state in one frame. You can `Read` images directly.
+- **Question the test, not just the code.** Maybe the assertion is wrong. Maybe the test depends on stale fixtures. Maybe the test was written before a refactor. The fix isn't always in production code.
+- **Ask whether the right layer is failing.** A failing browser test could be a frontend bug, a server-route bug, a proxy bug, a cookie bug, an infra bug, or a Cypress bug. Layer-bypassing diagnostics (curl past the browser, hit the API directly, check the cookie shape, look at the proxy headers) collapse this fast.
+- **Check what changed recently.** `git log --oneline -20` and `git show <sha>` for anything that touched the failing layer. The bug usually lives in a recent commit.
 
-If you can't state it cleanly in one sentence, you're confused about the failure — read the log again before continuing.
+## When to escalate
 
-### Step 3: List 2-3 candidate root causes
+If you've genuinely investigated and you can't isolate the cause, or the fix is too large for the current task's scope, emit `<ralph>GUTTER</ralph>`. GUTTER is escalation, not failure — the human has fresh eyes and can decide to fix the test, defer the task, or supply context. **Don't loop back into "let me try one more fix"** — that's the pattern this skill exists to break.
 
-The instinct after a gate failure is "fix the production code." That's one candidate. List at least two more. Common alternatives:
+## Leave a trail
 
-- **The test is wrong.** Maybe it asserts behavior that has changed. Maybe it depends on stale fixtures.
-- **The wrong layer.** A failing browser test might be a server-route bug, a proxy bug, a cookie bug, OR a Cypress runner bug — not a frontend bug.
-- **An environmental issue.** Cache state, daemon state, dirty fixtures, missing env var, port conflict.
-- **An upstream change.** Did dependencies bump recently? Did a refactor touch a shared module?
-
-Force yourself to write all 2-3 candidates BEFORE picking one. Otherwise you'll latch onto the first plausible explanation.
-
-### Step 4: Run layer-bypassing diagnostics
-
-For each candidate, run **one** diagnostic that would distinguish it from the others. Tools you have:
-
-- **`curl`** — bypass Cypress/browser entirely; talk directly to the failing endpoint. If `curl` succeeds against the same URL, the bug is in the browser/test layer, not the server.
-- **`mcp__playwright__*`** (if available) — drive the browser interactively. Open the failing page, submit the form, inspect network tab and DOM. Often diagnoses proxy/cookie issues in seconds.
-- **`Grep` against recent commits** — `git log --oneline -20`, then `git show <sha>` for anything that touched the failing layer.
-- **Coverage / uncovered-branch reports** — only if you have a specific hypothesis about untested code; don't fish.
-- **`Read` the actual test file in full** — does the assertion match what you think it does?
-
-**Do not commit anything during diagnosis.** Diagnostics are throwaway; you're gathering evidence, not landing a fix.
-
-### Step 5: Decide
-
-After diagnostics, one of three outcomes:
-
-1. **You found the right layer and have a small fix.** Exit diagnosis mode, return to the main loop's procedural cycle: edit → gate → commit. Mention in your commit message what diagnosis revealed.
-2. **The fix is large or touches scope outside the current task.** Write a finding to `.ralph/diagnosis.md` describing what's needed, then emit `<ralph>GUTTER</ralph>`. The human will see the diagnosis and decide.
-3. **You can't isolate the cause after honest diagnostics.** Same outcome: write what you learned to `.ralph/diagnosis.md`, emit `<ralph>GUTTER</ralph>`. **Don't loop back into "let me try one more fix"** — that's the pattern this skill exists to break.
-
-GUTTER is the right answer ~50% of the time you reach this skill. It is **not failure** — it's escalation. The human has fresh eyes and can decide to (a) fix the test, (b) defer the task, (c) provide more context for the next iteration.
-
-### Step 6: Write `.ralph/diagnosis.md`
-
-Whether you continue or escalate, write findings:
+Whether you continue with a fix or escalate, write what you learned to `.ralph/diagnosis.md`. Keep it short — a few bullets the next loop (or the next operator) can read in 30 seconds:
 
 ```markdown
 # Diagnosis: <task ID> at <YYYY-MM-DD HH:MM>
 
-## Problem
+## What was failing
 <one sentence>
 
-## Candidates considered
-1. <candidate> — diagnostic: <what you ran> — result: <ruled in/out>
-2. <candidate> — diagnostic: <what you ran> — result: <ruled in/out>
-3. <candidate> — diagnostic: <what you ran> — result: <ruled in/out>
+## What I learned
+<2-4 bullets about the actual root cause / the layers you ruled out>
 
-## Conclusion
-<one of: "Continuing with candidate N — small fix" | "Escalating GUTTER — needs human decision" | "Escalating GUTTER — could not isolate">
-
-## Notes for next iteration
-<2-3 bullets max. What the next attempt should know.>
+## Where I left it
+<one of: "Small fix in progress, see commit X" | "GUTTER — needs human decision because Y" | "GUTTER — could not isolate after investigating A, B, C">
 ```
 
-The next iteration will read this on startup and avoid re-walking the same diagnostic ground.
+The next loop reads this on startup and skips the diagnostic ground you already covered.

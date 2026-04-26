@@ -6,7 +6,9 @@ A CLI-agnostic Ralph autonomous-development loop. Drives either the [Claude Code
 
 ## What it is
 
-The Ralph loop is a **shell script you run in a terminal**. It spawns the agent CLI as a subprocess, reads its stream-json output, tracks tokens, rotates context when the window fills, and keeps going until the task is done or max iterations is reached. The loop is editor-agnostic: the editor you have open is irrelevant.
+The Ralph loop is a **shell script you run in a terminal**. It spawns the agent CLI as a subprocess, reads its stream-json output, tracks tokens, rotates context when the window fills, and keeps going until the task is done or the safety cap on agent respawns is reached. The loop is editor-agnostic: the editor you have open is irrelevant.
+
+A healthy ralph **loop** runs as one continuous agent process — it commits as it goes and keeps moving until a real stop condition fires. It only respawns the agent (looping) on hard signals: context-window pressure, a genuine stuck pattern, a rate-limit backoff. Looping is fine when needed but flow is much better — a single small spec usually completes in one loop.
 
 The Claude Code plugin wrapping (slash commands, plugin manifest, **and the cognitive-mode skills introduced in 0.6.0**) is a Claude Code-only enrichment. **For Claude Code users, install as a plugin** — it unlocks the specialist skills (`running-gates`, `diagnosing-stuck-tasks`, `reviewing-loop-progress`) that the loop suggests when stuck patterns fire. Standalone-script users still get the full loop infrastructure but the agent runs without those specialist prompts.
 
@@ -63,7 +65,7 @@ git clone https://github.com/lockstride/ralph-wiggum-plugin.git ~/ralph-wiggum-p
 ~/ralph-wiggum-plugin/shared-scripts/ralph-setup.sh /path/to/your/repo
 ```
 
-### Smoke test a single iteration
+### Smoke test a single loop
 
 ```
 ralph-once --cli claude --spec
@@ -81,7 +83,7 @@ Walks you through:
 1. CLI (`claude` or `cursor-agent`)
 2. Model
 3. Prompt source (`PROMPT.md` / custom file / Spec Kit spec dir)
-4. Max iterations
+4. Max loops (safety cap; 1 is the expected number for a well-flowing run)
 
 ### Scripted / unattended
 
@@ -104,11 +106,11 @@ ralph --cli claude --spec 20260131-example-feature --branch feature/example --pr
 |---|---|---|
 | `--cli <claude\|cursor-agent>` | Which agent CLI to drive | interactive picker (pre-selects `claude`) |
 | `-m, --model <id>` | Model name | interactive picker (pre-selects `opus` for Claude, `composer-2` for Cursor) |
-| `-n, --iterations N` | Max iterations | interactive picker (pre-fills `20`) |
+| `-n, --loops N` | Max loops (safety cap; `--iterations` is the deprecated alias) | interactive picker (pre-fills `20`) |
 | `--branch <name>` | Work on a named branch | current branch |
 | `--pr` | Open a PR when complete; requires `--branch` | off |
 | `--evaluate` | Chain acceptance evaluation loop after main loop completes (env: `RALPH_CHAIN_EVALUATE=1`) | off |
-| `--eval-iterations N` | Cap for the chained eval loop | 5 |
+| `--eval-loops N` | Cap for the chained eval loop (`--eval-iterations` is the deprecated alias) | 5 |
 | `-v, --version` | Print version and exit | — |
 | `-h, --help` | Show help | — |
 
@@ -130,12 +132,12 @@ After the loop starts, Ralph writes to `.ralph/` (git-ignored automatically):
 - `guardrails.md` — lessons learned from past failures (the agent reads this)
 - `errors.log` — failures detected by the stream parser
 - `activity.log` — real-time token usage + tool calls
-- `effective-prompt.md` — the rendered prompt fed to the agent every iteration
-- `handoff.md` — navigation breadcrumb between iterations
+- `effective-prompt.md` — the rendered prompt fed to the agent at each loop start
+- `handoff.md` — navigation breadcrumb between loops (used when the loop must respawn)
 - `skill-suggestion` — present only when the loop has suggested the agent invoke a specific skill
 - `diagnosis.md` — written by the `diagnosing-stuck-tasks` skill when escalating
 
-Your commits are your durable memory. Ralph commits frequently during each iteration so any involuntary kill is recoverable from the last commit.
+Your commits are your durable memory. Ralph commits frequently during each loop so any involuntary kill is recoverable from the last commit.
 
 ## Spec Kit mode
 
@@ -161,7 +163,7 @@ ralph-evaluate --spec            # against newest spec dir
 ralph-evaluate --prompt --fresh  # wipe prior report
 
 # Chain after a main loop
-ralph --cli claude --spec --evaluate --eval-iterations 5
+ralph --cli claude --spec --evaluate --eval-loops 5
 ```
 
 For mode mechanics, artifacts, and limitations, see [docs/development.md → Acceptance evaluation loop](docs/development.md#acceptance-evaluation-loop--internals).

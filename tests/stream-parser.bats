@@ -158,7 +158,7 @@ tool_result_json() {
   ! echo "$output" | grep -q "^RECOVER_ATTEMPT$"
 }
 
-@test "soft skill suggestion is not re-emitted on subsequent failures in same iteration (0.6.0)" {
+@test "soft skill suggestion is not re-emitted on subsequent failures in same loop (0.6.0)" {
   # Once we've suggested `diagnosing-stuck-tasks` for shell-fails, hitting
   # the threshold again on the same command shouldn't re-emit a duplicate
   # suggestion every turn. Hard recovery still fires at the upper threshold.
@@ -197,16 +197,16 @@ tool_result_json() {
   fi
   # Hint file written with command + exit code
   [ -f "$MOCK_WORKSPACE/.ralph/recovery-hint.md" ]
-  grep -q "Recovery Hint from Prior Iteration" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
+  grep -q "Recovery Hint from Prior Loop" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
   grep -q "pnpm basic-check" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
   grep -q "exit code (\`1\`)" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
   # Errors/activity log mention recoverable pattern
   grep -q "RECOVERABLE STUCK PATTERN" "$MOCK_WORKSPACE/.ralph/errors.log"
 }
 
-@test "second stuck pattern in same iteration falls through to GUTTER (0.3.0)" {
+@test "second stuck pattern in same loop falls through to GUTTER (0.3.0)" {
   # First failure 2x → RECOVER_ATTEMPT (consumes the recovery slot)
-  # Second failure 2x (different command, same iteration) → GUTTER
+  # Second failure 2x (different command, same loop) → GUTTER
   local events=""
   events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm a")
   events+=$'\n'
@@ -222,7 +222,7 @@ tool_result_json() {
   echo "$output" | grep -q "RECOVER_ATTEMPT"
   echo "$output" | grep -q "^GUTTER$"
   # Errors log records the budget-exhausted GUTTER reason
-  grep -q "recovery already used this iteration" "$MOCK_WORKSPACE/.ralph/errors.log"
+  grep -q "recovery already used this loop" "$MOCK_WORKSPACE/.ralph/errors.log"
 }
 
 @test "first file thrash emits RECOVER_ATTEMPT (not GUTTER) and writes hint (0.3.0)" {
@@ -240,12 +240,12 @@ tool_result_json() {
   fi
   # Hint file written with thrashed path
   [ -f "$MOCK_WORKSPACE/.ralph/recovery-hint.md" ]
-  grep -q "Recovery Hint from Prior Iteration" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
+  grep -q "Recovery Hint from Prior Loop" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
   grep -q "/tmp/same-file.ts" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
   grep -q "5 times within 10 minutes" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
 }
 
-@test "thrash followed by repeat shell-fail in same iteration: RECOVER_ATTEMPT then GUTTER (0.3.0)" {
+@test "thrash followed by repeat shell-fail in same loop: RECOVER_ATTEMPT then GUTTER (0.3.0)" {
   # Thrash consumes the recovery slot; subsequent stuck shell-fail goes to GUTTER.
   local events=""
   for i in $(seq 1 5); do
@@ -299,7 +299,7 @@ tool_result_json() {
   fi
 }
 
-@test "stall SUGGEST_SKILL is deduplicated within an iteration (0.6.1)" {
+@test "stall SUGGEST_SKILL is deduplicated within a loop (0.6.1)" {
   # If the agent keeps reading after the stall threshold trips, we don't
   # want to keep re-emitting the same suggestion every 40 ops. The
   # SUGGESTED_SKILLS_FILE marker matches the dedup behavior of the
@@ -366,8 +366,8 @@ tool_result_json() {
   # Spec-Kit prompt encourages: `git add <paths> && git commit -m "..."`
   # The pre-0.5.4 regex `^git[[:space:]]+commit` missed this because the
   # cmd starts with `git add`, so reset_failure_counters_on_task_boundary
-  # never fired and the per-iteration shell-failure counter accumulated
-  # across an entire iteration's worth of successful commits.
+  # never fired and the per-loop shell-failure counter accumulated
+  # across an entire loop's worth of successful commits.
   local cmd='git add foo.ts && git commit -m "feat: add foo (T001)"'
   local event
   event=$(printf '{"kind":"tool_result","name":"Shell","bytes":50,"lines":2,"exit_code":0,"path":"","cmd":%s}\n' \

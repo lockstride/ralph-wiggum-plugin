@@ -1,5 +1,5 @@
 #!/bin/bash
-# Ralph Wiggum: Iteration status snapshot
+# Ralph Wiggum: Loop status snapshot
 #
 # Prints a one-screen summary of the current Ralph loop's state for an
 # operator who is checking in. Designed to answer the question "what is
@@ -13,11 +13,11 @@
 # All output is plain text on stdout. Exit code is always 0 unless the
 # given workspace does not exist.
 #
-# 0.4.1 layout: sections separated by uppercase labels + blank lines; iteration
-# derived from activity.log (the loop's internal counter is not persisted to
-# .ralph/.iteration); gate history collapsed to start+end pairs; recent
-# activity filtered to meaningful events (commits, gates, iteration
-# transitions) rather than every Read/TOKENS line.
+# 0.4.1 layout: sections separated by uppercase labels + blank lines; loop
+# derived from activity.log (the driver's internal counter is not persisted
+# to .ralph/.loop); gate history collapsed to start+end pairs; recent
+# activity filtered to meaningful events (commits, gates, loop transitions)
+# rather than every Read/TOKENS line.
 
 set -euo pipefail
 
@@ -60,9 +60,11 @@ fi
 # Helpers
 # -----------------------------------------------------------------------------
 
-# Find the byte offset of the most recent ITERATION START line. Everything
-# after that line is "this session." Returns "" if no ITERATION START found,
-# which callers interpret as "whole log."
+# Find the byte offset of the most recent LOOP START line (or the
+# pre-0.6.3 ITERATION START line, for backward compat with workspaces
+# that still have older activity log entries). Everything after that
+# line is "this session." Returns "" if no marker is found, which
+# callers interpret as "whole log."
 _find_session_start() {
   if [[ ! -f "$activity_log" ]]; then
     echo ""
@@ -71,7 +73,7 @@ _find_session_start() {
   # awk handles the file in one pass and is faster than grep + cut. We want
   # the line number of the most recent match; awk scans forward then prints
   # at END so no post-processing is needed.
-  awk '/ITERATION [0-9.]+ START/ { line=NR } END { if (line) print line }' \
+  awk '/(LOOP|ITERATION) [0-9.]+ START/ { line=NR } END { if (line) print line }' \
     "$activity_log"
 }
 
@@ -169,7 +171,7 @@ if [[ -f "$task_file_path" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# STATUS — the headline a glance should give: running? iteration? progress?
+# STATUS — the headline a glance should give: running? loop? progress?
 # -----------------------------------------------------------------------------
 
 _section 'STATUS'
@@ -197,15 +199,16 @@ else
   printf '  driver:    ○ not running\n'
 fi
 
-# Iteration + retry — read from activity.log since the loop's internal
-# counter isn't persisted (known gap, captured in 0.4.1 TODO).
+# Loop number + retry — read from activity.log since the driver's
+# internal counter isn't persisted (known gap, captured in 0.4.1 TODO).
+# Matches both LOOP (0.6.3+) and pre-0.6.3 ITERATION markers.
 if [[ -f "$activity_log" ]]; then
-  _last_iter=$(awk '/ITERATION [0-9.]+ START/ { m=$0 } END { if (m) print m }' "$activity_log" |
-    sed -E 's/.*ITERATION ([0-9.]+) START.*/\1/')
-  if [[ -n "$_last_iter" ]]; then
-    printf '  iteration: %s\n' "$_last_iter"
+  _last_loop=$(awk '/(LOOP|ITERATION) [0-9.]+ START/ { m=$0 } END { if (m) print m }' "$activity_log" |
+    sed -E 's/.*(LOOP|ITERATION) ([0-9.]+) START.*/\2/')
+  if [[ -n "$_last_loop" ]]; then
+    printf '  loop:      %s\n' "$_last_loop"
   else
-    printf '  iteration: (none started yet)\n'
+    printf '  loop:      (none started yet)\n'
   fi
 fi
 
@@ -241,7 +244,7 @@ fi
 
 # -----------------------------------------------------------------------------
 # GATES — collapse start+end pairs into one pass/fail line per run,
-#         session-scoped so the count reflects THIS iteration only.
+#         session-scoped so the count reflects THIS loop only.
 # -----------------------------------------------------------------------------
 
 session_start_line=$(_find_session_start)
@@ -293,9 +296,9 @@ if [[ -f "$activity_log" ]]; then
   else
     # No gate events yet in this session.
     if [[ -n "$session_start_line" ]]; then
-      echo "  (no gates run yet in this iteration)"
+      echo "  (no gates run yet in this loop)"
     else
-      echo "  (no ITERATION START marker found; session scoping unavailable)"
+      echo "  (no LOOP/ITERATION START marker found; session scoping unavailable)"
     fi
   fi
 fi
@@ -322,7 +325,7 @@ if git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 # -----------------------------------------------------------------------------
-# RECENT — meaningful events only (commits, gate starts/ends, iteration
+# RECENT — meaningful events only (commits, gate starts/ends, loop
 #          transitions, parser signals). Skips TOKENS/READ noise that
 #          dominates activity.log and makes state changes hard to spot.
 # -----------------------------------------------------------------------------
@@ -332,7 +335,7 @@ if [[ -f "$activity_log" ]]; then
   # Pattern list kept narrow on purpose — every pattern here is either a
   # state transition or a decision point. Expand only if it would answer
   # "what is the loop doing right now?" without re-reading the raw log.
-  _recent=$(grep -E 'COMMIT|🧪 GATE|ITERATION [0-9.]+ (START|END)|PARSER EXIT|HEARTBEAT TIMEOUT|RECOVER_ATTEMPT|GUTTER|DEFERRED|ORPHAN|PIPELINE DRAIN|STOP_REQUESTED|ROTATE' \
+  _recent=$(grep -E 'COMMIT|🧪 GATE|(LOOP|ITERATION) [0-9.]+ (START|END)|PARSER EXIT|HEARTBEAT TIMEOUT|RECOVER_ATTEMPT|GUTTER|DEFERRED|ORPHAN|PIPELINE DRAIN|STOP_REQUESTED|ROTATE|RALPH STOP|🛌 NATURAL END' \
     "$activity_log" 2>/dev/null |
     grep -vE 'test -f .*stop-requested|cat .*handoff\.md|READ .*handoff\.md' |
     tail -8 || true)
@@ -346,11 +349,11 @@ if [[ -f "$activity_log" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# HANDOFF — navigation note the next iteration will read
+# HANDOFF — navigation note the next loop will read
 # -----------------------------------------------------------------------------
 
 if [[ -f "$handoff" ]]; then
-  _section 'HANDOFF (navigation note from prior iteration)'
+  _section 'HANDOFF (navigation note from prior loop)'
   sed 's/^/  /' "$handoff"
 fi
 
