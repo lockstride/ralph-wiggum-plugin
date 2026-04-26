@@ -178,6 +178,104 @@ teardown() {
 }
 
 # -----------------------------------------------------------------------------
+# 0.6.3: Subtree-kill on timeout
+#
+# Pre-0.6.3 the gate command was wrapped in `timeout(1)`, which sends SIGTERM
+# only to its immediate child. Cypress / nuxt-dev / docker-compose
+# grandchildren survived, got reparented to PID 1, and squat on ports +
+# locks for the next iteration. A real session showed a 16-min dead zone
+# where the next final gate couldn't acquire its lock or hit the 15-min
+# hard timeout because of orphaned containers.
+#
+# 0.6.3 puts the gate in its own process group via `set -m`, runs a watchdog
+# that signals the entire pgroup on timeout (SIGTERM, then SIGKILL after
+# RALPH_GATE_KILL_GRACE), and a final belt-and-braces SIGKILL of the pgroup
+# at the end. These tests verify the subtree-kill semantics.
+# -----------------------------------------------------------------------------
+
+@test "timeout kills orphaned grandchild processes (0.6.3)" {
+  # Spawn a script that backgrounds a long-sleeping grandchild and writes
+  # its PID to disk, then sleeps in the foreground past the gate timeout.
+  # Pre-0.6.3 timeout(1) only signaled the foreground process, so the
+  # backgrounded sleep would survive as an orphan reparented to PID 1.
+  local pidfile="$MOCK_WORKSPACE/orphan.pid"
+  local script="$MOCK_WORKSPACE/spawn-orphan.sh"
+  cat > "$script" <<EOF
+#!/bin/bash
+sleep 30 &
+echo \$! > "$pidfile"
+sleep 30
+EOF
+  chmod +x "$script"
+
+  RALPH_GATE_TIMEOUT=2 RALPH_GATE_KILL_GRACE=2 \
+    run bash "$SCRIPTS_DIR/gate-run.sh" basic "$script"
+  [ "$status" -eq 124 ]
+
+  # Pidfile must exist (script ran and backgrounded the orphan).
+  [ -f "$pidfile" ]
+  local orphan_pid
+  orphan_pid=$(cat "$pidfile")
+  [ -n "$orphan_pid" ]
+
+  # The watchdog signals the entire pgroup on timeout. The grandchild MUST
+  # be dead. (We allow a brief settling window for the kernel to reap, but
+  # the SIGKILL escalation should land within RALPH_GATE_KILL_GRACE+1s.)
+  local i
+  for i in 1 2 3 4 5; do
+    kill -0 "$orphan_pid" 2>/dev/null || break
+    sleep 1
+  done
+
+  if kill -0 "$orphan_pid" 2>/dev/null; then
+    # Cleanup so this test doesn't leak if it fails — we still want to fail.
+    kill -9 "$orphan_pid" 2>/dev/null
+    fail "Orphan grandchild PID $orphan_pid survived gate timeout (subtree-kill regression)"
+  fi
+}
+
+@test "watchdog escalates from SIGTERM to SIGKILL after grace period (0.6.3)" {
+  # Spawn a script that ignores SIGTERM but eventually dies to SIGKILL.
+  # Verifies the two-tier kill: SIGTERM first (so well-behaved children get
+  # to clean up), then SIGKILL after RALPH_GATE_KILL_GRACE.
+  local script="$MOCK_WORKSPACE/sigterm-resistant.sh"
+  cat > "$script" <<'EOF'
+#!/bin/bash
+trap '' TERM
+sleep 30
+EOF
+  chmod +x "$script"
+
+  local start end elapsed
+  start=$(date +%s)
+  RALPH_GATE_TIMEOUT=1 RALPH_GATE_KILL_GRACE=2 \
+    run bash "$SCRIPTS_DIR/gate-run.sh" basic "$script"
+  end=$(date +%s)
+  elapsed=$((end - start))
+
+  [ "$status" -eq 124 ]
+  # Should die within ~timeout + grace + small overhead. Ceiling 8s gives
+  # plenty of headroom for the bats fixture overhead without being so
+  # generous that a regression to "wait for full sleep 30" passes.
+  [ "$elapsed" -lt 8 ]
+}
+
+@test "natural gate completion does not invoke subtree-kill (0.6.3)" {
+  # The watchdog should exit cleanly when the gate finishes normally —
+  # NOT escalate to SIGKILL on a successful run. Verifies that the
+  # belt-and-braces final pgroup-kill doesn't break clean exits.
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic bash -c "echo hello; exit 0"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hello"* ]]
+}
+
+@test "RALPH_GATE_KILL_GRACE default is 10s (0.6.3)" {
+  # Documented default; regression test so a future edit to the default
+  # doesn't silently change observable wait time on timeout.
+  grep -q 'RALPH_GATE_KILL_GRACE.*:-10' "$SCRIPTS_DIR/gate-run.sh"
+}
+
+# -----------------------------------------------------------------------------
 # 0.6.1: Long-gate single-failure → SUGGEST_SKILL (skill-suggestion file)
 #
 # Pre-0.6.1 the only stuck-pattern escalation was the stream-parser's 3-strike

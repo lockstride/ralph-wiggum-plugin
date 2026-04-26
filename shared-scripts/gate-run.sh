@@ -262,30 +262,127 @@ else
   gate_timeout="${RALPH_BASIC_GATE_TIMEOUT:-600}"
 fi
 
-# Resolve the timeout command portably (GNU timeout on Linux,
-# gtimeout via coreutils on macOS, or a shell-based fallback).
-_timeout_cmd=""
-if command -v timeout >/dev/null 2>&1; then
-  _timeout_cmd="timeout"
-elif command -v gtimeout >/dev/null 2>&1; then
-  _timeout_cmd="gtimeout"
-fi
+# 0.6.3: subtree-aware gate execution.
+#
+# Pre-0.6.3 the gate command was wrapped in `timeout(1)`, which sends SIGTERM
+# only to its immediate child. For a gate like `pnpm all-check`, that child is
+# pnpm itself; the cypress / nuxt-dev / docker-compose grandchildren survive,
+# get reparented to PID 1, and squat on ports + locks for the next iteration.
+# A real production session showed a 16-minute dead zone where successive
+# final gates couldn't acquire the gate-runner lock or hit the 15-min hard
+# timeout because of orphaned containers from a prior timed-out gate.
+#
+# 0.6.3 puts the gate command in its own process group (via `set -m` job
+# control, which is portable across bash 3.2 and bash 5.x) and runs a
+# watchdog that signals the entire group on timeout — first SIGTERM, then
+# SIGKILL after a grace period. A belt-and-braces final SIGKILL of the
+# group catches anything left over even when the gate exited normally
+# (occasional cypress lingering after a clean run, etc.).
+#
+# Output is plumbed through a fifo so we can keep the existing
+# stdout-and-log-file behavior without putting the gate in a pipeline (which
+# would prevent us from capturing its PID/PGID for subtree-kill).
+RALPH_GATE_KILL_GRACE="${RALPH_GATE_KILL_GRACE:-10}"
 
-# Execute the command with stderr merged into stdout, tee into the log
-# file (append, since we already wrote the header), and let pipefail
-# surface the real command exit code via PIPESTATUS.
-# The timeout wrapper returns 124 when the command is killed.
-# If neither timeout nor gtimeout is available, run without a timeout
-# (degraded but functional — install coreutils for full support).
+#
+# Caller MUST disable `set -e` around the call site (the function wraps a
+# user command that may legitimately exit non-zero, including SIGTERM/SIGKILL
+# from the watchdog). Function does NOT toggle `set -e` itself — function-
+# scoped set flag changes leak to the parent shell, and aborting the rest of
+# gate-run.sh on a normal gate-failure exit was the original bug we shipped
+# in the first 0.6.3 draft.
+_run_with_subtree_timeout() {
+  local timeout_sec="$1" log="$2"
+  shift 2
+
+  local fifo
+  fifo=$(mktemp -u "${TMPDIR:-/tmp}/gate-run.fifo.$$.XXXXXX")
+  if ! mkfifo "$fifo" 2>/dev/null; then
+    # FIFO unavailable (rare; some sandboxes). Fall back to the pre-0.6.3
+    # path so the gate still runs — we just lose subtree-kill on timeout.
+    set -o pipefail
+    "$@" 2>&1 | tee -a "$log"
+    local fb_status=${PIPESTATUS[0]}
+    set +o pipefail
+    return "$fb_status"
+  fi
+
+  # tee reads the fifo and fans out to log + stdout (matches pre-0.6.3
+  # behavior). Backgrounded so it's ready before the gate writes.
+  tee -a "$log" <"$fifo" &
+  local tee_pid=$!
+
+  # Run the gate in its own process group. `set -m` (job control) makes the
+  # backgrounded subshell its own pgroup leader, so the subshell's PID == PGID
+  # and `kill -SIG -PID` signals the whole group.
+  set -m
+  ("$@" >"$fifo" 2>&1) &
+  local cmd_pid=$!
+  set +m
+
+  # Watchdog: poll cmd_pid; on timeout signal the pgroup. SIGTERM first to
+  # let test runners flush coverage / drop containers cleanly, then SIGKILL
+  # after the grace period for anything that ignored TERM (cypress's
+  # electron sub-process is the usual culprit).
+  #
+  # NOTE: variables here use plain assignment (no `local`) — `local` is a
+  # function builtin and emits "local: can only be used in a function" when
+  # called from a subshell. The error is non-fatal under set +e but leaves
+  # the loop variable unset, which silently breaks the [[ -lt ]] test.
+  (
+    elapsed=0
+    while [[ $elapsed -lt $timeout_sec ]]; do
+      kill -0 "$cmd_pid" 2>/dev/null || exit 0
+      sleep 1
+      elapsed=$((elapsed + 1))
+    done
+    kill -TERM -- "-$cmd_pid" 2>/dev/null || true
+    grace=0
+    while [[ $grace -lt $RALPH_GATE_KILL_GRACE ]]; do
+      kill -0 "$cmd_pid" 2>/dev/null || exit 0
+      sleep 1
+      grace=$((grace + 1))
+    done
+    kill -KILL -- "-$cmd_pid" 2>/dev/null || true
+  ) &
+  local watchdog_pid=$!
+
+  wait "$cmd_pid"
+  local rc=$?
+
+  # Tear down the watchdog if it's still polling.
+  if kill -0 "$watchdog_pid" 2>/dev/null; then
+    kill "$watchdog_pid" 2>/dev/null || true
+  fi
+  wait "$watchdog_pid" 2>/dev/null || true
+
+  # The gate's subshell exit closes the fifo writer, so tee sees EOF and
+  # exits naturally. Earlier drafts of this code tried to "drain" the fifo
+  # via `exec 9>"$fifo"; exec 9>&-` — that DEADLOCKS in the common case
+  # where tee already exited (no reader → opening for write blocks
+  # indefinitely). Just wait for tee.
+  wait "$tee_pid" 2>/dev/null || true
+  rm -f "$fifo"
+
+  # Belt-and-braces: kill anything left in the gate's pgroup. Idempotent;
+  # a no-op if the wait above completed for the right reason. Catches the
+  # rare case where the gate's primary process exited but spawned-and-orphaned
+  # grandchildren are still running (cypress browser, vitest workers, etc.).
+  kill -KILL -- "-$cmd_pid" 2>/dev/null || true
+
+  # Normalize signal-death exit codes to the conventional "timeout" exit (124)
+  # so the rest of the script (and existing tests) treat this as a timeout
+  # regardless of whether SIGTERM (143) or SIGKILL (137) finally took the
+  # gate down. Matches GNU timeout(1)'s behavior.
+  if [[ $rc -eq 143 ]] || [[ $rc -eq 137 ]]; then
+    rc=124
+  fi
+  return "$rc"
+}
+
 set +e
-set -o pipefail
-if [[ -n "$_timeout_cmd" ]]; then
-  "$_timeout_cmd" "$gate_timeout" "$@" 2>&1 | tee -a "$log_file"
-else
-  "$@" 2>&1 | tee -a "$log_file"
-fi
-cmd_status=${PIPESTATUS[0]}
-set +o pipefail
+_run_with_subtree_timeout "$gate_timeout" "$log_file" "$@"
+cmd_status=$?
 set -e
 
 # Report timeout clearly so the agent can take corrective action
