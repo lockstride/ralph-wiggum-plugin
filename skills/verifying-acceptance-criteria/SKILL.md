@@ -22,8 +22,10 @@ You are the **acceptance verifier**. You re-check the entire ground-truth requir
    - **Gate (test/lint/build) is part of the contract** — run it via `gate-run.sh` under an `eval-*` label so you don't clobber main-loop gate history. The `running-gates` skill has the contract.
 3. **Record gaps.** Every requirement that is missing, partial, or incorrect becomes a new `- [ ] <short title> — <detail with file:line>` line in the **Gaps** section of the report. Be specific: the rework agent will act on exactly what you write. Prefer narrow, actionable gaps over broad ones.
 4. **Leave resolved gaps alone.** If a previous loop's gap is now genuinely fixed, flip it to `[x]` in place — do not delete history. If you believe a gap that rework checked off is actually still not resolved, reopen it with a new `[ ]` line referencing the prior one.
-5. **Update the Status header.**
-   - If zero outstanding `[ ]` gaps AND every requirement you enumerated was affirmatively verified → set **Status** to `CLEAN` and flip the top-level `- [ ] All acceptance criteria met and verified` checkbox to `[x]`.
+5. **Run a fresh final gate before flipping CLEAN.** Before you set **Status** to `CLEAN` or flip the top-level checkbox, you MUST execute the project's full final-check gate (the same command the main loop ran for the `final` label; `.ralph/gates/final-latest.cmd` records it — e.g. `pnpm all-check`) via the gate harness under an `eval-final` label: `bash <plugin-root>/shared-scripts/gate-run.sh eval-final <FINAL_CHECK_COMMAND>`. The gate **must be a fresh run executed during this verifier pass** — a cached `final-latest.exit` from before any REWORK loop does NOT satisfy this rule. If the gate fails, record each failure as a normal `[ ]` gap entry (file:line where the harness log points), leave **Status** `UNVERIFIED`, and stop here — the next loop will pick it up under REWORK. If the gate passes, proceed to Step 6. The all-check cache makes a no-op re-run cheap (typically 3–4 minutes when nothing has changed).
+
+6. **Update the Status header.**
+   - If zero outstanding `[ ]` gaps AND every requirement you enumerated was affirmatively verified AND the fresh final gate from Step 5 passed → set **Status** to `CLEAN` and flip the top-level `- [ ] All acceptance criteria met and verified` checkbox to `[x]`.
    - Otherwise → set **Status** to `UNVERIFIED` and leave the top-level checkbox `[ ]`.
 
 ## Discipline

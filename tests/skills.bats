@@ -124,3 +124,12 @@ _all_skills() {
   [ -f "$SKILLS_DIR/diagnosing-stuck-tasks/SKILL.md" ]
   [ -f "$SKILLS_DIR/reviewing-loop-progress/SKILL.md" ]
 }
+
+@test "verifying-acceptance-criteria requires a fresh eval-final gate before flipping CLEAN" {
+  local skill_md="$SKILLS_DIR/verifying-acceptance-criteria/SKILL.md"
+  [ -f "$skill_md" ]
+  grep -q "eval-final" "$skill_md" \
+    || { echo "verifier skill missing 'eval-final' gate label requirement" >&2; return 1; }
+  grep -qiE "fresh.*(final|gate)|cached.*does not satisfy|cached .*does not" "$skill_md" \
+    || { echo "verifier skill missing freshness-of-gate-run requirement" >&2; return 1; }
+}
