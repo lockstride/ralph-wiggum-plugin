@@ -1,10 +1,10 @@
 # Spec Kit → Ralph Loop: Prompt Adaptation Guide
 
-This guide transforms a `speckit.implement.md` slash command into a
-loop-compatible prompt for unattended Ralph runs.
+This guide transforms a `speckit-implement` skill into a loop-compatible
+prompt for unattended Ralph runs.
 
 **Design principle**: trust the model. The skill itself
-(`speckit.implement.md`) is ~10 high-level steps that work well in
+(`speckit-implement`) is ~10 high-level steps that work well in
 interactive mode because the user is in the loop providing course
 correction. In unattended mode the user isn't there, so we add a few
 load-bearing rules — but resist the urge to add a rule every time the
@@ -23,7 +23,7 @@ as procedures themselves.
 ## Transformation Rules
 
 These rules describe the structural difference between interactive
-and unattended execution. Stable across versions of speckit.implement.md.
+and unattended execution. Stable across versions of speckit-implement.
 
 1. **Strip interactive features.** Remove user prompts, "STOP and
    ask," confirmation gates, and any step that waits for user input.
@@ -76,7 +76,7 @@ and unattended execution. Stable across versions of speckit.implement.md.
 
 ## Example Pair
 
-### Input: speckit.implement.md (any recent version)
+### Input: speckit-implement SKILL.md (any recent version)
 
 The skill is ~10 high-level steps with extensive prose. Strip per
 rules 1–4 above. Keep the core execution outline. Add the loop
@@ -150,10 +150,10 @@ from the first unchecked task.
 ## Usage
 
 The prompt resolver reads this guide and the current
-`speckit.implement.md`, then produces a loop-adapted prompt following
+`speckit-implement` SKILL.md, then produces a loop-adapted prompt following
 the transformation rules and using the example as structural
 reference. The output is written to `<spec_dir>/ralph-prompt.md` and
-cached until `speckit.implement.md` or this guide changes (composite
+cached until `speckit-implement` or this guide changes (composite
 hash; see `prompt-resolver.sh`).
 
 Generated prompts that exceed 50 lines should be re-tightened — the

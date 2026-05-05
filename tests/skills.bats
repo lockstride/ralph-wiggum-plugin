@@ -125,6 +125,18 @@ _all_skills() {
   [ -f "$SKILLS_DIR/reviewing-loop-progress/SKILL.md" ]
 }
 
+@test "spec-kit-version-sync skill is present" {
+  [ -f "$SKILLS_DIR/spec-kit-version-sync/SKILL.md" ]
+}
+
+@test "spec-kit-version-sync does not auto-commit" {
+  local skill_md="$SKILLS_DIR/spec-kit-version-sync/SKILL.md"
+  [ -f "$skill_md" ]
+  # Skill must explicitly state it does not commit changes
+  grep -qi "do not.*commit\|not.*stage or commit\|does not commit" "$skill_md" \
+    || { echo "spec-kit-version-sync SKILL.md missing explicit no-commit statement" >&2; return 1; }
+}
+
 @test "verifying-acceptance-criteria requires a fresh eval-final gate before flipping CLEAN" {
   local skill_md="$SKILLS_DIR/verifying-acceptance-criteria/SKILL.md"
   [ -f "$skill_md" ]

@@ -467,8 +467,8 @@ PROMPT
   local out
   out=$(resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" 2>&1)
 
-  echo "$out" | grep -q "speckit.implement.md changed"
-  grep -q "PROMPT speckit.implement.md changed — regenerating" "$MOCK_WORKSPACE/.ralph/activity.log"
+  echo "$out" | grep -q "speckit-implement changed"
+  grep -q "PROMPT speckit-implement changed — regenerating" "$MOCK_WORKSPACE/.ralph/activity.log"
   # Should NOT attribute the change to the guide.
   ! grep -q "guide changed" "$MOCK_WORKSPACE/.ralph/activity.log"
   # Speckit-only changes are user-initiated and not "stale" — no STALE marker.
@@ -493,7 +493,7 @@ PROMPT
   local out
   out=$(resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec" 2>&1)
 
-  echo "$out" | grep -q "speckit.implement.md AND adaptation guide changed"
+  echo "$out" | grep -q "speckit-implement AND adaptation guide changed"
   grep -q "PROMPT speckit + guide changed — regenerating" "$MOCK_WORKSPACE/.ralph/activity.log"
   # Combined case: STALE marker still fires (guide changed component).
   grep -q "PROMPT ⚠️ STALE: adaptation guide changed" "$MOCK_WORKSPACE/.ralph/activity.log"

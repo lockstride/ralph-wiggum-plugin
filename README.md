@@ -144,7 +144,7 @@ Your commits are your durable memory. Ralph commits frequently during each loop 
 If you use [Spec Kit](https://github.com/github/spec-kit), pick `--spec` and Ralph will:
 
 1. Find the most-recent `specs/*` dir by mtime (or the one you name).
-2. **Generate a loop-adapted prompt** from your project's `speckit.implement.md` (with hash-based caching) — keeps the loop in sync with your version of Spec Kit. Falls back to the built-in template if that command file doesn't exist.
+2. **Generate a loop-adapted prompt** from your project's `speckit-implement` skill (`.claude/skills/speckit-implement/SKILL.md`, with hash-based caching) — keeps the loop in sync with your version of Spec Kit. Falls back to the built-in template if the skill doesn't exist.
 3. Substitute `{{SPEC_DIR}}`, `{{CONSTITUTION_PATH}}`, `{{TASK_FILE}}`, `{{PLAN_FILE}}`, `{{SPEC_FILE}}`, gate commands, and (0.6.0+) the recent activity-log tail into the prompt.
 4. Enforce one-task-per-commit, gate-discipline, and the `<promise>ALL_TASKS_DONE</promise>` completion sigil (verified against the real checkbox state — no hallucinated promises).
 

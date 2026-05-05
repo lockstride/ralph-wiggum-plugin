@@ -173,7 +173,7 @@ Re-reading a green gate log is the second-most common waste pattern (after blind
 
 ### In Spec Kit loops
 
-Prompts generated from `speckit.implement.md` get a `{{GATE_RUN}}` placeholder resolved to `bash /abs/path/to/gate-run.sh`. The built-in `shared-references/templates/speckit-prompt.md` has the full gate-invocation contract; loops using the generated prompt inherit the same rules via the adaptation guide at `shared-references/templates/speckit-adaptation-guide.md`.
+Prompts generated from the `speckit-implement` skill get a `{{GATE_RUN}}` placeholder resolved to `bash /abs/path/to/gate-run.sh`. The built-in `shared-references/templates/speckit-prompt.md` has the full gate-invocation contract; loops using the generated prompt inherit the same rules via the adaptation guide at `shared-references/templates/speckit-adaptation-guide.md`.
 
 ### In non-Spec Kit loops
 

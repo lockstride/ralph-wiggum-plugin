@@ -96,7 +96,7 @@ The acceptance evaluator is a separate Ralph loop that runs *after* the main loo
 
 ## Prompt generation deep details
 
-When the project has `.claude/commands/speckit.implement.md` or `.claude/skills/speckit-implement/SKILL.md`, Ralph **generates the loop prompt from it** rather than using the static fallback. This keeps the loop in sync with your version of Spec Kit.
+When the project has `.claude/skills/speckit-implement/SKILL.md` (or the legacy `.claude/commands/speckit.implement.md`), Ralph **generates the loop prompt from it** rather than using the static fallback. This keeps the loop in sync with your version of Spec Kit.
 
 The generation:
 

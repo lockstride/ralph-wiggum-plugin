@@ -234,15 +234,15 @@ resolve_prompt_file() {
   _write_effective_prompt "$workspace" "$(cat "$path")" "true"
 }
 
-# Generate a loop-adapted prompt from speckit.implement.md using the
+# Generate a loop-adapted prompt from the speckit-implement skill using the
 # adaptation guide. Writes the result + hash to the spec directory
 # and commits both files.
 #
 # Args:
 #   $1 — workspace path
 #   $2 — spec directory (e.g., $workspace/specs/my-spec)
-#   $3 — path to speckit.implement.md
-#   $4 — sha256 hash of speckit.implement.md
+#   $3 — path to speckit-implement SKILL.md
+#   $4 — sha256 hash of speckit-implement SKILL.md
 #   $5 — output path for generated prompt
 #   $6 — output path for hash file
 #   $7 — templates directory
@@ -271,20 +271,20 @@ _generate_ralph_prompt() {
   local gen_prompt
   gen_prompt=$(
     cat <<GENPROMPT
-You are transforming a speckit.implement.md slash command into a loop-compatible
+You are transforming a speckit-implement skill into a loop-compatible
 prompt for an unattended Ralph development loop.
 
 ## Adaptation Guide
 
 $guide_content
 
-## Current speckit.implement.md
+## Current speckit-implement
 
 $skill_content
 
 ## Instructions
 
-Apply the transformation rules from the guide to the current speckit.implement.md.
+Apply the transformation rules from the guide to the current speckit-implement skill.
 Use the example output in the guide as a structural reference — match its format,
 section structure, and level of detail.
 
@@ -466,22 +466,22 @@ resolve_prompt_spec() {
   mkdir -p "$workspace/.ralph/gates"
 
   # =========================================================================
-  # Prompt generation from speckit.implement.md (preferred path)
+  # Prompt generation from speckit-implement (preferred path)
   #
-  # If the project has .claude/commands/speckit.implement.md, generate the
-  # loop prompt from it using the adaptation guide. The generated prompt is
-  # cached at <spec_dir>/ralph-prompt.md with a hash for cache invalidation.
+  # If the project has .claude/skills/speckit-implement/SKILL.md, generate
+  # the loop prompt from it using the adaptation guide. The generated prompt
+  # is cached at <spec_dir>/ralph-prompt.md with a hash for cache invalidation.
   #
   # Falls back to the built-in speckit-prompt.md template if:
-  #   - speckit.implement.md does not exist
+  #   - speckit-implement skill does not exist
   #   - generation is explicitly skipped (RALPH_SKIP_GENERATION=1)
   # =========================================================================
 
-  # speckit.implement may live as a slash command or as a skill. Check both.
+  # speckit-implement may live as a skill (preferred) or legacy slash command.
   local speckit_implement=""
   local speckit_candidates=(
-    "$workspace/.claude/commands/speckit.implement.md"
     "$workspace/.claude/skills/speckit-implement/SKILL.md"
+    "$workspace/.claude/commands/speckit.implement.md"
     "$workspace/.claude/skills/speckit.implement/SKILL.md"
   )
   for candidate in "${speckit_candidates[@]}"; do
@@ -553,11 +553,11 @@ resolve_prompt_spec() {
         fi
 
         if [[ "$speckit_changed" == "true" ]] && [[ "$guide_changed" == "true" ]]; then
-          echo "  ↻ speckit.implement.md AND adaptation guide changed — regenerating..." >&2
+          echo "  ↻ speckit-implement AND adaptation guide changed — regenerating..." >&2
           _pr_log "$workspace" "PROMPT speckit + guide changed — regenerating..."
         elif [[ "$speckit_changed" == "true" ]]; then
-          echo "  ↻ speckit.implement.md changed — regenerating prompt..." >&2
-          _pr_log "$workspace" "PROMPT speckit.implement.md changed — regenerating..."
+          echo "  ↻ speckit-implement changed — regenerating prompt..." >&2
+          _pr_log "$workspace" "PROMPT speckit-implement changed — regenerating..."
         elif [[ "$guide_changed" == "true" ]]; then
           echo "  ↻ adaptation guide changed (plugin upgrade) — regenerating prompt..." >&2
           _pr_log "$workspace" "PROMPT guide changed (plugin upgrade) — regenerating..."
@@ -565,8 +565,8 @@ resolve_prompt_spec() {
         # Falls through to the generation block below in all three cases.
       fi
     else
-      echo "  ⚙ No cached prompt — generating from speckit.implement.md..." >&2
-      _pr_log "$workspace" "PROMPT no cached prompt — generating from speckit.implement.md..."
+      echo "  ⚙ No cached prompt — generating from speckit-implement..." >&2
+      _pr_log "$workspace" "PROMPT no cached prompt — generating from speckit-implement..."
     fi
 
     if [[ "$use_generated" != "true" ]]; then
