@@ -121,18 +121,17 @@ teardown() {
   [ "$status" -eq 124 ]
 }
 
-@test "basic default timeout is 600s and final is 900s (0.3.9)" {
-  # Regression test for the 0.3.9 default re-target (basic 360→600,
-  # final 600→900 — sized for agent-mode red-state loops where
-  # failing tests slow the gate ~2× over green-path clean runs).
-  # Verifies the help text, env-var docs, and live resolution all
-  # agree, so a future edit to just one site can't silently diverge.
-  grep -q 'Default timeout 600 s' "$SCRIPTS_DIR/gate-run.sh"
-  grep -q 'Default timeout 900 s' "$SCRIPTS_DIR/gate-run.sh"
-  grep -q 'RALPH_FINAL_GATE_TIMEOUT.*default 900' "$SCRIPTS_DIR/gate-run.sh"
-  grep -q 'RALPH_BASIC_GATE_TIMEOUT.*default 600' "$SCRIPTS_DIR/gate-run.sh"
-  grep -qE 'RALPH_FINAL_GATE_TIMEOUT:-900' "$SCRIPTS_DIR/gate-run.sh"
-  grep -qE 'RALPH_BASIC_GATE_TIMEOUT:-600' "$SCRIPTS_DIR/gate-run.sh"
+@test "basic default timeout is 1200s and final is 1200s (0.7.0)" {
+  # Regression test for the 0.7.0 raise to 20 min for both labels.
+  # Field data showed NestJS + Prisma migration suites hitting 12–14 min
+  # in red-state worktrees, triggering spurious GATE TIMEOUT signals during
+  # recovery loops. Verifies the help text, env-var docs, and live resolution
+  # all agree so a future edit to just one site can't silently diverge.
+  grep -q 'Default timeout 1200 s' "$SCRIPTS_DIR/gate-run.sh"
+  grep -q 'RALPH_FINAL_GATE_TIMEOUT.*default 1200' "$SCRIPTS_DIR/gate-run.sh"
+  grep -q 'RALPH_BASIC_GATE_TIMEOUT.*default 1200' "$SCRIPTS_DIR/gate-run.sh"
+  grep -qE 'RALPH_FINAL_GATE_TIMEOUT:-1200' "$SCRIPTS_DIR/gate-run.sh"
+  grep -qE 'RALPH_BASIC_GATE_TIMEOUT:-1200' "$SCRIPTS_DIR/gate-run.sh"
 }
 
 @test "custom label falls through to basic default (0.3.5)" {

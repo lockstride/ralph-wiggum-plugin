@@ -381,6 +381,20 @@ main() {
     WORKSPACE="$(cd "$WORKSPACE" && pwd)"
   fi
 
+  # 0.7.0: Non-interactive guard. In a detached tmux pane (no live operator)
+  # stdin is either a closed pipe or a pseudo-tty that immediately hits EOF.
+  # The interactive `read -rp` calls in select_cli / select_model / get_max_loops
+  # will block forever or silently return empty strings, leaving the loop
+  # configured with bad defaults — or worse, looping forever if a wrapper
+  # restarts the script on non-zero exit. Refuse to start if stdin is not a
+  # real terminal AND any required interactive input is missing.
+  if [[ ! -t 0 ]] && [[ -z "$CLI_FROM_FLAG" || -z "$MODEL_FROM_FLAG" || -z "$PROMPT_MODE" ]]; then
+    echo "❌ Non-interactive stdin detected and required flags are missing." >&2
+    echo "   Pass --cli, --model, and --spec / --prompt-file / --prompt to run unattended." >&2
+    echo "   Example: ralph-setup.sh --cli claude --model opus --spec -n 10" >&2
+    exit 1
+  fi
+
   echo ""
   show_header "🐛 Ralph Wiggum: CLI-agnostic Autonomous Development Loop"
   echo ""
@@ -492,8 +506,16 @@ main() {
   echo "─────────────────────────────────────────────────────────────────"
   echo ""
 
+  # 0.7.0: Disable set -e around the loop call so that a GUTTER / STALL
+  # exit (rc=1) is captured in main_rc rather than triggering an immediate
+  # set -e abort before the chain-evaluate logic and the final `exit` can run.
+  # Without this, set -e silently exits with rc=1 and any wrapper that
+  # re-invokes ralph-setup.sh (e.g. a tmux keep-alive) sees the non-zero
+  # code but never gets a chance to act on it cleanly.
+  set +e
   run_ralph_loop "$WORKSPACE" "$SCRIPT_DIR"
   local main_rc=$?
+  set -e
 
   # Chain into the acceptance evaluation loop only when the main loop exited
   # cleanly (all tasks [x], gate green). Failed/exhausted/gutter runs skip

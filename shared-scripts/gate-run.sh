@@ -60,11 +60,11 @@ WHY
     • Maintains a .ralph/gates/<label>-latest.log pointer for quick reading
 
 LABELS (fixed set — pick the closest match; use 'custom' for anything else)
-  basic   Fast pre-commit gate (format, lint, unit tests). Default timeout 600 s.
-  final   Full verification gate (basic + integration/E2E). Default timeout 900 s.
-  e2e     Targeted E2E / browser / container suite. Default timeout 600 s.
-  lint    Lint-only or type-check-only runs. Default timeout 600 s.
-  custom  Anything that does not fit the four above. Default timeout 600 s.
+  basic   Fast pre-commit gate (format, lint, unit tests). Default timeout 1200 s.
+  final   Full verification gate (basic + integration/E2E). Default timeout 1200 s.
+  e2e     Targeted E2E / browser / container suite. Default timeout 1200 s.
+  lint    Lint-only or type-check-only runs. Default timeout 1200 s.
+  custom  Anything that does not fit the four above. Default timeout 1200 s.
 
 EXAMPLES
   gate-run.sh basic pnpm basic-check
@@ -88,8 +88,8 @@ ENVIRONMENT
   RALPH_GATE_FAIL_HEAD  Failure-match lines in the summary (default 80).
   RALPH_GATE_TIMEOUT    Blanket timeout override (seconds) for any label.
                         Takes precedence over the per-label vars below.
-  RALPH_FINAL_GATE_TIMEOUT  Timeout for label=final   (default 900).
-  RALPH_BASIC_GATE_TIMEOUT  Timeout for every other label (default 600).
+  RALPH_FINAL_GATE_TIMEOUT  Timeout for label=final   (default 1200).
+  RALPH_BASIC_GATE_TIMEOUT  Timeout for every other label (default 1200).
 
 FAILURE-PATTERN MATCHING
   On completion the wrapper greps the log for common failure signatures
@@ -203,10 +203,10 @@ while [[ $_lock_waited -lt $_lock_wait ]]; do
     break
   fi
   # Stale-lock heuristic: if the lock dir is older than the largest
-  # plausible gate timeout (RALPH_GATE_STALE_LOCK_SEC, default 1800s = 30
-  # min, well above the 900s final-gate cap), the prior holder almost
-  # certainly died without cleanup. Steal the lock rather than block.
-  _stale_after="${RALPH_GATE_STALE_LOCK_SEC:-1800}"
+  # plausible gate timeout (RALPH_GATE_STALE_LOCK_SEC, default 2700s = 45
+  # min, well above the 1200s gate cap), the prior holder almost certainly
+  # died without cleanup. Steal the lock rather than block.
+  _stale_after="${RALPH_GATE_STALE_LOCK_SEC:-2700}"
   _lock_age=$(($(date +%s) - $(stat -f '%m' "$_lock_dir" 2>/dev/null || stat -c '%Y' "$_lock_dir" 2>/dev/null || echo 0)))
   if [[ $_lock_age -gt $_stale_after ]]; then
     _log_activity "🧪 GATE LOCK STOLEN label=$label — prior holder appears dead (age=${_lock_age}s)"
@@ -241,26 +241,33 @@ start_epoch=$(date +%s)
 # takes ~4:15 on main but >6 min in a red-state worktree (failing tests
 # slow Vitest's retry-and-report path; lint/format still finish quickly).
 # Agent-mode loops legitimately contain broken states — the default
-# has to accommodate that, not the green-path best case. New defaults:
+# has to accommodate that, not the green-path best case.
 #
-#   basic  10 min (600 s) — clean ~4 min, red-state ~6–8 min
-#   final  15 min (900 s) — clean ~5–8 min, red-state ~10–12 min
+# 0.7.0: Both defaults raised to 20 min (1200 s). Field data showed some
+# NestJS + Prisma migration suites hitting 12–14 min in red-state worktrees
+# with database setup overhead, triggering spurious GATE TIMEOUT signals
+# that disrupted recovery loops. A uniform 20-min cap covers the observed
+# tail without a meaningful latency penalty on normal (2–8 min) runs.
+# Projects with faster suites can lower via the env vars below.
+#
+#   basic  20 min (1200 s)
+#   final  20 min (1200 s)
 #
 # Projects with larger suites can override via the env vars below.
 #
 # Env vars cascade:
 #
-#   RALPH_FINAL_GATE_TIMEOUT  → used when label=final  (default 900)
-#   RALPH_BASIC_GATE_TIMEOUT  → used when label=basic  (default 600)
+#   RALPH_FINAL_GATE_TIMEOUT  → used when label=final  (default 1200)
+#   RALPH_BASIC_GATE_TIMEOUT  → used when label=basic  (default 1200)
 #   RALPH_GATE_TIMEOUT        → blanket override for any label (no default;
 #                                takes precedence over the per-label vars
 #                                when set, for backward compat)
 if [[ -n "${RALPH_GATE_TIMEOUT:-}" ]]; then
   gate_timeout="$RALPH_GATE_TIMEOUT"
 elif [[ "$label" == "final" ]]; then
-  gate_timeout="${RALPH_FINAL_GATE_TIMEOUT:-900}"
+  gate_timeout="${RALPH_FINAL_GATE_TIMEOUT:-1200}"
 else
-  gate_timeout="${RALPH_BASIC_GATE_TIMEOUT:-600}"
+  gate_timeout="${RALPH_BASIC_GATE_TIMEOUT:-1200}"
 fi
 
 # 0.6.3: subtree-aware gate execution.
