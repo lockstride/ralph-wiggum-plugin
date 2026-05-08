@@ -101,9 +101,7 @@ agent_build_cmd() {
 
   case "$cli" in
     claude)
-      # Unset ANTHROPIC_API_KEY so the CLI uses the logged-in subscription
-      # rather than a stray API key injected by env wrappers (e.g. env-run).
-      local cmd="unset ANTHROPIC_API_KEY; claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model '$esc_model'"
+      local cmd="claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model '$esc_model'"
       # 0.6.0: optional extra plugin-dirs for browser-flow / UI debugging.
       # RALPH_EXTRA_PLUGIN_DIRS is a colon-separated list (RALPH_SETUP detects
       # Playwright at startup and populates this; users may override). Empty
