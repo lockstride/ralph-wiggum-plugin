@@ -305,11 +305,14 @@ GENPROMPT
   _pr_log "$workspace" "PROMPT generating loop prompt via $gen_cli (sonnet, low effort)..."
 
   local generated
-  if ! generated=$(echo "$gen_prompt" | $gen_cli -p \
-    --model sonnet \
-    --effort low \
-    --output-format text \
-    --dangerously-skip-permissions 2>/dev/null); then
+  if ! generated=$(
+    unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
+    echo "$gen_prompt" | $gen_cli -p \
+      --model sonnet \
+      --effort low \
+      --output-format text \
+      --dangerously-skip-permissions 2>/dev/null
+  ); then
     echo "  ❌ Prompt generation failed (exit $?)" >&2
     _pr_log "$workspace" "PROMPT ❌ generation failed"
     return 1

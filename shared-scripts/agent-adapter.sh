@@ -101,7 +101,11 @@ agent_build_cmd() {
 
   case "$cli" in
     claude)
-      local cmd="claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model '$esc_model'"
+      # Claude Desktop injects ANTHROPIC_API_KEY="" and ANTHROPIC_BASE_URL into
+      # child processes. An empty ANTHROPIC_API_KEY triggers API-key auth mode
+      # with an invalid credential, causing 401. Unset both so the CLI falls
+      # back to the logged-in OAuth session.
+      local cmd="unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL; claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model '$esc_model'"
       # 0.6.0: optional extra plugin-dirs for browser-flow / UI debugging.
       # RALPH_EXTRA_PLUGIN_DIRS is a colon-separated list (RALPH_SETUP detects
       # Playwright at startup and populates this; users may override). Empty

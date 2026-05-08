@@ -985,3 +985,33 @@ EOF
   declare -F run_loop >/dev/null
   ! declare -F run_iteration >/dev/null
 }
+
+# =============================================================================
+# agent_build_cmd — ANTHROPIC env-var stripping (0.8.2)
+# =============================================================================
+
+@test "agent_build_cmd unsets ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL for claude" {
+  local cmd
+  cmd=$(agent_build_cmd claude "sonnet" "hello")
+  # Both vars must be unset before the claude invocation so that Claude
+  # Desktop's empty placeholders do not force API-key auth mode.
+  echo "$cmd" | grep -q "unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL"
+}
+
+@test "agent_build_cmd unset prefix comes before the claude invocation" {
+  local cmd
+  cmd=$(agent_build_cmd claude "sonnet" "hello")
+  # The unset must precede 'claude -p' so it takes effect in the same
+  # shell before the process is exec'd.
+  local unset_pos claude_pos
+  unset_pos=$(echo "$cmd" | grep -bo "unset ANTHROPIC" | head -1 | cut -d: -f1)
+  claude_pos=$(echo "$cmd" | grep -bo "claude -p" | head -1 | cut -d: -f1)
+  [ "$unset_pos" -lt "$claude_pos" ]
+}
+
+@test "agent_build_cmd does NOT unset ANTHROPIC vars for cursor-agent" {
+  local cmd
+  cmd=$(agent_build_cmd cursor-agent "composer-2" "hello")
+  # cursor-agent uses its own auth; don't touch ANTHROPIC vars.
+  ! echo "$cmd" | grep -q "unset ANTHROPIC"
+}
