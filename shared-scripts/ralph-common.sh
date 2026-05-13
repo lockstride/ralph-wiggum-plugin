@@ -456,54 +456,47 @@ GATE_EOF
     )
   fi
 
-  # 0.7.0: When a recovery hint is present, use a diagnostic-first prompt
-  # template instead of the normal loop framing. The normal template re-states
-  # all the loop-hygiene rules the agent has already internalized, burying the
-  # diagnostic directive. Recovery mode strips that noise: the ONLY job right
-  # now is to answer the diagnostic questions, make ONE targeted fix, and
-  # verify the gate passes before resuming the task list.
+  # 0.7.0 / 0.8.3: When a recovery hint is present, use a diagnostic-first
+  # prompt instead of the normal loop framing. The prior loop's fix-and-retry
+  # cycle didn't work — this loop's job is to understand WHY before acting.
+  #
+  # Design principle: the Tier 1 skill (diagnosing-stuck-tasks) already
+  # proved that suspending procedural rules and trusting the agent to
+  # investigate freely is more effective than a prescriptive checklist.
+  # Tier 2 should grant the same freedom — the agent needs MORE latitude
+  # at this stage, not less.
   if [[ -n "$hint_block" ]]; then
     cat <<EOF
 # Diagnostic Recovery — Loop $loop_n
 
-## STOP. Read the diagnostic below before touching any file.
+## What happened
+
+The prior loop got stuck and was killed by the recovery system:
 
 $hint_block
 
-## Your Only Job Right Now
+## Your job
 
-Do NOT resume the task list. Do NOT tick checkboxes. Your job is to
-diagnose the stuck pattern described above and make ONE targeted fix.
+Understand the root cause, fix it, and verify the gate passes. Then
+resume the task list.
 
-**Mandatory diagnostic sequence:**
+No procedural rules apply here. Investigate however the situation
+demands — read code, grep, run ad-hoc commands, check logs, inspect
+test setup, trace call graphs. Take as much time as you need to
+understand before you touch anything.
 
-1. **Print the exact error message.** Read \`.ralph/gates/<label>-latest.log\`
-   (the label is in the hint above). Do NOT re-run the gate — the log
-   already has everything you need.
+The gate log is at \`.ralph/gates/<label>-latest.log\`. That's a
+starting point, not a boundary.
 
-2. **Identify the file the error names.** Error lines typically contain a
-   file path, e.g. \`src/app/app.module.ts:4:1 - error TS2304\`. Write
-   the path down before doing anything else.
+If you cannot isolate the cause after a genuine investigation, emit
+\`<ralph>GUTTER</ralph>\` with what you learned. GUTTER is escalation
+to a human with fresh eyes, not failure.
 
-3. **Check which files your recent edits touched.** Run:
-   \`git diff --name-only HEAD~5..HEAD\`
+## Relevant state
 
-4. **Confirm intersection.** If your edited files do NOT include the file
-   the error names, you have been editing the wrong file. The error will
-   never go away until you touch the right one.
-
-5. **Make ONE targeted fix** to the correct file.
-
-6. Re-run the gate (via \`$gate_run_cmd <label> <cmd>\` if available).
-   - Gate passes → resume normal task execution from the next unchecked item.
-   - Gate still fails → emit \`<ralph>GUTTER</ralph>\` with a root-cause
-     note in \`.ralph/errors.log\`. Do not loop indefinitely.
-
-## Relevant state (still applies)
-
-- \`.ralph/guardrails.md\` — lessons from past failures
 - \`.ralph/errors.log\` — recent failure details
 - \`.ralph/handoff.md\` — navigation pointers from prior loop (if present)
+- \`.ralph/guardrails.md\` — lessons from past failures
 $gate_block
 
 ## Original task (context only — do not advance until gate is green)
@@ -535,46 +528,35 @@ SKILL_EOF
 # Ralph Loop $loop_n
 $skill_section
 You are running inside a Ralph loop. Git log and tasks.md checkboxes
-are the authoritative record of what is done. The loop expects you to
-flow through the work — commit after each task, immediately read the
-next one, keep going. Exiting your turn between commits forces a fresh
-agent process (~10–30k tokens of cold-start tax). Don't do that unless
-you've hit one of the four real stop conditions below.
+are the authoritative record of what is done. Commit after each task,
+read the next one, keep going.
 
-## Completion Bar (hard — read before anything else)
+## Completion
 
-- A task/phase is NOT complete until its verification gate exits 0. No exceptions.
-- "Pre-existing failure" is NEVER a reason to mark a task [x], emit a completion signal, or commit. If a check fails, fix it. If you cannot fix it, emit \`<ralph>GUTTER</ralph>\` with root cause in \`.ralph/errors.log\` — NEVER mark [x] around it.
-- Before flipping \`[ ]\` → \`[x]\`, self-check: did the gate for this task exit 0 in THIS loop?
+- A task is NOT complete until its verification gate exits 0.
+- If a check fails, fix it. If you cannot fix it, emit \`<ralph>GUTTER</ralph>\` with root cause.
+- Never mark \`[x]\` around a failing gate.
 
-## State Files (read before anything else)
+## State Files (read on startup)
 
-1. \`.ralph/handoff.md\` — if it exists and is fresher than the latest commit, read first. Trust its pointers.
-2. \`.ralph/guardrails.md\` — lessons from past failures. Follow these.
+1. \`.ralph/handoff.md\` — if present and fresher than the latest commit, read first.
+2. \`.ralph/guardrails.md\` — lessons from past failures.
 3. \`.ralph/errors.log\` — recent failures to avoid repeating.
 
-Do **not** read \`.ralph/activity.log\` (human monitoring only).
+## Stop conditions
 
-## Stop conditions (the only four)
-
-End your turn ONLY on:
+End your turn on:
 - \`<promise>ALL_TASKS_DONE</promise>\` — every task [x] AND final gate green
 - \`<ralph>GUTTER</ralph>\` — genuinely stuck after honest investigation
 - The loop sends \`WARN\` (rotation imminent) — wrap up your current edit
 - \`.ralph/stop-requested\` exists — yield cleanly
 
-A successful commit is NOT a stop condition. After a commit, your next
-tool call is a Read of the next unchecked task.
+Before yielding, write \`.ralph/handoff.md\` (< 30 lines: last completed, next task, key facts).
 
-## Loop Hygiene
+## Git hygiene
 
-- **Never** \`git add .ralph/\` — it is gitignored; \`git add\` on it returns exit 1 and aborts the commit.
-- Commit after each task — commits are your memory across rotations.
+- Never \`git add .ralph/\` — it is gitignored.
 - Never \`--amend\`, \`--force\`, or \`reset --hard\`. Fix mistakes with a new commit.
-- Before yielding (only on the four stop conditions above), write \`.ralph/handoff.md\` (< 30 lines, navigation pointers only).
-- If context is running low, finish current edit, commit, and stop cleanly.
-- **Work every remaining unchecked task across every remaining phase** in this loop. Do not stop at phase boundaries — the loop handles rotation and rate limits for you.
-- **After every commit, check whether \`.ralph/stop-requested\` exists.** If it does, the loop is asking you to yield cleanly: finish no new task, flush any dirty edits into a final commit if appropriate, and exit. Do not remove the marker — the loop clears it at next loop start.
 $gate_block
 
 ## Task Execution
@@ -1507,12 +1489,29 @@ _check_wrong_file_edits() {
   # Extract file paths named in error lines. Pattern covers TypeScript
   # (src/foo.ts:4:1), Vitest/Jest (FAIL src/foo.spec.ts), ESLint, and
   # generic stack traces. Strips line/col suffix so only the path remains.
-  local gate_files
-  gate_files=$(grep -oE '[a-zA-Z0-9_./-]+\.(ts|tsx|js|jsx|mts|mjs|cjs|py|go|rs|java|rb|php|sh|css|scss|json|yaml|yml):[0-9]' \
+  #
+  # Filters applied to reduce false positives:
+  #   - First path segment must start with a letter (rules out "5.1.1/..."
+  #     fragments scraped from package versions in stack traces)
+  #   - Reject anything containing /node_modules/ (broader than ^node_modules/
+  #     since stack-trace paths often start with package prefixes)
+  #   - Final pass: require the path to exist on disk relative to workspace,
+  #     so URL fragments and version strings get dropped before the
+  #     intersection check ever runs
+  local gate_files raw_files
+  raw_files=$(grep -oE '[a-zA-Z][a-zA-Z0-9_./-]*\.(ts|tsx|js|jsx|mts|mjs|cjs|py|go|rs|java|rb|php|sh|css|scss|json|yaml|yml):[0-9]' \
     "$failed_log" 2>/dev/null |
     sed 's/:[0-9]*$//' |
-    grep -v '^node_modules/' |
+    grep -vE '(^|/)node_modules/' |
     LC_ALL=C sort -u || true)
+  gate_files=""
+  while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    if [[ -f "$workspace/$path" ]]; then
+      gate_files+="$path"$'\n'
+    fi
+  done <<<"$raw_files"
+  gate_files="${gate_files%$'\n'}"
   [[ -n "$gate_files" ]] || return 0
 
   # Agent write paths: recent git commits + WRITE entries in activity.log.

@@ -225,6 +225,48 @@ tool_result_json() {
   grep -q "recovery already used this loop" "$MOCK_WORKSPACE/.ralph/errors.log"
 }
 
+@test "git commit failure on .ralph/ path emits gitignored hint (0.9.0)" {
+  # When the agent stages a path under .ralph/ (which is gitignored),
+  # `git commit` fails with a generic exit 1 because the index is empty.
+  # Without a hint, the next attempt is a blind retry. The hint should
+  # name the cause specifically.
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "git add .ralph/acceptance-report.md && git commit -m 'wip'")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  grep -qi "gitignored" "$MOCK_WORKSPACE/.ralph/errors.log"
+  grep -qi ".ralph/" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "git commit failure with git add and exit 1 emits generic staging hint (0.9.0)" {
+  # When `git add ... && git commit` fails with exit 1 but the path
+  # doesn't obviously look gitignored, surface a generic hint pointing
+  # at `git status --short` as the diagnostic.
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "git add src/foo.ts && git commit -m 'feat: thing'")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  grep -qi "git status --short" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "non-git-commit shell failures do not emit gitignored hint (0.9.0)" {
+  # The hint is git-commit-specific. A normal pnpm/test failure should
+  # not produce it.
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm test")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  if grep -qi "gitignored" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+    fail "gitignored hint emitted for non-git-commit failure"
+  fi
+}
+
 @test "first file thrash emits RECOVER_ATTEMPT (not GUTTER) and writes hint (0.3.0)" {
   local events=""
   for i in $(seq 1 5); do
@@ -263,13 +305,13 @@ tool_result_json() {
   echo "$output" | grep -q "^GUTTER$"
 }
 
-@test "read-without-write stall emits SUGGEST_SKILL → reviewing-loop-progress, not GUTTER (0.6.1)" {
-  # 0.2.4 downgraded the stall from GUTTER to a logged-only observation —
-  # too passive in practice (a single dmatrix.refactor session in the wild
-  # logged 12 stall warnings with zero escalation). 0.6.1 restores
-  # escalation but as a soft skill suggestion: lighter-touch
-  # `reviewing-loop-progress` ("am I still on the right track?"), not the
-  # heavier `diagnosing-stuck-tasks` (reserved for repeated gate failures).
+@test "read-without-write streak logs informationally, no SUGGEST_SKILL, no GUTTER (0.9.0)" {
+  # 0.9.0 removed the SUGGEST_SKILL emission from the read-without-write
+  # path entirely. Long read streaks are normal during diagnosis and
+  # exploration — penalizing them with a skill suggestion biases the
+  # agent away from the exact behavior it needs. Real stuckness is caught
+  # by gate-failure and file-thrash heuristics. The streak is still
+  # logged to activity.log for operator visibility.
   export RALPH_MAX_READS_WITHOUT_WRITE=5  # low threshold for testing
 
   local events=""
@@ -281,45 +323,23 @@ tool_result_json() {
   local output
   output=$(run_parser "$events")
 
-  # Stall is logged for visibility (existing behavior).
-  grep -q "READ-WITHOUT-WRITE STALL" "$MOCK_WORKSPACE/.ralph/errors.log"
-  grep -q "Read-without-write stall" "$MOCK_WORKSPACE/.ralph/activity.log"
+  # Informational log entry only — no error-log entry, no skill suggestion.
+  grep -q "Read-without-write" "$MOCK_WORKSPACE/.ralph/activity.log"
 
-  # 0.6.1: SUGGEST_SKILL is also emitted to stdout, and a skill-suggestion
-  # file is written pointing at reviewing-loop-progress (NOT diagnosing-stuck-tasks).
-  echo "$output" | grep -q "^SUGGEST_SKILL$"
-  [ -f "$MOCK_WORKSPACE/.ralph/skill-suggestion" ]
-  grep -q "reviewing-loop-progress" "$MOCK_WORKSPACE/.ralph/skill-suggestion"
-  ! grep -q "diagnosing-stuck-tasks" "$MOCK_WORKSPACE/.ralph/skill-suggestion"
-  grep -q "💡 Skill suggestion: reviewing-loop-progress" "$MOCK_WORKSPACE/.ralph/activity.log"
-
-  # Still does NOT emit GUTTER — soft suggestion only.
-  if echo "$output" | grep -q "GUTTER"; then
-    fail "Stall should not emit GUTTER as of 0.2.4; it suggests a skill (0.6.1)"
+  # No SUGGEST_SKILL emission from the read-without-write path.
+  if echo "$output" | grep -q "^SUGGEST_SKILL$"; then
+    fail "read-without-write should not emit SUGGEST_SKILL as of 0.9.0"
   fi
-}
 
-@test "stall SUGGEST_SKILL is deduplicated within a loop (0.6.1)" {
-  # If the agent keeps reading after the stall threshold trips, we don't
-  # want to keep re-emitting the same suggestion every 40 ops. The
-  # SUGGESTED_SKILLS_FILE marker matches the dedup behavior of the
-  # shell-fail and file-thrash soft-suggestion paths.
-  export RALPH_MAX_READS_WITHOUT_WRITE=5
+  # No skill-suggestion file written.
+  if [ -f "$MOCK_WORKSPACE/.ralph/skill-suggestion" ]; then
+    fail "read-without-write should not write a skill-suggestion file as of 0.9.0"
+  fi
 
-  local events=""
-  for i in $(seq 1 12); do
-    events+=$(tool_result_json "Read" 10 5 0 "/tmp/file${i}.ts")
-    events+=$'\n'
-  done
-
-  local output
-  output=$(run_parser "$events")
-
-  # Two stall thresholds were crossed (12 reads, threshold 5 with reset),
-  # but only ONE SUGGEST_SKILL emission for reviewing-loop-progress.
-  local count
-  count=$(echo "$output" | grep -c "^SUGGEST_SKILL$" || true)
-  [ "$count" -eq 1 ]
+  # Does NOT emit GUTTER.
+  if echo "$output" | grep -q "GUTTER"; then
+    fail "Stall should not emit GUTTER"
+  fi
 }
 
 @test "resets read-without-write counter on Write" {
@@ -339,9 +359,9 @@ tool_result_json() {
   done
 
   run_parser "$events" >/dev/null
-  # The stall log line should not appear — the Write reset the counter
-  # before either 5-read streak hit the threshold.
-  if grep -q "READ-WITHOUT-WRITE STALL" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+  # No stall log entry — the Write reset the counter before either
+  # 5-read streak hit the threshold.
+  if grep -q "Read-without-write" "$MOCK_WORKSPACE/.ralph/activity.log" 2>/dev/null; then
     fail "Stall logged despite Write in between reads"
   fi
 }
@@ -445,6 +465,7 @@ tool_result_json() {
   events+=$'\n'
 
   run_parser "$events" >/dev/null
-  # 5 non-write ops should hit the stall threshold and log it (0.2.4: logged, not GUTTER)
-  grep -q "READ-WITHOUT-WRITE STALL" "$MOCK_WORKSPACE/.ralph/errors.log"
+  # 5 non-write ops should hit the threshold and produce an informational
+  # log entry in activity.log (0.9.0: no error log, no skill suggestion).
+  grep -q "Read-without-write" "$MOCK_WORKSPACE/.ralph/activity.log"
 }

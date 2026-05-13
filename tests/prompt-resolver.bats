@@ -208,7 +208,11 @@ PROMPT
   local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
   [ -f "$effective" ]
   grep -q "Universal Loop Guardrails" "$effective"
-  grep -q "Command-variant spirals" "$effective"
+  # 0.9.0: guardrails were trimmed from 19 lines of "hard rules" to a
+  # short 2-paragraph version. The core insight (don't re-run successful
+  # commands) is preserved but the prescriptive headers and rule numbering
+  # are gone.
+  grep -q "exits 0, its output is the answer" "$effective"
 }
 
 @test "PROMPT.md mode prepends universal guardrails preamble" {
@@ -222,7 +226,11 @@ PROMPT
   local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
   [ -f "$effective" ]
   grep -q "Universal Loop Guardrails" "$effective"
-  grep -q "Command-variant spirals" "$effective"
+  # 0.9.0: guardrails were trimmed from 19 lines of "hard rules" to a
+  # short 2-paragraph version. The core insight (don't re-run successful
+  # commands) is preserved but the prescriptive headers and rule numbering
+  # are gone.
+  grep -q "exits 0, its output is the answer" "$effective"
   # User's content must still be present after the preamble
   grep -q "alpha" "$effective"
 }
@@ -238,7 +246,11 @@ PROMPT
   local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
   [ -f "$effective" ]
   grep -q "Universal Loop Guardrails" "$effective"
-  grep -q "Command-variant spirals" "$effective"
+  # 0.9.0: guardrails were trimmed from 19 lines of "hard rules" to a
+  # short 2-paragraph version. The core insight (don't re-run successful
+  # commands) is preserved but the prescriptive headers and rule numbering
+  # are gone.
+  grep -q "exits 0, its output is the answer" "$effective"
   grep -q "one" "$effective"
 }
 

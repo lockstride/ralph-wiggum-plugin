@@ -20,11 +20,24 @@ The report opens with a single top-level checkbox: `- [ ] All acceptance criteri
 
 **Step 1. Read both files.** Read the ground-truth file and the acceptance report (Read tool, not Bash). Do not read anything else yourself.
 
-**Step 2. Decide the mode.** Apply these rules in order and stop at the first match:
+**Step 2. Decide the mode deterministically.** Run this command and use its output:
 
-1. If the report's top-level checkbox is `[x]` and the **Status** line reads `CLEAN` → emit `<ralph>COMPLETE</ralph>` and stop. Do not invoke a sub-agent.
-2. If the **Gaps** section contains any `[ ]` line (not suffixed with `(blocked: …)`) → mode = **REWORK**.
-3. Otherwise → mode = **VERIFIER**. (Covers: first loop, report just rewritten by verifier with no gaps, report stale after rework.)
+```bash
+if grep -E '^- \[ \]' .ralph/acceptance-report.md \
+   | grep -v '(blocked:' \
+   | grep -v 'All acceptance criteria met' \
+   | head -1 > /dev/null; then
+  echo "MODE=REWORK"
+else
+  echo "MODE=VERIFIER"
+fi
+```
+
+The rule is: an actionable gap is a `[ ]` line in the **Gaps** section that is NOT suffixed with `(blocked: …)` and is NOT the top-level "All acceptance criteria met" checkbox. If any actionable gap exists → REWORK. Otherwise → VERIFIER.
+
+**Do not pick the mode by alternation** ("last loop was VERIFIER so this one should be REWORK"). The state of the report determines the mode, not the prior loop. If every gap is blocked or the gaps section is empty, VERIFIER runs again — that's correct, because the verifier is the only role that can flip the top-level checkbox.
+
+**Early exit:** If the report's top-level checkbox is `[x]` AND the **Status** line reads `CLEAN`, emit `<ralph>COMPLETE</ralph>` and stop. Do not invoke a sub-agent.
 
 **Step 3. Delegate via Task tool.** Invoke the Task tool once with `subagent_type: general-purpose`. The sub-agent's prompt should be:
 
@@ -51,6 +64,7 @@ Bump the **Last loop** and **Last mode** header fields. Commit the report change
 - Do not mark the top-level "All acceptance criteria met" checkbox yourself. Only the verifier does this, and only after a full independent pass.
 - Do not invent gaps or dismiss real ones. If the report says something, it is authoritative for the current loop.
 - Do not commit sub-agent work before the sub-agent has returned. Wait, then commit the report update as a single commit.
+- Do not pick mode by alternating with the prior loop. Use the deterministic command above.
 
 ## Why sub-agents (vs. invoking the role skills inline)
 

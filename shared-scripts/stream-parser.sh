@@ -90,12 +90,12 @@ RECOVERY_HINT_FILE="$RALPH_DIR/recovery-hint.md"
 # Read-without-write stall detection: if the agent executes N consecutive
 # read/shell operations without any write, it is a smell worth logging —
 # but it is NOT evidence of stuckness on its own. 1M-context models
-# legitimately read 25-40 files up-front on foundational phases with no
-# handoff.md. The stall is surfaced to errors.log + activity.log for
-# operator visibility, but does NOT emit a GUTTER signal (0.2.4). Real
-# stuckness is caught by the shell-failure and thrashing heuristics.
+# Long read streaks are normal during diagnosis and early-phase exploration.
+# The stall is surfaced to errors.log + activity.log for operator visibility,
+# but does NOT emit a GUTTER signal. Real stuckness is caught by the
+# shell-failure and thrashing heuristics.
 CONSECUTIVE_READS=0
-MAX_READS_WITHOUT_WRITE="${RALPH_MAX_READS_WITHOUT_WRITE:-40}"
+MAX_READS_WITHOUT_WRITE="${RALPH_MAX_READS_WITHOUT_WRITE:-100}"
 
 # 0.4.0: Stuck-pattern thresholds. Pre-0.4.0 these were hardcoded at 2
 # (shell-fail) and 5 (file-thrash) in the body of their respective
@@ -348,6 +348,18 @@ track_shell_failure() {
     count=$((count + 1))
     echo "$single_line_cmd" >>"$FAILURES_FILE"
     log_error "SHELL FAIL: $cmd → exit $exit_code (attempt $count)"
+    # When `git commit` fails (or `git add && git commit`), surface common
+    # causes the agent might miss. Most common is staging a gitignored path
+    # (e.g. anything under .ralph/) — git silently leaves the index empty
+    # and the commit fails with a generic exit 1. Log a hint so the next
+    # attempt isn't a blind retry.
+    if [[ "$cmd" == *"git commit"* ]]; then
+      if [[ "$cmd" == *".ralph/"* ]] || [[ "$cmd" == *"acceptance-report"* ]]; then
+        log_error "💡 HINT: \`.ralph/\` is gitignored — \`git add\` on it leaves the index empty and commit fails with exit 1. Do not stage or commit anything under .ralph/."
+      elif [[ $exit_code -eq 1 ]] && [[ "$cmd" == *"git add"* ]]; then
+        log_error "💡 HINT: git commit exit 1 after \`git add\` often means a staged path is gitignored (commit aborts with empty index). Run \`git status --short\` to verify staging."
+      fi
+    fi
     # 0.1.10: lowered from 3 to 2. A second identical failure is already
     # strong evidence of stuckness; the extra retry just burns tokens on
     # shell output and delays GUTTER detection.
@@ -607,24 +619,12 @@ process_line() {
       # 0.6.1: also emit SUGGEST_SKILL pointing at `reviewing-loop-progress`.
       # Empirical evidence (12 stall warnings in a single dmatrix.refactor
       # session with zero escalation) showed the logged-only treatment was
-      # too passive — agents that read 40+ files with no write are usually
-      # confused about the task, not legitimately exploring. The lighter
-      # `reviewing-loop-progress` skill (one-paragraph "what am I actually
-      # doing" reflection) is the right intervention here, not the heavier
-      # `diagnosing-stuck-tasks` (reserved for repeated gate failures).
-      # Deduped per-loop via SUGGESTED_SKILLS_FILE so the same stall
-      # pattern doesn't spam suggestions every 40 ops.
+      # Long read streaks can be legitimate exploration or diagnosis.
+      # Log for operator visibility but do not suggest a skill — reading
+      # without writing is often exactly the right thing to do. Real
+      # stuckness is caught by gate-failure and file-thrash heuristics.
       if [[ $CONSECUTIVE_READS -ge $MAX_READS_WITHOUT_WRITE ]]; then
-        log_error "⚠️ READ-WITHOUT-WRITE STALL: $CONSECUTIVE_READS consecutive reads/shells without a write (informational only)"
-        log_activity "⚠️ Read-without-write stall: $CONSECUTIVE_READS ops without a write"
-        if ! grep -qxF "reviewing-loop-progress" "$SUGGESTED_SKILLS_FILE" 2>/dev/null; then
-          _write_skill_suggestion "reviewing-loop-progress" \
-            "Agent has performed ${CONSECUTIVE_READS} reads/shells with no write in between" \
-            "Long read-without-write streaks usually mean the agent is confused about the task or thrashing through unrelated files. A meta-reflection (one paragraph: what am I doing, what's working, what's not) is cheaper than another 40 reads."
-          echo "reviewing-loop-progress" >>"$SUGGESTED_SKILLS_FILE"
-          log_activity "💡 Skill suggestion: reviewing-loop-progress (read-without-write stall)"
-          echo "SUGGEST_SKILL" 2>/dev/null || true
-        fi
+        log_activity "ℹ️ Read-without-write: $CONSECUTIVE_READS ops without a write (informational)"
         CONSECUTIVE_READS=0
       fi
 
