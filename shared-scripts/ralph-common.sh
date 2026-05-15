@@ -635,6 +635,23 @@ _check_orphan_leak() {
     "$baseline_untracked" 2>/dev/null)
   [[ -z "$leaked" ]] && return 0
 
+  # 0.9.1: Filter out files explicitly named in the current task description.
+  # When a task spec says "create E2E test at `apps/api/tests/e2e/foo.spec.ts`",
+  # that file appearing as newly committed is expected, not a leak.
+  local _task_summary="$ralph_dir/task-summary"
+  if [[ -f "$_task_summary" ]]; then
+    local _expected_paths=""
+    # shellcheck disable=SC2016
+    _expected_paths=$(sed -n '/^---$/,$p' "$_task_summary" |
+      grep -oE '`[^`]+\.[a-zA-Z]{1,10}`' | tr -d '`' | LC_ALL=C sort -u 2>/dev/null) || true
+    if [[ -n "$_expected_paths" ]]; then
+      leaked=$(LC_ALL=C comm -23 \
+        <(printf '%s\n' "$leaked" | LC_ALL=C sort -u) \
+        <(printf '%s\n' "$_expected_paths" | LC_ALL=C sort -u) 2>/dev/null)
+      [[ -z "$leaked" ]] && return 0
+    fi
+  fi
+
   local leaked_inline
   leaked_inline=$(printf '%s' "$leaked" | tr '\n' ' ')
   log_activity "$workspace" "⚠️  ORPHAN LEAK: loop committed files that were untracked at start: $leaked_inline"

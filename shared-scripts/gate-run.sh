@@ -170,6 +170,71 @@ _log_activity() {
 }
 
 # -----------------------------------------------------------------------------
+# Pre-run checks: gate-without-write and post-failure diagnosis (0.9.1)
+# -----------------------------------------------------------------------------
+
+# 0.9.1: Gate-without-write block. Re-running a gate without any code changes
+# in between is always wasteful — the same inputs produce the same outputs.
+# Block unless at least one WRITE event (excluding .ralph/gates/ paths) has
+# been logged since the last run of this label. Escape via RALPH_GATE_FORCE=1.
+_last_run_ts_file="$gates_dir/${label}-last-run-ts"
+if [[ "${RALPH_GATE_FORCE:-0}" != "1" ]] && [[ -f "$_last_run_ts_file" ]]; then
+  _last_epoch=$(cat "$_last_run_ts_file" 2>/dev/null)
+  if [[ -n "$_last_epoch" ]] && [[ "$_last_epoch" =~ ^[0-9]+$ ]]; then
+    _last_time=$(date -r "$_last_epoch" '+%H:%M:%S' 2>/dev/null) || _last_time="$_last_epoch"
+    _has_write=0
+    if [[ -f "$_activity_log" ]]; then
+      while IFS= read -r _wr_line; do
+        _wr_time="${_wr_line%%]*}"
+        _wr_time="${_wr_time#[}"
+        if [[ "$_wr_line" == *"WRITE "* ]] && [[ "$_wr_line" != *".ralph/gates/"* ]]; then
+          if [[ "$_wr_time" > "$_last_time" ]] || [[ "$_wr_time" == "$_last_time" ]]; then
+            _has_write=1
+            break
+          fi
+        fi
+      done < <(tail -200 "$_activity_log")
+    fi
+    if [[ $_has_write -eq 0 ]]; then
+      echo "BLOCKED: No code writes since last run of gate '$label'." >&2
+      echo "  Re-running a gate without code changes will produce the same result." >&2
+      echo "  Read the previous output at .ralph/gates/${label}-latest.log," >&2
+      echo "  diagnose the failure, make a fix, then retry." >&2
+      echo "  (Override: RALPH_GATE_FORCE=1)" >&2
+      _log_activity "🧪 GATE BLOCKED label=$label — no code writes since last run"
+      exit 75
+    fi
+  fi
+fi
+
+# 0.9.1: Post-failure diagnosis requirement. After a gate failure, the agent
+# must write a structured analysis to .ralph/gates/<label>.diagnosis before
+# retrying. This forces the agent to engage with the failure output rather
+# than pattern-matching on the exit code.
+_pending_diag="$gates_dir/${label}.pending-diagnosis"
+_diag_file="$gates_dir/${label}.diagnosis"
+if [[ "${RALPH_GATE_FORCE:-0}" != "1" ]] && [[ -f "$_pending_diag" ]]; then
+  _pending_epoch=$(cat "$_pending_diag" 2>/dev/null)
+  if [[ -n "$_pending_epoch" ]]; then
+    _need_diag=1
+    if [[ -f "$_diag_file" ]]; then
+      _diag_mtime=$(stat -f '%m' "$_diag_file" 2>/dev/null || stat -c '%Y' "$_diag_file" 2>/dev/null || echo 0)
+      if [[ "$_diag_mtime" -ge "$_pending_epoch" ]]; then
+        _need_diag=0
+      fi
+    fi
+    if [[ $_need_diag -eq 1 ]]; then
+      echo "BLOCKED: No diagnosis written since last failure of gate '$label'." >&2
+      echo "  Write your analysis to .ralph/gates/${label}.diagnosis before retrying." >&2
+      echo "  Include: what specifically failed, your theory of cause, and your plan to fix it." >&2
+      echo "  (Override: RALPH_GATE_FORCE=1)" >&2
+      _log_activity "🧪 GATE BLOCKED label=$label — no diagnosis since last failure"
+      exit 75
+    fi
+  fi
+fi
+
+# -----------------------------------------------------------------------------
 # Run the command, capturing real exit code via PIPESTATUS
 # -----------------------------------------------------------------------------
 
@@ -484,6 +549,19 @@ printf '%s' "$cmd_status" >"$gates_dir/$label-latest.exit"
 # so the comparison in `_complete_allowed` is a plain string match after
 # whitespace normalization. No newline.
 printf '%s' "$*" >"$gates_dir/$label-latest.cmd"
+
+# 0.9.1: Record run timestamp for the gate-without-write check on next run.
+printf '%s' "$(date +%s)" >"$_last_run_ts_file"
+
+# 0.9.1: Post-failure diagnosis lifecycle.
+if [[ $cmd_status -ne 0 ]]; then
+  # Gate failed — create pending-diagnosis marker so the next run requires
+  # a written diagnosis before retrying.
+  printf '%s' "$(date +%s)" >"$_pending_diag"
+elif [[ $cmd_status -eq 0 ]]; then
+  # Gate passed — clean up any diagnosis artifacts from prior failures.
+  rm -f "$_pending_diag" "$_diag_file"
+fi
 
 # 0.6.1: Long-gate single-failure SUGGEST_SKILL trigger.
 #

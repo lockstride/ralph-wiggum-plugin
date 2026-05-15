@@ -379,6 +379,7 @@ EOF
 
 @test "retains only RALPH_GATE_KEEP logs" {
   export RALPH_GATE_KEEP=2
+  export RALPH_GATE_FORCE=1
 
   # Run 4 gates
   for i in 1 2 3 4; do
@@ -391,4 +392,103 @@ EOF
   count=$(find "$MOCK_WORKSPACE/.ralph/gates" -name "basic-*.log" \
     ! -name "basic-latest.log" -type f | wc -l | tr -d ' ')
   [ "$count" -eq 2 ]
+}
+
+# -----------------------------------------------------------------------------
+# 0.9.1: Gate-without-write block
+# -----------------------------------------------------------------------------
+
+@test "gate-without-write blocks re-run when no WRITE in activity log (0.9.1)" {
+  touch "$MOCK_WORKSPACE/.ralph/activity.log"
+  # First run succeeds and writes the last-run-ts marker.
+  bash "$SCRIPTS_DIR/gate-run.sh" basic echo "first run" || true
+  [ -f "$MOCK_WORKSPACE/.ralph/gates/basic-last-run-ts" ]
+
+  # Second run with no WRITE events in between → blocked with exit 75.
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "second run"
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"No code writes"* ]]
+}
+
+@test "gate-without-write allows re-run when WRITE appears in activity log (0.9.1)" {
+  touch "$MOCK_WORKSPACE/.ralph/activity.log"
+  bash "$SCRIPTS_DIR/gate-run.sh" basic echo "first run" || true
+
+  # Simulate a WRITE event in the activity log after the first run.
+  local now
+  now=$(date '+%H:%M:%S')
+  echo "[$now] 🟢 WRITE src/app.ts (10 lines, 1KB)" >> "$MOCK_WORKSPACE/.ralph/activity.log"
+
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "second run"
+  [ "$status" -eq 0 ]
+}
+
+@test "RALPH_GATE_FORCE=1 bypasses gate-without-write block (0.9.1)" {
+  touch "$MOCK_WORKSPACE/.ralph/activity.log"
+  bash "$SCRIPTS_DIR/gate-run.sh" basic echo "first run" || true
+
+  RALPH_GATE_FORCE=1 run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "forced run"
+  [ "$status" -eq 0 ]
+}
+
+# -----------------------------------------------------------------------------
+# 0.9.1: Post-failure diagnosis requirement
+# -----------------------------------------------------------------------------
+
+@test "gate failure creates pending-diagnosis marker (0.9.1)" {
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic false
+  [ "$status" -eq 1 ]
+  [ -f "$MOCK_WORKSPACE/.ralph/gates/basic.pending-diagnosis" ]
+}
+
+@test "gate blocks when pending-diagnosis exists but no diagnosis written (0.9.1)" {
+  # First run fails — creates pending-diagnosis.
+  RALPH_GATE_FORCE=1 bash "$SCRIPTS_DIR/gate-run.sh" basic false || true
+  [ -f "$MOCK_WORKSPACE/.ralph/gates/basic.pending-diagnosis" ]
+
+  # Simulate a WRITE so gate-without-write check passes.
+  local now
+  now=$(date '+%H:%M:%S')
+  echo "[$now] 🟢 WRITE src/fix.ts (5 lines, 0KB)" >> "$MOCK_WORKSPACE/.ralph/activity.log"
+
+  # Second run blocked — no diagnosis.
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "retry"
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"No diagnosis written"* ]]
+}
+
+@test "gate proceeds when diagnosis is written after pending-diagnosis (0.9.1)" {
+  RALPH_GATE_FORCE=1 bash "$SCRIPTS_DIR/gate-run.sh" basic false || true
+
+  # Write a diagnosis file (newer than pending-diagnosis).
+  sleep 1
+  echo "Coverage at 99.95%, threshold 100%. Missing branch in controller catch." \
+    > "$MOCK_WORKSPACE/.ralph/gates/basic.diagnosis"
+
+  # Simulate a WRITE so gate-without-write check passes.
+  local now
+  now=$(date '+%H:%M:%S')
+  echo "[$now] 🟢 WRITE src/fix.ts (5 lines, 0KB)" >> "$MOCK_WORKSPACE/.ralph/activity.log"
+
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "fixed"
+  [ "$status" -eq 0 ]
+}
+
+@test "gate success cleans up diagnosis artifacts (0.9.1)" {
+  # Create diagnosis artifacts as if from a prior failure.
+  printf '%s' "$(date +%s)" > "$MOCK_WORKSPACE/.ralph/gates/basic.pending-diagnosis"
+  echo "some analysis" > "$MOCK_WORKSPACE/.ralph/gates/basic.diagnosis"
+
+  RALPH_GATE_FORCE=1 bash "$SCRIPTS_DIR/gate-run.sh" basic true
+
+  [ ! -f "$MOCK_WORKSPACE/.ralph/gates/basic.pending-diagnosis" ]
+  [ ! -f "$MOCK_WORKSPACE/.ralph/gates/basic.diagnosis" ]
+}
+
+@test "writes last-run-ts breadcrumb on every run (0.9.1)" {
+  bash "$SCRIPTS_DIR/gate-run.sh" basic echo "test" || true
+  [ -f "$MOCK_WORKSPACE/.ralph/gates/basic-last-run-ts" ]
+  local ts
+  ts=$(cat "$MOCK_WORKSPACE/.ralph/gates/basic-last-run-ts")
+  [[ "$ts" =~ ^[0-9]+$ ]]
 }

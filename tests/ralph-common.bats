@@ -450,6 +450,42 @@ LOG
   rm -rf "$ws"
 }
 
+@test "_check_orphan_leak skips files named in task-summary (0.9.1)" {
+  local ws
+  ws=$(mktemp -d "$BATS_TMPDIR/orphan-allowlist.XXXXXX")
+  git -C "$ws" init -q
+  git -C "$ws" config user.email "test@test.com"
+  git -C "$ws" config user.name "Test"
+
+  echo "init" >"$ws/init.txt"
+  git -C "$ws" add init.txt
+  git -C "$ws" commit -q -m "init"
+
+  mkdir -p "$ws/.ralph"
+  git -C "$ws" rev-parse HEAD >"$ws/.ralph/loop-baseline-head"
+
+  # Create the file the task spec names, then commit it
+  mkdir -p "$ws/apps/api/tests/e2e"
+  echo "test content" >"$ws/apps/api/tests/e2e/attach-matrix.e2e.spec.ts"
+  git -C "$ws" ls-files --others --exclude-standard >"$ws/.ralph/loop-baseline-untracked"
+  git -C "$ws" add "apps/api/tests/e2e/attach-matrix.e2e.spec.ts"
+  git -C "$ws" commit -q -m "add e2e test"
+
+  # Task summary explicitly names this file path in backticks
+  cat >"$ws/.ralph/task-summary" <<'SUMMARY'
+done=5
+total=6
+remaining=1
+---
+- [ ] T024 E2E test at `apps/api/tests/e2e/attach-matrix.e2e.spec.ts`
+SUMMARY
+
+  # Should return 0 — the "leaked" file is expected by the task spec.
+  _check_orphan_leak "$ws"
+
+  rm -rf "$ws"
+}
+
 # ---------------------------------------------------------------------------
 # _classify_heartbeat_exit — heartbeat loop exit classifier (0.3.1+)
 # ---------------------------------------------------------------------------

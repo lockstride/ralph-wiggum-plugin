@@ -87,16 +87,6 @@ trap _cleanup_parser EXIT
 RECOVERY_ATTEMPTED=0
 RECOVERY_HINT_FILE="$RALPH_DIR/recovery-hint.md"
 
-# Read-without-write stall detection: if the agent executes N consecutive
-# read/shell operations without any write, it is a smell worth logging —
-# but it is NOT evidence of stuckness on its own. 1M-context models
-# Long read streaks are normal during diagnosis and early-phase exploration.
-# The stall is surfaced to errors.log + activity.log for operator visibility,
-# but does NOT emit a GUTTER signal. Real stuckness is caught by the
-# shell-failure and thrashing heuristics.
-CONSECUTIVE_READS=0
-MAX_READS_WITHOUT_WRITE="${RALPH_MAX_READS_WITHOUT_WRITE:-100}"
-
 # 0.4.0: Stuck-pattern thresholds. Pre-0.4.0 these were hardcoded at 2
 # (shell-fail) and 5 (file-thrash) in the body of their respective
 # detectors, which killed agents on the most ordinary red-state workflow:
@@ -415,7 +405,6 @@ track_shell_failure() {
 # session and the run-loop's `signal` variable never clears once set.
 reset_failure_counters_on_task_boundary() {
   : >"$FAILURES_FILE"
-  CONSECUTIVE_READS=0
   # 0.6.0: also clear the per-loop suggested-skill marker so the
   # next stuck pattern (probably on a different command) gets a fresh
   # suggestion. The skill-suggestion file itself is consumed by the
@@ -534,16 +523,12 @@ process_line() {
           BYTES_READ=$((BYTES_READ + bytes))
           local kb=$((bytes / 1024))
           log_activity "READ $path (${lines} lines, ~${kb}KB)"
-          # Read-without-write stall: increment counter
-          CONSECUTIVE_READS=$((CONSECUTIVE_READS + 1))
           ;;
         Write)
           BYTES_WRITTEN=$((BYTES_WRITTEN + bytes))
           local kb=$((bytes / 1024))
           log_activity "WRITE $path (${lines} lines, ${kb}KB)"
           track_file_write "$path"
-          # Write resets the read-without-write counter
-          CONSECUTIVE_READS=0
           ;;
         Shell)
           SHELL_OUTPUT_CHARS=$((SHELL_OUTPUT_CHARS + bytes))
@@ -603,30 +588,6 @@ process_line() {
           ASSISTANT_CHARS=$((ASSISTANT_CHARS + bytes))
           ;;
       esac
-
-      # Read-without-write stall: Shell also counts as a non-write op
-      # (already tracked in Read case above; Shell increments here).
-      if [[ "$name" == "Shell" ]]; then
-        CONSECUTIVE_READS=$((CONSECUTIVE_READS + 1))
-      fi
-
-      # Check read-without-write stall threshold.
-      # 0.2.4: Downgraded from GUTTER to a logged-only observation. A
-      # stall is a smell (worth surfacing to the operator for diagnosis)
-      # but not evidence of stuckness on its own. Real stuckness comes
-      # from repeated identical shell failures or file thrashing, which
-      # are handled elsewhere.
-      # 0.6.1: also emit SUGGEST_SKILL pointing at `reviewing-loop-progress`.
-      # Empirical evidence (12 stall warnings in a single dmatrix.refactor
-      # session with zero escalation) showed the logged-only treatment was
-      # Long read streaks can be legitimate exploration or diagnosis.
-      # Log for operator visibility but do not suggest a skill — reading
-      # without writing is often exactly the right thing to do. Real
-      # stuckness is caught by gate-failure and file-thrash heuristics.
-      if [[ $CONSECUTIVE_READS -ge $MAX_READS_WITHOUT_WRITE ]]; then
-        log_activity "ℹ️ Read-without-write: $CONSECUTIVE_READS ops without a write (informational)"
-        CONSECUTIVE_READS=0
-      fi
 
       check_gutter
       ;;

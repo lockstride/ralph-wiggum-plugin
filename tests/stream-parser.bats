@@ -305,67 +305,6 @@ tool_result_json() {
   echo "$output" | grep -q "^GUTTER$"
 }
 
-@test "read-without-write streak logs informationally, no SUGGEST_SKILL, no GUTTER (0.9.0)" {
-  # 0.9.0 removed the SUGGEST_SKILL emission from the read-without-write
-  # path entirely. Long read streaks are normal during diagnosis and
-  # exploration — penalizing them with a skill suggestion biases the
-  # agent away from the exact behavior it needs. Real stuckness is caught
-  # by gate-failure and file-thrash heuristics. The streak is still
-  # logged to activity.log for operator visibility.
-  export RALPH_MAX_READS_WITHOUT_WRITE=5  # low threshold for testing
-
-  local events=""
-  for i in $(seq 1 6); do
-    events+=$(tool_result_json "Read" 10 5 0 "/tmp/file${i}.ts")
-    events+=$'\n'
-  done
-
-  local output
-  output=$(run_parser "$events")
-
-  # Informational log entry only — no error-log entry, no skill suggestion.
-  grep -q "Read-without-write" "$MOCK_WORKSPACE/.ralph/activity.log"
-
-  # No SUGGEST_SKILL emission from the read-without-write path.
-  if echo "$output" | grep -q "^SUGGEST_SKILL$"; then
-    fail "read-without-write should not emit SUGGEST_SKILL as of 0.9.0"
-  fi
-
-  # No skill-suggestion file written.
-  if [ -f "$MOCK_WORKSPACE/.ralph/skill-suggestion" ]; then
-    fail "read-without-write should not write a skill-suggestion file as of 0.9.0"
-  fi
-
-  # Does NOT emit GUTTER.
-  if echo "$output" | grep -q "GUTTER"; then
-    fail "Stall should not emit GUTTER"
-  fi
-}
-
-@test "resets read-without-write counter on Write" {
-  export RALPH_MAX_READS_WITHOUT_WRITE=5
-
-  local events=""
-  # 4 reads, then a write, then 4 more reads — never hits 5 consecutive
-  for i in $(seq 1 4); do
-    events+=$(tool_result_json "Read" 10 5 0 "/tmp/file${i}.ts")
-    events+=$'\n'
-  done
-  events+=$(tool_result_json "Write" 10 5 0 "/tmp/output.ts")
-  events+=$'\n'
-  for i in $(seq 5 8); do
-    events+=$(tool_result_json "Read" 10 5 0 "/tmp/file${i}.ts")
-    events+=$'\n'
-  done
-
-  run_parser "$events" >/dev/null
-  # No stall log entry — the Write reset the counter before either
-  # 5-read streak hit the threshold.
-  if grep -q "Read-without-write" "$MOCK_WORKSPACE/.ralph/activity.log" 2>/dev/null; then
-    fail "Stall logged despite Write in between reads"
-  fi
-}
-
 @test "emits COMPLETE on promise signal" {
   local events='{"kind":"assistant_text","text":"All done. <promise>ALL_TASKS_DONE</promise>"}'
 
@@ -448,24 +387,3 @@ tool_result_json() {
   ! pgrep -f "^sleep $interval$" >/dev/null
 }
 
-@test "Shell commands increment read-without-write counter" {
-  export RALPH_MAX_READS_WITHOUT_WRITE=5
-
-  local events=""
-  # Mix of reads and shells — all non-write ops
-  events+=$(tool_result_json "Read" 10 5 0 "/tmp/file1.ts")
-  events+=$'\n'
-  events+=$(tool_result_json "Shell" 10 5 0 "" "ls -la")
-  events+=$'\n'
-  events+=$(tool_result_json "Read" 10 5 0 "/tmp/file2.ts")
-  events+=$'\n'
-  events+=$(tool_result_json "Shell" 10 5 0 "" "grep foo bar")
-  events+=$'\n'
-  events+=$(tool_result_json "Read" 10 5 0 "/tmp/file3.ts")
-  events+=$'\n'
-
-  run_parser "$events" >/dev/null
-  # 5 non-write ops should hit the threshold and produce an informational
-  # log entry in activity.log (0.9.0: no error log, no skill suggestion).
-  grep -q "Read-without-write" "$MOCK_WORKSPACE/.ralph/activity.log"
-}
