@@ -379,11 +379,13 @@ EOF
 
 @test "retains only RALPH_GATE_KEEP logs" {
   export RALPH_GATE_KEEP=2
-  export RALPH_GATE_FORCE=1
 
-  # Run 4 gates
+  # Run 4 gates, simulating a WRITE between each so gate-without-write allows re-run.
   for i in 1 2 3 4; do
     bash "$SCRIPTS_DIR/gate-run.sh" basic echo "run $i" || true
+    local now
+    now=$(date '+%H:%M:%S')
+    echo "[$now] 🟢 WRITE src/file${i}.ts (1 lines, 0KB)" >> "$MOCK_WORKSPACE/.ralph/activity.log"
     sleep 1  # ensure distinct timestamps
   done
 
@@ -423,14 +425,6 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "RALPH_GATE_FORCE=1 bypasses gate-without-write block (0.9.1)" {
-  touch "$MOCK_WORKSPACE/.ralph/activity.log"
-  bash "$SCRIPTS_DIR/gate-run.sh" basic echo "first run" || true
-
-  RALPH_GATE_FORCE=1 run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "forced run"
-  [ "$status" -eq 0 ]
-}
-
 # -----------------------------------------------------------------------------
 # 0.9.1: Post-failure diagnosis requirement
 # -----------------------------------------------------------------------------
@@ -442,8 +436,8 @@ EOF
 }
 
 @test "gate blocks when pending-diagnosis exists but no diagnosis written (0.9.1)" {
-  # First run fails — creates pending-diagnosis.
-  RALPH_GATE_FORCE=1 bash "$SCRIPTS_DIR/gate-run.sh" basic false || true
+  # First run fails — creates pending-diagnosis (no markers yet, so runs clean).
+  bash "$SCRIPTS_DIR/gate-run.sh" basic false || true
   [ -f "$MOCK_WORKSPACE/.ralph/gates/basic.pending-diagnosis" ]
 
   # Simulate a WRITE so gate-without-write check passes.
@@ -458,7 +452,7 @@ EOF
 }
 
 @test "gate proceeds when diagnosis is written after pending-diagnosis (0.9.1)" {
-  RALPH_GATE_FORCE=1 bash "$SCRIPTS_DIR/gate-run.sh" basic false || true
+  bash "$SCRIPTS_DIR/gate-run.sh" basic false || true
 
   # Write a diagnosis file (newer than pending-diagnosis).
   sleep 1
@@ -479,7 +473,7 @@ EOF
   printf '%s' "$(date +%s)" > "$MOCK_WORKSPACE/.ralph/gates/basic.pending-diagnosis"
   echo "some analysis" > "$MOCK_WORKSPACE/.ralph/gates/basic.diagnosis"
 
-  RALPH_GATE_FORCE=1 bash "$SCRIPTS_DIR/gate-run.sh" basic true
+  bash "$SCRIPTS_DIR/gate-run.sh" basic true
 
   [ ! -f "$MOCK_WORKSPACE/.ralph/gates/basic.pending-diagnosis" ]
   [ ! -f "$MOCK_WORKSPACE/.ralph/gates/basic.diagnosis" ]

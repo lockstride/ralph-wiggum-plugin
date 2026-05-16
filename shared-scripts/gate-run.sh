@@ -176,9 +176,11 @@ _log_activity() {
 # 0.9.1: Gate-without-write block. Re-running a gate without any code changes
 # in between is always wasteful — the same inputs produce the same outputs.
 # Block unless at least one WRITE event (excluding .ralph/gates/ paths) has
-# been logged since the last run of this label. Escape via RALPH_GATE_FORCE=1.
+# been logged since the last run of this label. No override — fix the code.
+# Markers are cleared at loop start (see _capture_loop_baseline) so each
+# new loop gets one free gate run.
 _last_run_ts_file="$gates_dir/${label}-last-run-ts"
-if [[ "${RALPH_GATE_FORCE:-0}" != "1" ]] && [[ -f "$_last_run_ts_file" ]]; then
+if [[ -f "$_last_run_ts_file" ]]; then
   _last_epoch=$(cat "$_last_run_ts_file" 2>/dev/null)
   if [[ -n "$_last_epoch" ]] && [[ "$_last_epoch" =~ ^[0-9]+$ ]]; then
     _last_time=$(date -r "$_last_epoch" '+%H:%M:%S' 2>/dev/null) || _last_time="$_last_epoch"
@@ -200,7 +202,6 @@ if [[ "${RALPH_GATE_FORCE:-0}" != "1" ]] && [[ -f "$_last_run_ts_file" ]]; then
       echo "  Re-running a gate without code changes will produce the same result." >&2
       echo "  Read the previous output at .ralph/gates/${label}-latest.log," >&2
       echo "  diagnose the failure, make a fix, then retry." >&2
-      echo "  (Override: RALPH_GATE_FORCE=1)" >&2
       _log_activity "🧪 GATE BLOCKED label=$label — no code writes since last run"
       exit 75
     fi
@@ -213,7 +214,7 @@ fi
 # than pattern-matching on the exit code.
 _pending_diag="$gates_dir/${label}.pending-diagnosis"
 _diag_file="$gates_dir/${label}.diagnosis"
-if [[ "${RALPH_GATE_FORCE:-0}" != "1" ]] && [[ -f "$_pending_diag" ]]; then
+if [[ -f "$_pending_diag" ]]; then
   _pending_epoch=$(cat "$_pending_diag" 2>/dev/null)
   if [[ -n "$_pending_epoch" ]]; then
     _need_diag=1
@@ -227,7 +228,6 @@ if [[ "${RALPH_GATE_FORCE:-0}" != "1" ]] && [[ -f "$_pending_diag" ]]; then
       echo "BLOCKED: No diagnosis written since last failure of gate '$label'." >&2
       echo "  Write your analysis to .ralph/gates/${label}.diagnosis before retrying." >&2
       echo "  Include: what specifically failed, your theory of cause, and your plan to fix it." >&2
-      echo "  (Override: RALPH_GATE_FORCE=1)" >&2
       _log_activity "🧪 GATE BLOCKED label=$label — no diagnosis since last failure"
       exit 75
     fi
