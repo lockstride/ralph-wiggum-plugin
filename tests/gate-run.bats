@@ -425,6 +425,27 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "gate-without-write detects writes when last-run-ts contains raw epoch (0.9.2)" {
+  # Reproduce the Linux bug: date -r <epoch> fails on GNU/Linux, so the
+  # timestamp file contains a raw epoch. The fix uses date -d @<epoch> first.
+  touch "$MOCK_WORKSPACE/.ralph/activity.log"
+
+  # Write a last-run-ts with a known epoch (simulates a prior gate run).
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  local epoch
+  epoch=$(date +%s)
+  printf '%s' "$epoch" > "$MOCK_WORKSPACE/.ralph/gates/basic-last-run-ts"
+
+  # Simulate a WRITE event 2 seconds "after" the epoch.
+  sleep 2
+  local now
+  now=$(date '+%H:%M:%S')
+  echo "[$now] 🟢 WRITE src/fix.ts (3 lines, 0KB)" >> "$MOCK_WORKSPACE/.ralph/activity.log"
+
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "after write"
+  [ "$status" -eq 0 ]
+}
+
 # -----------------------------------------------------------------------------
 # 0.9.1: Post-failure diagnosis requirement
 # -----------------------------------------------------------------------------

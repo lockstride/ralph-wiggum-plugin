@@ -183,7 +183,7 @@ _last_run_ts_file="$gates_dir/${label}-last-run-ts"
 if [[ -f "$_last_run_ts_file" ]]; then
   _last_epoch=$(cat "$_last_run_ts_file" 2>/dev/null)
   if [[ -n "$_last_epoch" ]] && [[ "$_last_epoch" =~ ^[0-9]+$ ]]; then
-    _last_time=$(date -r "$_last_epoch" '+%H:%M:%S' 2>/dev/null) || _last_time="$_last_epoch"
+    _last_time=$(date -d "@$_last_epoch" '+%H:%M:%S' 2>/dev/null || date -r "$_last_epoch" '+%H:%M:%S' 2>/dev/null) || _last_time="$_last_epoch"
     _has_write=0
     if [[ -f "$_activity_log" ]]; then
       while IFS= read -r _wr_line; do
