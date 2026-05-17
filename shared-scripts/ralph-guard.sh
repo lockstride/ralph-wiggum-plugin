@@ -7,7 +7,8 @@
 #
 #   - Gate-without-write block (Bash: gate-run.sh without intervening write)
 #   - Direct-test-tool denial (Bash: vitest/cypress/tsc without gate-run.sh)
-#   - Protected-script pipe/redirect denial (Bash: RALPH_PROTECTED_SCRIPTS)
+#   - Protected-script pipe/redirect denial (Bash: .ralph/protected-scripts)
+#   - Denied-command blocking (Bash: .ralph/denied-commands)
 #   - State-tampering denial (Bash: rm -rf .ralph/, edits to state paths)
 #   - Forbidden-path denial (Write/Edit/MultiEdit: .ralph/gates/*, state dir)
 #   - Write-event recording (Write/Edit/MultiEdit: updates last-write-ts)
@@ -114,12 +115,13 @@ _guard_bash() {
     _block "State tampering denied: cannot delete .ralph/ contents via find -delete."
   fi
 
+  local stripped
+  stripped=$(_strip_env_prefix "$cmd")
+
   # --- Direct test tool denial ---
   # Block direct invocations of test tools without gate-run.sh wrapper.
   # Only block when the command is NOT going through gate-run.sh or exec.
   if ! echo "$cmd" | grep -qE 'gate-run\.sh|exec'; then
-    local stripped
-    stripped=$(_strip_env_prefix "$cmd")
     if echo "$stripped" | grep -qE '^(vitest|npx vitest|pnpm vitest|yarn vitest|jest|npx jest|cypress|npx cypress|pnpm cypress)(\s|$)'; then
       _block "Direct test tool invocation denied. Run tests through gate-run.sh: bash <plugin>/shared-scripts/gate-run.sh <label> <cmd>"
     fi
@@ -128,19 +130,46 @@ _guard_bash() {
     fi
   fi
 
-  # --- RALPH_PROTECTED_SCRIPTS pipe/redirect denial ---
-  if [[ -n "${RALPH_PROTECTED_SCRIPTS:-}" ]]; then
-    local stripped
-    stripped=$(_strip_env_prefix "$cmd")
+  # --- Denied-commands blocking (.ralph/denied-commands) ---
+  # Each line: command-prefix|denial reason
+  # Exact-command match (not prefix of longer command), so
+  # "pnpm api:test-e2e" blocks "pnpm api:test-e2e --flag" but NOT
+  # "pnpm api:test-e2e:local".
+  if [[ -f "$WORKSPACE/.ralph/denied-commands" ]]; then
+    local denied_cmd denied_reason
+    while IFS='|' read -r denied_cmd denied_reason; do
+      [[ -z "$denied_cmd" || "$denied_cmd" == \#* ]] && continue
+      denied_cmd="${denied_cmd%"${denied_cmd##*[![:space:]]}"}"
+      denied_cmd="${denied_cmd#"${denied_cmd%%[![:space:]]*}"}"
+      [[ -z "$denied_cmd" ]] && continue
+      if [[ "$stripped" == "$denied_cmd" || "$stripped" == "$denied_cmd "* ]]; then
+        denied_reason="${denied_reason%"${denied_reason##*[![:space:]]}"}"
+        denied_reason="${denied_reason#"${denied_reason%%[![:space:]]*}"}"
+        _block "${denied_reason:-Command denied by project configuration.}"
+      fi
+    done <"$WORKSPACE/.ralph/denied-commands"
+  fi
+
+  # --- Protected-script pipe/redirect denial (.ralph/protected-scripts) ---
+  # One command prefix per line. Falls back to RALPH_PROTECTED_SCRIPTS env var.
+  local _protected_scripts=""
+  if [[ -f "$WORKSPACE/.ralph/protected-scripts" ]]; then
+    _protected_scripts=$(grep -v '^\s*#' "$WORKSPACE/.ralph/protected-scripts" | grep -v '^\s*$' | tr '\n' '|')
+  elif [[ -n "${RALPH_PROTECTED_SCRIPTS:-}" ]]; then
+    _protected_scripts=$(echo "$RALPH_PROTECTED_SCRIPTS" | tr ' ' '|')
+  fi
+
+  if [[ -n "$_protected_scripts" ]]; then
     local prefix
-    for prefix in $RALPH_PROTECTED_SCRIPTS; do
+    while IFS='|' read -r prefix; do
+      [[ -z "$prefix" ]] && continue
       if [[ "$stripped" == "$prefix"* ]]; then
         if echo "$cmd" | grep -qE '\||\s*>\s*|>>'; then
-          _block "Protected script pipe/redirect denied: '$prefix' must not be piped or redirected. Run through gate-run.sh instead."
+          _block "Protected script pipe/redirect denied: '$prefix' must not be piped or redirected. Run bare or through gate-run.sh."
         fi
         break
       fi
-    done
+    done <<<"${_protected_scripts//|/$'\n'}"
   fi
 
   # --- Gate-without-write check ---

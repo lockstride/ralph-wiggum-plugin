@@ -254,3 +254,86 @@ _run_guard() {
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.result == "block"'
 }
+
+# --- .ralph/protected-scripts breadcrumb ---
+
+@test "blocks pipe on command listed in .ralph/protected-scripts" {
+  printf 'pnpm all-check\npnpm basic-check\n' > "$MOCK_WORKSPACE/.ralph/protected-scripts"
+  run _run_guard Bash "pnpm all-check | tail -20"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.reason | test("pipe/redirect")'
+}
+
+@test "allows bare command listed in .ralph/protected-scripts" {
+  printf 'pnpm all-check\n' > "$MOCK_WORKSPACE/.ralph/protected-scripts"
+  run _run_guard Bash "pnpm all-check"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "protected-scripts file ignores comments and blank lines" {
+  printf '# gate commands\npnpm all-check\n\n# lint\npnpm lint:check\n' > "$MOCK_WORKSPACE/.ralph/protected-scripts"
+  run _run_guard Bash "pnpm lint:check | grep error"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "protected-scripts file takes precedence over env var" {
+  export RALPH_PROTECTED_SCRIPTS="pnpm old-check"
+  printf 'pnpm new-check\n' > "$MOCK_WORKSPACE/.ralph/protected-scripts"
+  # old-check from env should NOT be protected
+  run _run_guard Bash "pnpm old-check | tail"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  # new-check from file SHOULD be protected
+  run _run_guard Bash "pnpm new-check | tail"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "falls back to RALPH_PROTECTED_SCRIPTS env var when no file" {
+  rm -f "$MOCK_WORKSPACE/.ralph/protected-scripts"
+  export RALPH_PROTECTED_SCRIPTS="pnpm env-check"
+  run _run_guard Bash "pnpm env-check | tail"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+# --- .ralph/denied-commands breadcrumb ---
+
+@test "blocks denied command exactly" {
+  printf 'pnpm api:test-e2e|Use pnpm api:test-e2e:local instead\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
+  run _run_guard Bash "pnpm api:test-e2e"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.reason | test("local")'
+}
+
+@test "blocks denied command with trailing args" {
+  printf 'pnpm api:test-e2e|Use the local variant\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
+  run _run_guard Bash "pnpm api:test-e2e --headed"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "denied command does not block longer command names" {
+  printf 'pnpm api:test-e2e|blocked\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
+  run _run_guard Bash "pnpm api:test-e2e:local"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "denied-commands ignores comments and blank lines" {
+  printf '# expensive commands\n\npnpm test-e2e|Use pnpm test-e2e:local\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
+  run _run_guard Bash "pnpm test-e2e"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "denied command with env prefix is still blocked" {
+  printf 'pnpm test-e2e|Use the local variant\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
+  run _run_guard Bash "CI=true pnpm test-e2e"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}

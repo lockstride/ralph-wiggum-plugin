@@ -1387,6 +1387,8 @@ run_ralph_loop() {
   local workspace="$1"
   local script_dir="${2:-$(dirname "${BASH_SOURCE[0]}")}"
 
+  export RALPH_WORKSPACE="$workspace"
+
   cd "$workspace" || return
   if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
     echo "📦 Committing uncommitted changes..."
