@@ -294,56 +294,35 @@ tool_result_json() {
 }
 
 # ---------------------------------------------------------------------------
-# 0.10.3: Task-ID pattern filter for completion cap
+# 0.10.4: git -C <path> commit/push detection
 # ---------------------------------------------------------------------------
 
-@test "TASK_ID_PATTERN skips infra commits in completion count (0.10.3)" {
-  export RALPH_TASK_COMPLETION_CAP=2
-  export RALPH_TASK_ID_PATTERN='T[0-9]+'
+@test "detects git -C <path> commit as a task boundary (0.10.4)" {
   local events=""
-  # Infra commit — no task ID, should NOT count
-  events+=$(tool_result_json "Shell" 50 5 0 "" "git commit -m 'fix: update hook config'")
-  events+=$'\n'
-  # Task commit — matches pattern, counts as 1
-  events+=$(tool_result_json "Shell" 50 5 0 "" "git commit -m 'feat: add widget (T001)'")
-  events+=$'\n'
-  # Another infra commit — still at 1 task completion
-  events+=$(tool_result_json "Shell" 50 5 0 "" "git commit -m 'chore: lint fix'")
-  events+=$'\n'
+  events+=$(tool_result_json "Shell" 50 5 0 "" "git -C /tmp/worktree commit -m 'feat: add widget (T001)'")
 
   local output
   output=$(run_parser "$events")
-  # Should NOT have hit TURN_END — only 1 task completion, cap is 2
-  if echo "$output" | grep -q "TURN_END"; then
-    fail "TURN_END fired with only 1 task commit (infra commits should not count)"
-  fi
+  echo "$output" | grep -q "RECOVER"
+  grep -q 'COMMIT "feat: add widget (T001)"' "$MOCK_WORKSPACE/.ralph/activity.log"
 }
 
-@test "TASK_ID_PATTERN counts matching commits toward cap (0.10.3)" {
-  export RALPH_TASK_COMPLETION_CAP=2
-  export RALPH_TASK_ID_PATTERN='T[0-9]+'
+@test "detects git -C <path> push (0.10.4)" {
   local events=""
-  events+=$(tool_result_json "Shell" 50 5 0 "" "git commit -m 'feat: add widget (T001)'")
-  events+=$'\n'
-  events+=$(tool_result_json "Shell" 50 5 0 "" "git commit -m 'feat: add gadget (T002)'")
-  events+=$'\n'
+  events+=$(tool_result_json "Shell" 50 5 0 "" "git -C /tmp/worktree push origin main")
 
   local output
   output=$(run_parser "$events")
-  echo "$output" | grep -q "TURN_END"
+  grep -q 'PUSH' "$MOCK_WORKSPACE/.ralph/activity.log"
 }
 
-@test "empty TASK_ID_PATTERN counts all commits (backward compat) (0.10.3)" {
-  export RALPH_TASK_COMPLETION_CAP=2
-  export RALPH_TASK_ID_PATTERN=""
+@test "detects chained git -C add && git -C commit (0.10.4)" {
   local events=""
-  events+=$(tool_result_json "Shell" 50 5 0 "" "git commit -m 'fix: update hook config'")
-  events+=$'\n'
-  events+=$(tool_result_json "Shell" 50 5 0 "" "git commit -m 'chore: lint fix'")
-  events+=$'\n'
+  events+=$(tool_result_json "Shell" 50 5 0 "" "git -C /tmp/worktree add foo.ts && git -C /tmp/worktree commit -m 'fix: bar (T002)'")
 
   local output
   output=$(run_parser "$events")
-  echo "$output" | grep -q "TURN_END"
+  echo "$output" | grep -q "RECOVER"
+  grep -q 'COMMIT "fix: bar (T002)"' "$MOCK_WORKSPACE/.ralph/activity.log"
 }
 

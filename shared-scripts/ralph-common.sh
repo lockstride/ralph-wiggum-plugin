@@ -1557,15 +1557,13 @@ run_ralph_loop() {
         session_id=""
         ;;
       "TURN_END")
-        # 0.10.0: Mechanical turn-end. Emitted on 5 consecutive gate
-        # failures or 3 task completions. Rotate to fresh context with
-        # optional troubleshoot overlay for gate-fail case.
+        # 0.10.0: Mechanical turn-end. Emitted on consecutive gate
+        # failures (threshold: RALPH_GATE_FAIL_STREAK_THRESHOLD, default 5).
         local _failing_label _failing_log
         _failing_label=$(cat "$workspace/.ralph/gates/last-failed-label" 2>/dev/null) || _failing_label=""
         _failing_log=$(cat "$workspace/.ralph/gates/last-failed-log" 2>/dev/null) || _failing_log=""
+        log_activity "$workspace" "LOOP $loop_label END — 🛑 TURN_END (gate-fail streak on '${_failing_label:-unknown}')$task_suffix"
         if [[ -n "$_failing_label" ]]; then
-          log_activity "$workspace" "LOOP $loop_label END — 🛑 TURN_END (gate-fail streak on '$_failing_label')$task_suffix"
-          # Write handoff with gate-fail context
           local _handoff_template
           _handoff_template="$(dirname "${BASH_SOURCE[0]}")/../shared-references/templates/handoff-after-gate-fail.md"
           if [[ -f "$_handoff_template" ]]; then
@@ -1573,11 +1571,8 @@ run_ralph_loop() {
               -e "s|{{CONSECUTIVE_FAILURES}}|5|g" \
               "$_handoff_template" >"$workspace/.ralph/handoff.md"
           fi
-          # Set overlay flag for next build_prompt
           export _RALPH_OVERLAY_TROUBLESHOOT=1
           export _RALPH_FAILING_GATE_LABEL="$_failing_label"
-        else
-          log_activity "$workspace" "LOOP $loop_label END — 🛑 TURN_END (task completion cap)$task_suffix"
         fi
         log_progress "$workspace" "**Loop $loop_label ended** — 🛑 TURN_END"
         echo "🛑 Turn ended — rotating to fresh context..."

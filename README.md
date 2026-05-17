@@ -1,6 +1,6 @@
 # ralph-wiggum-plugin
 
-A CLI-agnostic Ralph autonomous-development loop. Drives either the [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`) or [Cursor](https://cursor.com) (`cursor-agent`) headless CLI from a terminal, with token accounting, context rotation, gutter detection, retry/backoff, Spec Kit integration, and (0.6.0+) plugin skills for cognitive-mode switching when the agent gets stuck.
+A CLI-agnostic Ralph autonomous-development loop. Drives either the [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`) or [Cursor](https://cursor.com) (`cursor-agent`) headless CLI from a terminal, with token accounting, context rotation, gate-run verification, guard hooks, retry/backoff, and Spec Kit integration.
 
 > "That's the beauty of Ralph — the technique is deterministically bad in an undeterministic world." — Geoffrey Huntley
 
@@ -8,9 +8,9 @@ A CLI-agnostic Ralph autonomous-development loop. Drives either the [Claude Code
 
 The Ralph loop is a **shell script you run in a terminal**. It spawns the agent CLI as a subprocess, reads its stream-json output, tracks tokens, rotates context when the window fills, and keeps going until the task is done or the safety cap on agent respawns is reached. The loop is editor-agnostic: the editor you have open is irrelevant.
 
-A healthy ralph **loop** runs as one continuous agent process — it commits as it goes and keeps moving until a real stop condition fires. It only respawns the agent (looping) on hard signals: context-window pressure, a genuine stuck pattern, a rate-limit backoff. Looping is fine when needed but flow is much better — a single small spec usually completes in one loop.
+A healthy ralph **loop** runs as one continuous agent process — it commits as it goes and keeps moving until a real stop condition fires. It only respawns the agent (looping) on hard signals: context-window pressure, consecutive gate failures, or a rate-limit backoff. Looping is fine when needed but flow is much better — a single small spec usually completes in one loop.
 
-The Claude Code plugin wrapping (slash commands, plugin manifest, **and the cognitive-mode skills introduced in 0.6.0**) is a Claude Code-only enrichment. **For Claude Code users, install as a plugin** — it unlocks the specialist skills (`running-gates`, `diagnosing-stuck-tasks`, `reviewing-loop-progress`) that the loop suggests when stuck patterns fire. Standalone-script users still get the full loop infrastructure but the agent runs without those specialist prompts.
+The Claude Code plugin wrapping (slash commands, plugin manifest, and specialist skills) is a Claude Code-only enrichment. **For Claude Code users, install as a plugin** — it unlocks the specialist skills (`running-gates`, `verifying-acceptance-criteria`, `addressing-acceptance-gaps`) that guide the agent through verification workflows. Standalone-script users still get the full loop infrastructure but the agent runs without those specialist prompts.
 
 ## ⚠️ Blast radius
 
@@ -39,7 +39,7 @@ There is no flag to disable YOLO mode. That's the point of Ralph.
 
 #### Recommended (Claude Code users) — install as a plugin
 
-Unlocks slash commands AND the 0.6.0 specialist skills. The loop's stuck-pattern detection writes `.ralph/skill-suggestion` pointing at one of `diagnosing-stuck-tasks`, `running-gates`, or `reviewing-loop-progress`; those skills are only discovered by `claude` when this plugin is installed.
+Unlocks slash commands, specialist skills, and the guard hook (blocks direct test-tool invocations, enforces gate-run.sh discipline).
 
 ```
 /plugin marketplace add lockstride/claude-marketplace
@@ -134,10 +134,43 @@ After the loop starts, Ralph writes to `.ralph/` (git-ignored automatically):
 - `activity.log` — real-time token usage + tool calls
 - `effective-prompt.md` — the rendered prompt fed to the agent at each loop start
 - `handoff.md` — navigation breadcrumb between loops (used when the loop must respawn)
-- `skill-suggestion` — present only when the loop has suggested the agent invoke a specific skill
-- `diagnosis.md` — written by the `diagnosing-stuck-tasks` skill when escalating
+- `gates/` — per-label logs, exit breadcrumbs, lock dirs for gate-run.sh
+
+**Breadcrumb files** (optional, placed in `.ralph/` to configure behavior):
+
+| File | Purpose |
+|---|---|
+| `basic-check-command` | Override the basic gate command (default: `pnpm basic-check`) |
+| `final-check-command` | Override the final gate command (default: `pnpm all-check`) |
+| `protected-scripts` | Commands that must not be piped/redirected (one per line) |
+| `denied-commands` | Commands to block outright, format: `command\|reason` per line |
+| `push-policy` | Push behavior: `never` (default), `completion-only` |
+| `stop-requested` | Touch this file to signal the agent to stop after the current task |
 
 Your commits are your durable memory. Ralph commits frequently during each loop so any involuntary kill is recoverable from the last commit.
+
+### Guard hook
+
+When installed as a Claude Code plugin, Ralph registers a `PreToolUse` hook (`ralph-guard.sh`) that intercepts Bash and Write tool calls to enforce discipline:
+
+- **Direct test-tool denial** — blocks `vitest`, `jest`, `cypress`, `tsc --noEmit` and their `npx`/`pnpm`/`pnpm exec` variants unless wrapped in `gate-run.sh`.
+- **Protected-script pipe/redirect denial** — prevents `| tail`, `> /tmp/out`, etc. on commands listed in `.ralph/protected-scripts`.
+- **Denied-command blocking** — outright blocks commands in `.ralph/denied-commands`.
+- **Gate-without-write detection** — blocks re-running a gate when no file has been written since the last gate, preventing pointless reruns.
+- **State-file protection** — prevents the agent from tampering with `.ralph/gates/`, `.ralph/activity.log`, and other loop-owned state.
+
+### Rotation signals
+
+The stream parser emits signals that the main loop uses to decide when to rotate (kill the agent and respawn with fresh context):
+
+| Signal | Trigger | Effect |
+|---|---|---|
+| `ROTATE` | Token usage exceeds threshold | Hard rotation — context window is full |
+| `TURN_END` | 5 consecutive gate failures (configurable via `RALPH_GATE_FAIL_STREAK_THRESHOLD`) | Rotation with troubleshoot overlay in next prompt |
+| `WARN` | Approaching token threshold | Agent told to wrap up |
+| `GUTTER` | Stuck pattern (repeated failures, file thrashing) or agent self-signal | Rotation with diagnostic context |
+| `COMPLETE` | Agent emits `<promise>ALL_TASKS_DONE</promise>` | Loop exits successfully |
+| `DEFER` | Rate limit or transient API error | Backoff and retry |
 
 ## Spec Kit mode
 
@@ -145,7 +178,7 @@ If you use [Spec Kit](https://github.com/github/spec-kit), pick `--spec` and Ral
 
 1. Find the most-recent `specs/*` dir by mtime (or the one you name).
 2. **Generate a loop-adapted prompt** from your project's `speckit-implement` skill (`.claude/skills/speckit-implement/SKILL.md`, with hash-based caching) — keeps the loop in sync with your version of Spec Kit. Falls back to the built-in template if the skill doesn't exist.
-3. Substitute `{{SPEC_DIR}}`, `{{CONSTITUTION_PATH}}`, `{{TASK_FILE}}`, `{{PLAN_FILE}}`, `{{SPEC_FILE}}`, gate commands, and (0.6.0+) the recent activity-log tail into the prompt.
+3. Substitute `{{SPEC_DIR}}`, `{{CONSTITUTION_PATH}}`, `{{TASK_FILE}}`, `{{PLAN_FILE}}`, `{{SPEC_FILE}}`, gate commands, and the recent activity-log tail into the prompt.
 4. Enforce one-task-per-commit, gate-discipline, and the `<promise>ALL_TASKS_DONE</promise>` completion sigil (verified against the real checkbox state — no hallucinated promises).
 
 Default check commands: `pnpm basic-check` (basic gate) and `pnpm all-check` (final gate). Override via `.ralph/basic-check-command` and `.ralph/final-check-command` breadcrumbs.
@@ -168,10 +201,26 @@ ralph --cli claude --spec --evaluate --eval-loops 5
 
 For mode mechanics, artifacts, and limitations, see [docs/development.md → Acceptance evaluation loop](docs/development.md#acceptance-evaluation-loop--internals).
 
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RALPH_GATE_TIMEOUT` | — | Override all gate timeouts (seconds) |
+| `RALPH_BASIC_GATE_TIMEOUT` | `1200` | Basic gate timeout |
+| `RALPH_FINAL_GATE_TIMEOUT` | `1200` | Final gate timeout |
+| `RALPH_GATE_KILL_GRACE` | `10` | Seconds between SIGTERM and SIGKILL on timeout |
+| `RALPH_GATE_KEEP` | `5` | Number of timestamped gate logs to retain per label |
+| `RALPH_GATE_LOCK_WAIT` | `300` | Seconds to wait for a gate lock before giving up |
+| `RALPH_GATE_STALE_LOCK_SEC` | `600` | Steal locks older than this (seconds) |
+| `RALPH_GATE_FAIL_STREAK_THRESHOLD` | `5` | Consecutive gate failures before TURN_END |
+| `RALPH_MAX_LOOPS` | `10` | Safety cap on agent respawns |
+| `RALPH_SKIP_GUARDRAILS` | — | Set to `1` to omit the guardrails preamble |
+| `RALPH_SKIP_GENERATION` | — | Set to `1` to skip speckit prompt generation |
+
 ## Pointers
 
 - **[`docs/gate-run.md`](docs/gate-run.md)** — full reference for the gate-runner wrapper (label enum, env vars, failure-pattern regex, agent protocol).
-- **[`docs/skills.md`](docs/skills.md)** — operator reference for the 0.6.0 specialist skills (when each is suggested, how to override or disable).
+- **[`docs/skills.md`](docs/skills.md)** — operator reference for the specialist skills.
 - **[`docs/development.md`](docs/development.md)** — internals for working on the plugin: tests, lint, watchdogs, signals, project layout.
 - **[Geoffrey Huntley's Ralph technique](https://ghuntley.com)** — original concept.
 

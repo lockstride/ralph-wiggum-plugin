@@ -13,7 +13,7 @@
 # Emits on stdout (one per line):
 #   ROTATE          — token threshold reached, stop and rotate context
 #   WARN            — approaching limit, agent should wrap up
-#   TURN_END        — 5 consecutive gate failures or 3 task completions
+#   TURN_END        — 5 consecutive gate failures
 #   GUTTER          — stuck pattern detected, or agent self-signal,
 #                     or non-retryable API error
 #   COMPLETE        — agent emitted <ralph>COMPLETE</ralph>
@@ -58,16 +58,9 @@ GATE_FAIL_STREAK=0
 GATE_FAIL_STREAK_THRESHOLD="${RALPH_GATE_FAIL_STREAK_THRESHOLD:-5}"
 TURN_END_LATCHED=0
 
-# 0.10.0: Task-completion counter. Tracks successful git commits in this
-# turn. At 3 completions, emits TURN_END so the main loop rotates to a
-# fresh agent — prevents a single agent from accumulating context debt
-# across too many tasks.
-# 0.10.3: RALPH_TASK_ID_PATTERN — when set, only commits whose message
-# matches this regex count against the cap. Infra/tooling commits
-# (no task ID) pass through uncounted.
-TASK_COMPLETION_COUNT=0
-TASK_COMPLETION_CAP="${RALPH_TASK_COMPLETION_CAP:-3}"
-TASK_ID_PATTERN="${RALPH_TASK_ID_PATTERN:-}"
+# 0.10.4: The task-completion cap (RALPH_TASK_COMPLETION_CAP) was removed.
+# Field data showed it never triggered rotation — gate-fail streaks and
+# ROTATE handled every case.
 
 # 0.5.3: independent heartbeat emitter pid. Set in main() once the sidecar
 # is spawned; left empty here so the EXIT trap can no-op safely if main()
@@ -405,17 +398,10 @@ process_line() {
         Shell)
           SHELL_OUTPUT_CHARS=$((SHELL_OUTPUT_CHARS + bytes))
           # 0.5.4: anchor the `git commit` and `git push` matches to either
-          # start-of-string OR a shell separator (whitespace, &, ;, |, `(`),
-          # not just start-of-string. Spec-Kit-style agents canonically batch
-          # `git add <paths> && git commit -m "..."` as a single shell call,
-          # which the prior `^git ` anchor missed entirely. Without this fix,
-          # reset_failure_counters_on_task_boundary never fires, the per-task
-          # shell-failure counter accumulates across the whole loop, and
-          # a loop with N successful commits + a few unrelated transient
-          # failures eventually trips the recovery threshold for no real
-          # reason. Field log: 14 successful commits in one loop produced
-          # exactly one `COMMIT` activity-log line.
-          if [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git[[:space:]]+commit ]]; then
+          # start-of-string OR a shell separator (whitespace, &, ;, |, `(`).
+          # 0.10.4: allow global flags between `git` and the subcommand
+          # (e.g. `git -C /path commit`). Each flag is -<letter> <value>.
+          if [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git([[:space:]]+-[[:alpha:]][[:space:]]+[^[:space:]]+)*[[:space:]]+commit ]]; then
             if [[ $exit_code -eq 0 ]]; then
               local commit_msg=""
               if [[ "$cmd" =~ -m[[:space:]]+[\"\']([^\"\']+)[\"\'] ]]; then
@@ -428,31 +414,12 @@ process_line() {
               else
                 log_activity "COMMIT (via $cmd)"
               fi
-              # Task boundary: clear any accumulated shell-failure history
-              # and release any latched GUTTER/WARN signals. See
-              # reset_failure_counters_on_task_boundary for rationale.
               reset_failure_counters_on_task_boundary
-              # 0.10.0: task-completion counter for turn budget.
-              # 0.10.3: skip infra commits (no task ID) when pattern is set.
-              local _count_this=1
-              if [[ -n "$TASK_ID_PATTERN" && -n "$commit_msg" ]]; then
-                if ! echo "$commit_msg" | grep -qE "$TASK_ID_PATTERN"; then
-                  _count_this=0
-                fi
-              fi
-              if [[ $_count_this -eq 1 ]]; then
-                TASK_COMPLETION_COUNT=$((TASK_COMPLETION_COUNT + 1))
-                if [[ $TASK_COMPLETION_COUNT -ge $TASK_COMPLETION_CAP ]] && [[ $TURN_END_LATCHED -eq 0 ]]; then
-                  log_activity "🛑 TURN_END: $TASK_COMPLETION_COUNT task completions — rotating to fresh context"
-                  TURN_END_LATCHED=1
-                  echo "TURN_END" 2>/dev/null || true
-                fi
-              fi
             else
               log_activity "COMMIT FAILED $cmd → exit $exit_code"
               track_shell_failure "$cmd" "$exit_code"
             fi
-          elif [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git[[:space:]]+push ]]; then
+          elif [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git([[:space:]]+-[[:alpha:]][[:space:]]+[^[:space:]]+)*[[:space:]]+push ]]; then
             if [[ $exit_code -eq 0 ]]; then
               log_activity "PUSH $cmd → exit 0"
             else
