@@ -56,7 +56,6 @@ STATE_BASE="${XDG_STATE_HOME:-$HOME/.local/state}/ralph"
 STATE_DIR="$STATE_BASE/$(_workspace_hash)"
 mkdir -p "$STATE_DIR"
 
-LOCK_FILE="$STATE_DIR/.lock"
 LAST_WRITE_TS="$STATE_DIR/last-write-ts"
 LAST_GATE_TS="$STATE_DIR/last-gate-ts"
 
@@ -86,10 +85,9 @@ _write_ts() {
   local f="$1"
   local ts
   ts=$(date +%s)
-  (
-    flock -x 9
-    echo "$ts" >"$f"
-  ) 9>"$LOCK_FILE"
+  local tmp="${f}.tmp.$$"
+  echo "$ts" >"$tmp"
+  mv -f "$tmp" "$f"
 }
 
 # Strip leading env-var assignments from a command to get the canonical
