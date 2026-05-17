@@ -1,0 +1,24 @@
+{
+  "hooks": [
+    {
+      "type": "PreToolUse",
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "command": "bash \"$(dirname \"$CLAUDE_PLUGIN_DIR\")/shared-scripts/ralph-guard.sh\"",
+          "timeout": 5000
+        }
+      ]
+    },
+    {
+      "type": "PreToolUse",
+      "matcher": "Write|Edit|MultiEdit",
+      "hooks": [
+        {
+          "command": "bash \"$(dirname \"$CLAUDE_PLUGIN_DIR\")/shared-scripts/ralph-guard.sh\"",
+          "timeout": 5000
+        }
+      ]
+    }
+  ]
+}
