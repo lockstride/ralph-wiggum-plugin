@@ -65,6 +65,13 @@ GATE_FAIL_STREAK=0
 GATE_FAIL_STREAK_THRESHOLD="${RALPH_GATE_FAIL_STREAK_THRESHOLD:-5}"
 TURN_END_LATCHED=0
 
+# 0.10.0: Task-completion counter. Tracks successful git commits in this
+# turn. At 3 completions, emits TURN_END so the main loop rotates to a
+# fresh agent — prevents a single agent from accumulating context debt
+# across too many tasks.
+TASK_COMPLETION_COUNT=0
+TASK_COMPLETION_CAP="${RALPH_TASK_COMPLETION_CAP:-3}"
+
 # 0.5.3: independent heartbeat emitter pid. Set in main() once the sidecar
 # is spawned; left empty here so the EXIT trap can no-op safely if main()
 # exits before the spawn (e.g. test fixtures that source the file).
@@ -569,6 +576,13 @@ process_line() {
               # and release any latched GUTTER/WARN signals. See
               # reset_failure_counters_on_task_boundary for rationale.
               reset_failure_counters_on_task_boundary
+              # 0.10.0: task-completion counter for turn budget.
+              TASK_COMPLETION_COUNT=$((TASK_COMPLETION_COUNT + 1))
+              if [[ $TASK_COMPLETION_COUNT -ge $TASK_COMPLETION_CAP ]] && [[ $TURN_END_LATCHED -eq 0 ]]; then
+                log_activity "🛑 TURN_END: $TASK_COMPLETION_COUNT task completions — rotating to fresh context"
+                TURN_END_LATCHED=1
+                echo "TURN_END" 2>/dev/null || true
+              fi
             else
               log_activity "COMMIT FAILED $cmd → exit $exit_code"
               track_shell_failure "$cmd" "$exit_code"
