@@ -553,6 +553,13 @@ printf '%s' "$*" >"$gates_dir/$label-latest.cmd"
 # 0.9.1: Record run timestamp for the gate-without-write check on next run.
 printf '%s' "$(date +%s)" >"$_last_run_ts_file"
 
+# 0.10.0: Last-failed breadcrumbs for the TURN_END handler. Written on
+# every failure so the loop knows which label/log to cite in the handoff.
+if [[ $cmd_status -ne 0 ]]; then
+  printf '%s' "$label" >"$gates_dir/last-failed-label"
+  printf '%s' "$rel_latest" >"$gates_dir/last-failed-log"
+fi
+
 # 0.9.1: Post-failure diagnosis lifecycle.
 if [[ $cmd_status -ne 0 ]]; then
   # Gate failed — create pending-diagnosis marker so the next run requires

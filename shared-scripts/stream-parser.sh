@@ -56,6 +56,15 @@ WRITES_FILE=$(mktemp)
 # One-line-per-skill format; cleared by reset_failure_counters_on_task_boundary.
 SUGGESTED_SKILLS_FILE=$(mktemp)
 
+# 0.10.0: Consecutive gate-failure counter. Tracks gate-run.sh invocations
+# that exit nonzero without an intervening success. At threshold (5), emits
+# TURN_END so the main loop ends the turn and spawns fresh. Resets at
+# parser start (each new agent invocation has fresh counter) and on any
+# gate-run.sh exit zero.
+GATE_FAIL_STREAK=0
+GATE_FAIL_STREAK_THRESHOLD="${RALPH_GATE_FAIL_STREAK_THRESHOLD:-5}"
+TURN_END_LATCHED=0
+
 # 0.5.3: independent heartbeat emitter pid. Set in main() once the sidecar
 # is spawned; left empty here so the EXIT trap can no-op safely if main()
 # exits before the spawn (e.g. test fixtures that source the file).
@@ -580,6 +589,19 @@ process_line() {
           else
             log_activity "SHELL $cmd → exit $exit_code"
             track_shell_failure "$cmd" "$exit_code"
+          fi
+          # 0.10.0: gate-fail-streak tracking for TURN_END signal.
+          if [[ "$cmd" == *gate-run.sh* ]]; then
+            if [[ $exit_code -eq 0 ]]; then
+              GATE_FAIL_STREAK=0
+            else
+              GATE_FAIL_STREAK=$((GATE_FAIL_STREAK + 1))
+              if [[ $GATE_FAIL_STREAK -ge $GATE_FAIL_STREAK_THRESHOLD ]] && [[ $TURN_END_LATCHED -eq 0 ]]; then
+                log_activity "🛑 TURN_END: $GATE_FAIL_STREAK consecutive gate failures — ending turn"
+                TURN_END_LATCHED=1
+                echo "TURN_END" 2>/dev/null || true
+              fi
+            fi
           fi
           ;;
         *)

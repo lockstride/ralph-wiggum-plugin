@@ -416,6 +416,29 @@ build_prompt() {
     rm -f "$skill_suggestion_file"
   fi
 
+  # 0.10.0: Troubleshoot overlay. When the prior turn ended on 5
+  # consecutive gate failures, the TURN_END handler sets
+  # _RALPH_OVERLAY_TROUBLESHOOT=1 and _RALPH_FAILING_GATE_LABEL.
+  # Consume once — unset after reading.
+  local troubleshoot_block=""
+  if [[ "${_RALPH_OVERLAY_TROUBLESHOOT:-0}" == "1" ]]; then
+    local _ts_template
+    _ts_template="$(dirname "${BASH_SOURCE[0]}")/../shared-references/templates/troubleshoot-test-failure.md"
+    local _ts_label="${_RALPH_FAILING_GATE_LABEL:-unknown}"
+    if [[ -f "$_ts_template" ]]; then
+      troubleshoot_block=$(sed -e "s|{{FAILING_LABEL}}|$_ts_label|g" \
+        -e "s|{{CONSECUTIVE_FAILURES}}|5|g" \
+        "$_ts_template")
+    fi
+    # Also load project-specific supplement if present
+    local _ts_supplement="$workspace/.ralph/troubleshoot-test-failure.md"
+    if [[ -f "$_ts_supplement" ]]; then
+      troubleshoot_block="$troubleshoot_block"$'\n\n'"$(cat "$_ts_supplement")"
+    fi
+    unset _RALPH_OVERLAY_TROUBLESHOOT
+    unset _RALPH_FAILING_GATE_LABEL
+  fi
+
   # 0.3.6: Surface gate-run.sh in the non-speckit framing. Speckit-mode
   # prompts get a dedicated gate-invocation contract from speckit-prompt.md,
   # but custom-prompt and PROMPT.md loops had no gate awareness at all —
@@ -524,9 +547,17 @@ SKILL_EOF
     )
   fi
 
+  # 0.10.0: troubleshoot overlay section (one-shot, from TURN_END on gate failures)
+  local troubleshoot_section=""
+  if [[ -n "$troubleshoot_block" ]]; then
+    troubleshoot_section="
+$troubleshoot_block
+"
+  fi
+
   cat <<EOF
 # Ralph Loop $loop_n
-$skill_section
+$skill_section$troubleshoot_section
 You are running inside a Ralph loop. Git log and tasks.md checkboxes
 are the authoritative record of what is done. Commit after each task,
 read the next one, keep going.
@@ -1175,6 +1206,17 @@ run_loop() {
         [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "💡 Skill suggestion written to .ralph/skill-suggestion (agent will pick up next turn)" >&2
         ;;
+      "TURN_END")
+        # 0.10.0: Mechanical turn-end signal. Emitted by stream-parser
+        # when the gate-fail-streak threshold (5) is reached, or by the
+        # task-completion counter (3 tasks). Kill the agent and rotate to
+        # a fresh context with an optional troubleshoot overlay.
+        [[ -t 2 ]] && printf "\r\033[K" >&2
+        echo "🛑 Turn ended — killing agent and rotating to fresh context..." >&2
+        kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+        signal="TURN_END"
+        break
+        ;;
       "RECOVER_ATTEMPT")
         # 0.3.0: Recoverable stuck pattern hit (first time this loop).
         # The stream-parser has written a recovery hint to
@@ -1775,6 +1817,38 @@ run_ralph_loop() {
         log_activity "$workspace" "LOOP $loop_label END — 🔄 ROTATE (context-window pressure)$task_suffix"
         log_progress "$workspace" "**Loop $loop_label ended** — 🔄 Context rotation"
         echo "🔄 Rotating to fresh context..."
+        stall_count=0
+        zero_progress_count=0
+        DEFER_COUNT=0
+        loop_n=$((loop_n + 1))
+        retry=0
+        session_id=""
+        ;;
+      "TURN_END")
+        # 0.10.0: Mechanical turn-end. Emitted on 5 consecutive gate
+        # failures or 3 task completions. Rotate to fresh context with
+        # optional troubleshoot overlay for gate-fail case.
+        local _failing_label _failing_log
+        _failing_label=$(cat "$workspace/.ralph/gates/last-failed-label" 2>/dev/null) || _failing_label=""
+        _failing_log=$(cat "$workspace/.ralph/gates/last-failed-log" 2>/dev/null) || _failing_log=""
+        if [[ -n "$_failing_label" ]]; then
+          log_activity "$workspace" "LOOP $loop_label END — 🛑 TURN_END (gate-fail streak on '$_failing_label')$task_suffix"
+          # Write handoff with gate-fail context
+          local _handoff_template
+          _handoff_template="$(dirname "${BASH_SOURCE[0]}")/../shared-references/templates/handoff-after-gate-fail.md"
+          if [[ -f "$_handoff_template" ]]; then
+            sed -e "s|{{FAILING_LABEL}}|$_failing_label|g" \
+              -e "s|{{CONSECUTIVE_FAILURES}}|5|g" \
+              "$_handoff_template" >"$workspace/.ralph/handoff.md"
+          fi
+          # Set overlay flag for next build_prompt
+          export _RALPH_OVERLAY_TROUBLESHOOT=1
+          export _RALPH_FAILING_GATE_LABEL="$_failing_label"
+        else
+          log_activity "$workspace" "LOOP $loop_label END — 🛑 TURN_END (task completion cap)$task_suffix"
+        fi
+        log_progress "$workspace" "**Loop $loop_label ended** — 🛑 TURN_END"
+        echo "🛑 Turn ended — rotating to fresh context..."
         stall_count=0
         zero_progress_count=0
         DEFER_COUNT=0
