@@ -635,12 +635,16 @@ _capture_loop_baseline() {
   (cd "$workspace" && git rev-parse HEAD 2>/dev/null) >"$ralph_dir/loop-baseline-head" || true
   (cd "$workspace" && git ls-files --others --exclude-standard 2>/dev/null | LC_ALL=C sort) \
     >"$ralph_dir/loop-baseline-untracked" || true
-  # 0.9.2: Clear gate pre-run markers so each new loop gets one free gate run.
-  # Without this, markers from a prior loop's last gate persist and block the
-  # new loop's first verification run (the evaluator hit this in 0.9.1).
-  local gates_dir="$ralph_dir/gates"
-  if [[ -d "$gates_dir" ]]; then
-    rm -f "$gates_dir"/*-last-run-ts "$gates_dir"/*.pending-diagnosis "$gates_dir"/*.diagnosis
+  # 0.10.0: Clear hook state for this workspace so each new loop gets one
+  # free gate run. The hook's gate-without-write check uses external state
+  # files (not activity.log), so we clear them here.
+  local _ws_real
+  _ws_real=$(cd "$workspace" 2>/dev/null && pwd -P) || _ws_real="$workspace"
+  local _ws_hash
+  _ws_hash=$(echo -n "$_ws_real" | shasum -a 256 | cut -d' ' -f1)
+  local _hook_state="${XDG_STATE_HOME:-$HOME/.local/state}/ralph/$_ws_hash"
+  if [[ -d "$_hook_state" ]]; then
+    rm -f "$_hook_state/last-write-ts" "$_hook_state/last-gate-ts"
   fi
 }
 

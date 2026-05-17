@@ -169,70 +169,11 @@ _log_activity() {
   printf '[%s] %s\n' "$stamp" "$1" >>"$_activity_log" 2>/dev/null || true
 }
 
-# -----------------------------------------------------------------------------
-# Pre-run checks: gate-without-write and post-failure diagnosis (0.9.1)
-# -----------------------------------------------------------------------------
-
-# 0.9.1: Gate-without-write block. Re-running a gate without any code changes
-# in between is always wasteful — the same inputs produce the same outputs.
-# Block unless at least one WRITE event (excluding .ralph/gates/ paths) has
-# been logged since the last run of this label. No override — fix the code.
-# Markers are cleared at loop start (see _capture_loop_baseline) so each
-# new loop gets one free gate run.
-_last_run_ts_file="$gates_dir/${label}-last-run-ts"
-if [[ -f "$_last_run_ts_file" ]]; then
-  _last_epoch=$(cat "$_last_run_ts_file" 2>/dev/null)
-  if [[ -n "$_last_epoch" ]] && [[ "$_last_epoch" =~ ^[0-9]+$ ]]; then
-    _last_time=$(date -d "@$_last_epoch" '+%H:%M:%S' 2>/dev/null || date -r "$_last_epoch" '+%H:%M:%S' 2>/dev/null) || _last_time="$_last_epoch"
-    _has_write=0
-    if [[ -f "$_activity_log" ]]; then
-      while IFS= read -r _wr_line; do
-        _wr_time="${_wr_line%%]*}"
-        _wr_time="${_wr_time#[}"
-        if [[ "$_wr_line" == *"WRITE "* ]] && [[ "$_wr_line" != *".ralph/gates/"* ]]; then
-          if [[ "$_wr_time" > "$_last_time" ]] || [[ "$_wr_time" == "$_last_time" ]]; then
-            _has_write=1
-            break
-          fi
-        fi
-      done < <(tail -200 "$_activity_log")
-    fi
-    if [[ $_has_write -eq 0 ]]; then
-      echo "BLOCKED: No code writes since last run of gate '$label'." >&2
-      echo "  Re-running a gate without code changes will produce the same result." >&2
-      echo "  Read the previous output at .ralph/gates/${label}-latest.log," >&2
-      echo "  diagnose the failure, make a fix, then retry." >&2
-      _log_activity "🧪 GATE BLOCKED label=$label — no code writes since last run"
-      exit 75
-    fi
-  fi
-fi
-
-# 0.9.1: Post-failure diagnosis requirement. After a gate failure, the agent
-# must write a structured analysis to .ralph/gates/<label>.diagnosis before
-# retrying. This forces the agent to engage with the failure output rather
-# than pattern-matching on the exit code.
-_pending_diag="$gates_dir/${label}.pending-diagnosis"
-_diag_file="$gates_dir/${label}.diagnosis"
-if [[ -f "$_pending_diag" ]]; then
-  _pending_epoch=$(cat "$_pending_diag" 2>/dev/null)
-  if [[ -n "$_pending_epoch" ]]; then
-    _need_diag=1
-    if [[ -f "$_diag_file" ]]; then
-      _diag_mtime=$(stat -f '%m' "$_diag_file" 2>/dev/null || stat -c '%Y' "$_diag_file" 2>/dev/null || echo 0)
-      if [[ "$_diag_mtime" -ge "$_pending_epoch" ]]; then
-        _need_diag=0
-      fi
-    fi
-    if [[ $_need_diag -eq 1 ]]; then
-      echo "BLOCKED: No diagnosis written since last failure of gate '$label'." >&2
-      echo "  Write your analysis to .ralph/gates/${label}.diagnosis before retrying." >&2
-      echo "  Include: what specifically failed, your theory of cause, and your plan to fix it." >&2
-      _log_activity "🧪 GATE BLOCKED label=$label — no diagnosis since last failure"
-      exit 75
-    fi
-  fi
-fi
+# 0.10.0: Gate-without-write and post-failure diagnosis checks are now
+# enforced by the PreToolUse hook (ralph-guard.sh). The hook runs before
+# the agent can even invoke gate-run.sh, so the in-script checks are
+# removed. The hook uses external state files instead of activity.log
+# parsing, which is both more reliable and tamper-resistant.
 
 # -----------------------------------------------------------------------------
 # Run the command, capturing real exit code via PIPESTATUS
@@ -550,77 +491,11 @@ printf '%s' "$cmd_status" >"$gates_dir/$label-latest.exit"
 # whitespace normalization. No newline.
 printf '%s' "$*" >"$gates_dir/$label-latest.cmd"
 
-# 0.9.1: Record run timestamp for the gate-without-write check on next run.
-printf '%s' "$(date +%s)" >"$_last_run_ts_file"
-
 # 0.10.0: Last-failed breadcrumbs for the TURN_END handler. Written on
 # every failure so the loop knows which label/log to cite in the handoff.
 if [[ $cmd_status -ne 0 ]]; then
   printf '%s' "$label" >"$gates_dir/last-failed-label"
   printf '%s' "$rel_latest" >"$gates_dir/last-failed-log"
-fi
-
-# 0.9.1: Post-failure diagnosis lifecycle.
-if [[ $cmd_status -ne 0 ]]; then
-  # Gate failed — create pending-diagnosis marker so the next run requires
-  # a written diagnosis before retrying.
-  printf '%s' "$(date +%s)" >"$_pending_diag"
-elif [[ $cmd_status -eq 0 ]]; then
-  # Gate passed — clean up any diagnosis artifacts from prior failures.
-  rm -f "$_pending_diag" "$_diag_file"
-fi
-
-# 0.6.1: Long-gate single-failure SUGGEST_SKILL trigger.
-#
-# A gate that took ≥ RALPH_LONG_GATE_THRESHOLD seconds (default 300s = 5min)
-# AND exited non-zero is treated as evidence of stuckness on its own —
-# even on the first failure. The stream-parser's existing 3-strike SUGGEST
-# threshold can't help here: an e2e gate that takes 9 minutes per run would
-# need 27+ minutes of compute (and 3 identical agent retries) before the
-# parser's threshold trips. By that point the agent has spent more compute
-# on retries than it would have on a `diagnosing-stuck-tasks` invocation.
-#
-# Writes `.ralph/skill-suggestion` directly. The agent's framing prompt
-# instructs it to read this file at startup and after every commit, so
-# the next agent turn picks up the suggestion. No stream signal needed —
-# stream-parser's SUGGEST_SKILL signal exists for in-session deduplication
-# in the loop's read cycle, but gate-run.sh runs as a child of the agent's
-# own shell tool, so the agent reads the file directly on its next turn.
-#
-# Tunable via RALPH_LONG_GATE_THRESHOLD. Set to 0 to disable.
-LONG_GATE_THRESHOLD="${RALPH_LONG_GATE_THRESHOLD:-300}"
-if [[ $cmd_status -ne 0 ]] &&
-  [[ $LONG_GATE_THRESHOLD -gt 0 ]] &&
-  [[ ${duration:-0} -ge $LONG_GATE_THRESHOLD ]]; then
-  skill_suggestion_file="$workspace/.ralph/skill-suggestion"
-  # Don't clobber an existing higher-priority suggestion (e.g. one written
-  # by stream-parser's RECOVER_ATTEMPT path or a prior gate in this turn).
-  if [[ ! -f "$skill_suggestion_file" ]]; then
-    cat >"$skill_suggestion_file" <<EOF
-## Loop suggestion (consume once, then delete this file)
-
-**Skill to invoke**: \`diagnosing-stuck-tasks\`
-
-**Why**: Gate \`$label\` took ${duration}s and failed (exit $cmd_status).
-
-**Context**: A long-running gate that exits non-zero is rarely fixed by
-re-running it the same way. Read the failing-test summary above (or
-\`$rel_latest\`), question whether the failure points at a real bug or an
-infrastructure issue (port not listening, dependency not started, env var
-missing), and run a layer-bypassing diagnostic (e.g. \`curl\` directly
-against the endpoint the test couldn't reach, or check the relevant
-docker/orb container) before retrying the full gate.
-
-The loop detected this pattern on the FIRST failure (not the third) because
-each gate run costs ${duration}s of compute — three identical retries would
-burn $((duration * 3))s before the stream-parser's 3-strike threshold
-suggested a skill. Switch postures now.
-
-After the skill completes (or you decide to override its recommendation),
-delete this file with \`rm .ralph/skill-suggestion\`.
-EOF
-    _log_activity "💡 Skill suggestion: diagnosing-stuck-tasks (long-gate fail: $label ${duration}s)"
-  fi
 fi
 
 exit "$cmd_status"
