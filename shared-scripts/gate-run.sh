@@ -131,6 +131,14 @@ fi
 label="$1"
 shift
 
+# Agents sometimes quote the whole command as a single arg:
+#   gate-run.sh basic "pnpm basic-check"   →  $@ = ("pnpm basic-check")
+# Word-split it so ("$@") executes correctly.
+if [[ $# -eq 1 && "$1" == *" "* ]]; then
+  # shellcheck disable=SC2086
+  set -- $1
+fi
+
 case "$label" in
   basic | final | e2e | lint | custom) ;;
   *)

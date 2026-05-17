@@ -292,6 +292,12 @@ EOF
 }
 
 
+@test "word-splits single quoted command arg" {
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic "echo hello-split"
+  [ "$status" -eq 0 ]
+  grep -q "hello-split" "$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
+}
+
 @test "retains only RALPH_GATE_KEEP logs" {
   export RALPH_GATE_KEEP=2
 
