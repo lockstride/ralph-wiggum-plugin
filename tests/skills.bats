@@ -119,10 +119,8 @@ _all_skills() {
   done < <(_all_skills)
 }
 
-@test "expected 0.6.0 skills are present" {
+@test "expected skills are present" {
   [ -f "$SKILLS_DIR/running-gates/SKILL.md" ]
-  [ -f "$SKILLS_DIR/diagnosing-stuck-tasks/SKILL.md" ]
-  [ -f "$SKILLS_DIR/reviewing-loop-progress/SKILL.md" ]
 }
 
 @test "ralph-plugin-speckit-update skill is present" {

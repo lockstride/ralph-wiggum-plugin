@@ -52,4 +52,4 @@ If `git status` shows files you didn't intend to touch (orphans, IDE droppings, 
 
 ## When you're stuck
 
-If you've made a real fix and the gate still fails for the same reason, you're probably looking at the wrong layer. Switch to the `diagnosing-stuck-tasks` skill — that's the explicit permission to step out of the procedural cycle and investigate however the situation actually demands.
+If you've made a real fix and the gate still fails for the same reason, you're probably looking at the wrong layer. Step back and investigate: read the full log, check whether you're editing the right file, test a single layer in isolation. After 5 consecutive gate failures the loop will rotate to a fresh context with troubleshooting guidance.
