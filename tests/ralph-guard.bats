@@ -105,14 +105,32 @@ _run_guard() {
   fi
 }
 
-@test "allows vitest through exec" {
+@test "blocks exec vitest (0.10.3)" {
   run _run_guard Bash "exec vitest run"
   [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  echo "$output" | jq -e '.result == "block"'
 }
 
 @test "blocks pnpm vitest" {
   run _run_guard Bash "pnpm vitest run"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "blocks pnpm exec vitest (0.10.3)" {
+  run _run_guard Bash "pnpm exec vitest run"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "blocks pnpm exec cypress (0.10.3)" {
+  run _run_guard Bash "pnpm exec cypress run"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "blocks pnpm exec tsc --noEmit (0.10.3)" {
+  run _run_guard Bash "pnpm exec tsc --noEmit"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.result == "block"'
 }

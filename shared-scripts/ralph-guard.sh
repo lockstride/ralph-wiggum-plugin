@@ -120,12 +120,12 @@ _guard_bash() {
 
   # --- Direct test tool denial ---
   # Block direct invocations of test tools without gate-run.sh wrapper.
-  # Only block when the command is NOT going through gate-run.sh or exec.
-  if ! echo "$cmd" | grep -qE 'gate-run\.sh|exec'; then
-    if echo "$stripped" | grep -qE '^(vitest|npx vitest|pnpm vitest|yarn vitest|jest|npx jest|cypress|npx cypress|pnpm cypress)(\s|$)'; then
+  # Only bypass when the command is going through gate-run.sh itself.
+  if ! echo "$cmd" | grep -qE 'gate-run\.sh'; then
+    if echo "$stripped" | grep -qE '^(exec )?(vitest|npx vitest|pnpm vitest|pnpm exec vitest|yarn vitest|jest|npx jest|cypress|npx cypress|pnpm cypress|pnpm exec cypress)(\s|$)'; then
       _block "Direct test tool invocation denied. Run tests through gate-run.sh: bash <plugin>/shared-scripts/gate-run.sh <label> <cmd>"
     fi
-    if echo "$stripped" | grep -qE '^(tsc|npx tsc|pnpm tsc)\s+--noEmit'; then
+    if echo "$stripped" | grep -qE '^(exec )?(tsc|npx tsc|pnpm tsc|pnpm exec tsc)\s+--noEmit'; then
       _block "Direct tsc --noEmit denied. Run type checks through gate-run.sh: bash <plugin>/shared-scripts/gate-run.sh lint tsc --noEmit"
     fi
   fi

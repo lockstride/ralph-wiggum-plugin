@@ -62,8 +62,12 @@ TURN_END_LATCHED=0
 # turn. At 3 completions, emits TURN_END so the main loop rotates to a
 # fresh agent — prevents a single agent from accumulating context debt
 # across too many tasks.
+# 0.10.3: RALPH_TASK_ID_PATTERN — when set, only commits whose message
+# matches this regex count against the cap. Infra/tooling commits
+# (no task ID) pass through uncounted.
 TASK_COMPLETION_COUNT=0
 TASK_COMPLETION_CAP="${RALPH_TASK_COMPLETION_CAP:-3}"
+TASK_ID_PATTERN="${RALPH_TASK_ID_PATTERN:-}"
 
 # 0.5.3: independent heartbeat emitter pid. Set in main() once the sidecar
 # is spawned; left empty here so the EXIT trap can no-op safely if main()
@@ -429,11 +433,20 @@ process_line() {
               # reset_failure_counters_on_task_boundary for rationale.
               reset_failure_counters_on_task_boundary
               # 0.10.0: task-completion counter for turn budget.
-              TASK_COMPLETION_COUNT=$((TASK_COMPLETION_COUNT + 1))
-              if [[ $TASK_COMPLETION_COUNT -ge $TASK_COMPLETION_CAP ]] && [[ $TURN_END_LATCHED -eq 0 ]]; then
-                log_activity "🛑 TURN_END: $TASK_COMPLETION_COUNT task completions — rotating to fresh context"
-                TURN_END_LATCHED=1
-                echo "TURN_END" 2>/dev/null || true
+              # 0.10.3: skip infra commits (no task ID) when pattern is set.
+              local _count_this=1
+              if [[ -n "$TASK_ID_PATTERN" && -n "$commit_msg" ]]; then
+                if ! echo "$commit_msg" | grep -qE "$TASK_ID_PATTERN"; then
+                  _count_this=0
+                fi
+              fi
+              if [[ $_count_this -eq 1 ]]; then
+                TASK_COMPLETION_COUNT=$((TASK_COMPLETION_COUNT + 1))
+                if [[ $TASK_COMPLETION_COUNT -ge $TASK_COMPLETION_CAP ]] && [[ $TURN_END_LATCHED -eq 0 ]]; then
+                  log_activity "🛑 TURN_END: $TASK_COMPLETION_COUNT task completions — rotating to fresh context"
+                  TURN_END_LATCHED=1
+                  echo "TURN_END" 2>/dev/null || true
+                fi
               fi
             else
               log_activity "COMMIT FAILED $cmd → exit $exit_code"
