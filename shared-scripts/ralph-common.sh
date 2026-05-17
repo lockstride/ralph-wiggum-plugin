@@ -67,8 +67,8 @@ fi
 # 0.6.4: lowered default from 20 to 10. Under the flow framing one loop
 # is expected to chew through most/all of a spec; double-digit respawns
 # is now a smell, not steady state. The driver's stall thresholds
-# (3 consecutive natural-end zero-progress, 10 consecutive DEFER, 2
-# RECOVER_ATTEMPT) all trip well before 10 in any genuinely stuck
+# (3 consecutive natural-end zero-progress, 10 consecutive DEFER, 5
+# gate-fail TURN_END) all trip well before 10 in any genuinely stuck
 # scenario, so 10 is just the "you really shouldn't be here" backstop.
 # Operators on smaller-context models (or genuinely huge specs) can
 # override via --loops or MAX_LOOPS.
@@ -1084,17 +1084,6 @@ run_loop() {
         echo "🚨 Gutter detected — agent may be stuck..." >&2
         signal="GUTTER"
         ;;
-      "SUGGEST_SKILL")
-        # 0.6.0: Soft suggestion from stream-parser. The parser detected an
-        # early stuck pattern (3 same-cmd failures or 3 same-file thrashes,
-        # below the 5-strike hard recovery threshold) and wrote
-        # `.ralph/skill-suggestion` with a recommended skill. The agent's
-        # prompt directs it to read that file and switch modes. We do NOT
-        # kill the agent here — same session continues. Logged to stderr
-        # for operator visibility, then the read loop continues.
-        [[ -t 2 ]] && printf "\r\033[K" >&2
-        echo "💡 Skill suggestion written to .ralph/skill-suggestion (agent will pick up next turn)" >&2
-        ;;
       "TURN_END")
         # 0.10.0: Mechanical turn-end signal. Emitted by stream-parser
         # when the gate-fail-streak threshold (5) is reached, or by the
@@ -1104,18 +1093,6 @@ run_loop() {
         echo "🛑 Turn ended — killing agent and rotating to fresh context..." >&2
         kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
         signal="TURN_END"
-        break
-        ;;
-      "RECOVER_ATTEMPT")
-        # 0.3.0: Recoverable stuck pattern hit (first time this loop).
-        # The stream-parser has written a recovery hint to
-        # .ralph/recovery-hint.md. Kill the agent so the loop can re-spawn
-        # it with the hint prepended to the framing prompt. The loop's
-        # per-invocation budget decides whether to honour or escalate.
-        [[ -t 2 ]] && printf "\r\033[K" >&2
-        echo "🔁 Recovery attempt — killing agent and re-running with hint..." >&2
-        kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
-        signal="RECOVER_ATTEMPT"
         break
         ;;
       "RECOVER")
@@ -1443,11 +1420,6 @@ run_ralph_loop() {
   local zero_progress_count=0 # natural-end with zero task delta (threshold 3)
   local natural_end_count=0   # 0.6.3: any natural-end (with or without progress) — measures "agent bailed politely instead of staying in flow"
   local DEFER_COUNT=0
-  # 0.3.0: Active-recovery budget. Each RECOVER_ATTEMPT signal from the
-  # stream-parser (recoverable stuck pattern detected) consumes one slot.
-  # When exhausted, subsequent RECOVER_ATTEMPT signals escalate to GUTTER.
-  local RECOVERY_ATTEMPTS=0
-  local MAX_RECOVERY_ATTEMPTS="${RALPH_MAX_RECOVERY_ATTEMPTS:-2}"
 
   while [[ $loop_n -le $MAX_LOOPS ]]; do
     local pre_counts
@@ -1620,29 +1592,6 @@ run_ralph_loop() {
         echo "🚨 Gutter detected. Check .ralph/errors.log for details."
         _write_postmortem "$workspace" "gutter"
         return 1
-        ;;
-      "RECOVER_ATTEMPT")
-        # 0.3.0: Stream-parser hit a recoverable stuck pattern and wrote
-        # a hint to .ralph/recovery-hint.md. Restart the loop with the
-        # hint prepended (build_prompt consumes the file). If the
-        # per-driver budget is exhausted, escalate to GUTTER instead.
-        if [[ $RECOVERY_ATTEMPTS -lt $MAX_RECOVERY_ATTEMPTS ]]; then
-          RECOVERY_ATTEMPTS=$((RECOVERY_ATTEMPTS + 1))
-          log_activity "$workspace" "LOOP $loop_label END — 🔁 RECOVERY ATTEMPT $RECOVERY_ATTEMPTS/$MAX_RECOVERY_ATTEMPTS$task_suffix"
-          log_progress "$workspace" "**Loop $loop_label ended** — 🔁 RECOVERY ATTEMPT $RECOVERY_ATTEMPTS/$MAX_RECOVERY_ATTEMPTS"
-          echo "🔁 Recovery attempt $RECOVERY_ATTEMPTS of $MAX_RECOVERY_ATTEMPTS — restarting loop with hint..."
-          # Do NOT bump stall_count/zero_progress_count — recovery is its
-          # own budget, separate from natural-end and DEFER counters.
-          loop_n=$((loop_n + 1))
-          retry=0
-          session_id=""
-        else
-          log_activity "$workspace" "LOOP $loop_label END — 🚨 GUTTER (recovery budget exhausted: $MAX_RECOVERY_ATTEMPTS attempts)$task_suffix"
-          log_progress "$workspace" "**Loop $loop_label ended** — 🚨 GUTTER (recovery budget exhausted)"
-          echo "🚨 Recovery budget exhausted ($MAX_RECOVERY_ATTEMPTS attempts) — escalating to GUTTER."
-          _write_postmortem "$workspace" "gutter"
-          return 1
-        fi
         ;;
       "DEFER")
         # DEFER = API/network transient error (rate limit, 429, etc.).

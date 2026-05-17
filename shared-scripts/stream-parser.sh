@@ -13,12 +13,9 @@
 # Emits on stdout (one per line):
 #   ROTATE          — token threshold reached, stop and rotate context
 #   WARN            — approaching limit, agent should wrap up
-#   RECOVER_ATTEMPT — recoverable stuck pattern hit (2× same shell fail or
-#                     5× file thrash) for the FIRST time this loop.
-#                     Loop kills agent, prepends .ralph/recovery-hint.md
-#                     to the next loop prompt, retries (0.3.0).
-#   GUTTER          — stuck pattern detected after recovery already used,
-#                     OR agent self-signal, OR non-retryable API error.
+#   TURN_END        — 5 consecutive gate failures or 3 task completions
+#   GUTTER          — stuck pattern detected, or agent self-signal,
+#                     or non-retryable API error
 #   COMPLETE        — agent emitted <ralph>COMPLETE</ralph>
 #   DEFER           — retryable API/network error, back off and retry
 #
@@ -51,10 +48,6 @@ RATE_LIMITED=0
 # Gutter detection — temp files (macOS bash 3.x has no assoc arrays)
 FAILURES_FILE=$(mktemp)
 WRITES_FILE=$(mktemp)
-# 0.6.0: tracks which skills we've already suggested this loop so we
-# don't spam the same suggestion every turn after the threshold trips.
-# One-line-per-skill format; cleared by reset_failure_counters_on_task_boundary.
-SUGGESTED_SKILLS_FILE=$(mktemp)
 
 # 0.10.0: Consecutive gate-failure counter. Tracks gate-run.sh invocations
 # that exit nonzero without an intervening success. At threshold (5), emits
@@ -92,37 +85,12 @@ _cleanup_parser() {
     pkill -P "$HB_SIDECAR_PID" 2>/dev/null || true
     kill "$HB_SIDECAR_PID" 2>/dev/null || true
   fi
-  rm -f "$FAILURES_FILE" "$WRITES_FILE" "${SUGGESTED_SKILLS_FILE:-}"
+  rm -f "$FAILURES_FILE" "$WRITES_FILE"
 }
 trap _cleanup_parser EXIT
 
-# 0.3.0: Active-recovery state. The first recoverable stuck pattern in an
-# loop emits RECOVER_ATTEMPT (not GUTTER); subsequent stuck patterns
-# in the same loop emit GUTTER as before. The loop's per-invocation
-# budget caps total recovery attempts across loops.
-RECOVERY_ATTEMPTED=0
-RECOVERY_HINT_FILE="$RALPH_DIR/recovery-hint.md"
-
-# 0.4.0: Stuck-pattern thresholds. Pre-0.4.0 these were hardcoded at 2
-# (shell-fail) and 5 (file-thrash) in the body of their respective
-# detectors, which killed agents on the most ordinary red-state workflow:
-# run gate, read log, make targeted fix, re-run gate — if the fix didn't
-# work, that was attempt #2 and the loop killed the loop with no
-# third try. The new 4 / 5 defaults give the agent a realistic debug
-# budget without letting genuine infinite loops run forever. Raise via
-# env var for longer debug sessions, lower (back to 2) for aggressive
-# bail-out behaviour.
 SHELL_FAIL_THRESHOLD="${RALPH_SHELL_FAIL_THRESHOLD:-5}"
 FILE_THRASH_THRESHOLD="${RALPH_FILE_THRASH_THRESHOLD:-5}"
-
-# 0.6.0: Soft-suggestion threshold for shell-failures and file-thrash. Fires
-# BEFORE the hard recovery threshold and writes `.ralph/skill-suggestion`
-# pointing the agent at `diagnosing-stuck-tasks`. Same session, no kill —
-# the agent's next turn picks up the suggestion. Default 3 catches early
-# stuck patterns (1 fix attempt + 2 retries) before the 5-strike hard
-# escalation kicks in.
-SHELL_FAIL_SUGGEST_THRESHOLD="${RALPH_SHELL_FAIL_SUGGEST_THRESHOLD:-3}"
-FILE_THRASH_SUGGEST_THRESHOLD="${RALPH_FILE_THRASH_SUGGEST_THRESHOLD:-3}"
 
 get_health_emoji() {
   local tokens=$1
@@ -273,76 +241,6 @@ check_gutter() {
   fi
 }
 
-# 0.6.0: Soft suggestion — write a one-shot marker that the running agent's
-# next turn picks up. Does NOT kill the agent; same session continues. The
-# agent reads `.ralph/skill-suggestion` per its prompt and is expected to
-# invoke the named skill. Used for early stuck-pattern signals (3 same-cmd
-# failures) where we want the agent to pivot strategy without paying the
-# cold-start tax of a fresh loop. Pre-0.6.0 the only escalation path
-# was RECOVER_ATTEMPT (kill + restart with hint), which was correct for
-# hard recovery but expensive for "you might be on the wrong track."
-SKILL_SUGGESTION_FILE="$RALPH_DIR/skill-suggestion"
-
-_write_skill_suggestion() {
-  local skill="$1"
-  local trigger="$2"
-  local detail="$3"
-  cat >"$SKILL_SUGGESTION_FILE" <<EOF
-## Loop suggestion (consume once, then delete this file)
-
-**Skill to invoke**: \`${skill}\`
-
-**Why**: ${trigger}
-
-**Context**: ${detail}
-
-The loop detected a pattern that suggests you should switch cognitive postures.
-Read the skill's SKILL.md and follow its workflow before continuing the
-procedural execute-gate-commit cycle. After the skill completes (or you decide
-to override its recommendation), delete this file with \`rm .ralph/skill-suggestion\`.
-EOF
-}
-
-# 0.3.0: Recovery-hint helpers. Each writes a trigger-specific block to
-# .ralph/recovery-hint.md, which build_prompt() prepends to the next
-# loop's framing prompt and deletes (consume-once).
-_write_recovery_hint_shell() {
-  local cmd="$1"
-  local exit_code="$2"
-  cat >"$RECOVERY_HINT_FILE" <<EOF
-## Recovery Hint from Prior Loop
-
-Your prior loop ran the following command twice with the same exit code (\`${exit_code}\`) before being killed by the recovery system:
-
-\`\`\`
-${cmd}
-\`\`\`
-
-- **Do not retry that exact command** — it will fail the same way.
-- Read the persisted output of the failing run before trying anything else.
-- Diagnose the root cause: missing dependency, wrong directory, gate misconfiguration, or an environment assumption that does not hold.
-- If the command is a gate, the failing log is at \`.ralph/gates/<label>-latest.log\`.
-
-This hint will not appear again — you have one shot to recover before the loop escalates to GUTTER.
-EOF
-}
-
-_write_recovery_hint_thrash() {
-  local path="$1"
-  local count="$2"
-  cat >"$RECOVERY_HINT_FILE" <<EOF
-## Recovery Hint from Prior Loop
-
-Your prior loop rewrote \`${path}\` ${count} times within 10 minutes before being killed by the recovery system.
-
-- **Stop editing that file in this loop** until you understand why prior edits did not settle.
-- Run \`git diff HEAD -- ${path}\` and read your own changes carefully.
-- Consider that the failing test or symptom may originate elsewhere — repeatedly rewriting the same file is a strong sign you are debugging the wrong layer.
-
-This hint will not appear again — you have one shot to recover before the loop escalates to GUTTER.
-EOF
-}
-
 track_shell_failure() {
   local cmd="$1"
   local exit_code="$2"
@@ -385,27 +283,9 @@ track_shell_failure() {
     # Writes `.ralph/skill-suggestion` pointing at `diagnosing-stuck-tasks`
     # and emits SUGGEST_SKILL to stdout. Loop does NOT kill the agent;
     # the agent's prompt directs it to read the suggestion and switch modes.
-    if [[ $count -ge $SHELL_FAIL_SUGGEST_THRESHOLD ]] && [[ $count -lt $SHELL_FAIL_THRESHOLD ]]; then
-      if ! grep -qxF "diagnosing-stuck-tasks" "$SUGGESTED_SKILLS_FILE" 2>/dev/null; then
-        _write_skill_suggestion "diagnosing-stuck-tasks" \
-          "Same gate command has failed ${count} times" \
-          "Command: ${cmd}"
-        echo "diagnosing-stuck-tasks" >>"$SUGGESTED_SKILLS_FILE"
-        log_activity "💡 Skill suggestion: diagnosing-stuck-tasks (shell-fail ${count}x)"
-        echo "SUGGEST_SKILL" 2>/dev/null || true
-      fi
-    fi
     if [[ $count -ge $SHELL_FAIL_THRESHOLD ]]; then
-      if [[ $RECOVERY_ATTEMPTED -eq 0 ]]; then
-        _write_recovery_hint_shell "$cmd" "$exit_code"
-        log_error "🔁 RECOVERABLE STUCK PATTERN: same command failed ${count}x — emitting RECOVER_ATTEMPT"
-        log_activity "🔁 Recoverable stuck pattern (shell-fail ${count}x): $cmd"
-        RECOVERY_ATTEMPTED=1
-        echo "RECOVER_ATTEMPT" 2>/dev/null || true
-      else
-        log_error "⚠️ GUTTER: same command failed ${count}x (recovery already used this loop)"
-        echo "GUTTER" 2>/dev/null || true
-      fi
+      log_error "⚠️ GUTTER: same command failed ${count}x"
+      echo "GUTTER" 2>/dev/null || true
     fi
   fi
 }
@@ -421,13 +301,6 @@ track_shell_failure() {
 # session and the run-loop's `signal` variable never clears once set.
 reset_failure_counters_on_task_boundary() {
   : >"$FAILURES_FILE"
-  # 0.6.0: also clear the per-loop suggested-skill marker so the
-  # next stuck pattern (probably on a different command) gets a fresh
-  # suggestion. The skill-suggestion file itself is consumed by the
-  # agent, not us.
-  : >"$SUGGESTED_SKILLS_FILE"
-  # Tell run_loop to clear any latched GUTTER/WARN signals. The
-  # consumer treats RECOVER as "the bad thing is over; keep going".
   echo "RECOVER" 2>/dev/null || true
 }
 
@@ -442,31 +315,10 @@ track_file_write() {
     $1 >= cutoff && $2 == path { count++ }
     END { print count+0 }
   ' "$WRITES_FILE")
-  # 0.6.0: soft-suggestion at lower threshold for thrash too.
-  if [[ $count -ge $FILE_THRASH_SUGGEST_THRESHOLD ]] && [[ $count -lt $FILE_THRASH_THRESHOLD ]]; then
-    if ! grep -qxF "diagnosing-stuck-tasks" "$SUGGESTED_SKILLS_FILE" 2>/dev/null; then
-      _write_skill_suggestion "diagnosing-stuck-tasks" \
-        "Same file rewritten ${count} times in 10 minutes" \
-        "Path: ${path}"
-      echo "diagnosing-stuck-tasks" >>"$SUGGESTED_SKILLS_FILE"
-      log_activity "💡 Skill suggestion: diagnosing-stuck-tasks (file thrash ${count}x on $path)"
-      echo "SUGGEST_SKILL" 2>/dev/null || true
-    fi
-  fi
   if [[ $count -ge $FILE_THRASH_THRESHOLD ]]; then
     log_error "THRASHING: $path written ${count}x in 10 min"
-    # 0.3.0: First trip in a loop emits RECOVER_ATTEMPT; second
-    # trip falls through to GUTTER. See track_shell_failure for rationale.
-    if [[ $RECOVERY_ATTEMPTED -eq 0 ]]; then
-      _write_recovery_hint_thrash "$path" "$count"
-      log_error "🔁 RECOVERABLE STUCK PATTERN: file thrash on $path — emitting RECOVER_ATTEMPT"
-      log_activity "🔁 Recoverable stuck pattern (thrash ${count}x): $path"
-      RECOVERY_ATTEMPTED=1
-      echo "RECOVER_ATTEMPT" 2>/dev/null || true
-    else
-      log_error "⚠️ GUTTER: file thrash on $path (recovery already used this loop)"
-      echo "GUTTER" 2>/dev/null || true
-    fi
+    log_error "⚠️ GUTTER: file thrash on $path"
+    echo "GUTTER" 2>/dev/null || true
   fi
 }
 

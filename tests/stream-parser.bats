@@ -111,9 +111,6 @@ tool_result_json() {
 }
 
 @test "shell-fail threshold configurable via RALPH_SHELL_FAIL_THRESHOLD (0.4.0)" {
-  # With threshold=4, 2× and 3× fails should be benign; only 4× trips
-  # RECOVER_ATTEMPT. This is the 0.4.0 default that gives agents a
-  # realistic red-state debug budget.
   export RALPH_SHELL_FAIL_THRESHOLD=4
   local events=""
   for i in 1 2 3; do
@@ -122,107 +119,42 @@ tool_result_json() {
   done
   local output
   output=$(run_parser "$events")
-  # 3 fails under threshold 4 → no RECOVER_ATTEMPT yet
-  if echo "$output" | grep -q "RECOVER_ATTEMPT"; then
-    fail "RECOVER_ATTEMPT emitted at 3x with threshold=4; expected quiet"
-  fi
-
-  # Add a 4th fail → RECOVER_ATTEMPT fires
-  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm basic-check")
-  events+=$'\n'
-  output=$(run_parser "$events")
-  echo "$output" | grep -q "RECOVER_ATTEMPT"
-}
-
-@test "soft skill suggestion fires at 3 same-cmd failures before hard recovery (0.6.0)" {
-  # Pin thresholds so the test runs fast and deterministically.
-  export RALPH_SHELL_FAIL_SUGGEST_THRESHOLD=3
-  export RALPH_SHELL_FAIL_THRESHOLD=5
-
-  local events=""
-  for _ in 1 2 3; do
-    events+=$(tool_result_json "Shell" 50 2 1 "" "pnpm test")
-    events+=$'\n'
-  done
-
-  local output
-  output=$(run_parser "$events")
-
-  # SUGGEST_SKILL signal must be emitted to stdout.
-  echo "$output" | grep -q "^SUGGEST_SKILL$"
-  # Suggestion file must be written with the expected skill name.
-  [ -f "$MOCK_WORKSPACE/.ralph/skill-suggestion" ]
-  grep -q "diagnosing-stuck-tasks" "$MOCK_WORKSPACE/.ralph/skill-suggestion"
-  # And it must NOT have escalated to RECOVER_ATTEMPT yet (we're below the
-  # hard threshold of 5).
-  ! echo "$output" | grep -q "^RECOVER_ATTEMPT$"
-}
-
-@test "soft skill suggestion is not re-emitted on subsequent failures in same loop (0.6.0)" {
-  # Once we've suggested `diagnosing-stuck-tasks` for shell-fails, hitting
-  # the threshold again on the same command shouldn't re-emit a duplicate
-  # suggestion every turn. Hard recovery still fires at the upper threshold.
-  export RALPH_SHELL_FAIL_SUGGEST_THRESHOLD=2
-  export RALPH_SHELL_FAIL_THRESHOLD=4
-
-  local events=""
-  for _ in 1 2 3; do
-    events+=$(tool_result_json "Shell" 50 2 1 "" "pnpm test")
-    events+=$'\n'
-  done
-
-  local output
-  output=$(run_parser "$events")
-
-  # Exactly ONE SUGGEST_SKILL emission, even though the threshold was
-  # crossed on counts 2 and 3.
-  local count
-  count=$(echo "$output" | grep -c "^SUGGEST_SKILL$" || true)
-  [ "$count" -eq 1 ]
-}
-
-@test "first identical-shell-fail-2x emits RECOVER_ATTEMPT (not GUTTER) and writes hint (0.3.0)" {
-  local events=""
-  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm basic-check")
-  events+=$'\n'
-  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm basic-check")
-  events+=$'\n'
-
-  local output
-  output=$(run_parser "$events")
-  # First trip: RECOVER_ATTEMPT, NOT GUTTER
-  echo "$output" | grep -q "RECOVER_ATTEMPT"
   if echo "$output" | grep -q "^GUTTER$"; then
-    fail "First stuck-shell trip should emit RECOVER_ATTEMPT, not GUTTER (0.3.0)"
+    fail "GUTTER emitted at 3x with threshold=4; expected quiet"
   fi
-  # Hint file written with command + exit code
-  [ -f "$MOCK_WORKSPACE/.ralph/recovery-hint.md" ]
-  grep -q "Recovery Hint from Prior Loop" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-  grep -q "pnpm basic-check" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-  grep -q "exit code (\`1\`)" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-  # Errors/activity log mention recoverable pattern
-  grep -q "RECOVERABLE STUCK PATTERN" "$MOCK_WORKSPACE/.ralph/errors.log"
+
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm basic-check")
+  events+=$'\n'
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "^GUTTER$"
 }
 
-@test "second stuck pattern in same loop falls through to GUTTER (0.3.0)" {
-  # First failure 2x → RECOVER_ATTEMPT (consumes the recovery slot)
-  # Second failure 2x (different command, same loop) → GUTTER
+@test "shell-fail at threshold emits GUTTER (0.10.0)" {
+  export RALPH_SHELL_FAIL_THRESHOLD=5
   local events=""
-  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm a")
-  events+=$'\n'
-  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm a")
-  events+=$'\n'
-  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm b")
-  events+=$'\n'
+  for _ in 1 2 3 4 5; do
+    events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm basic-check")
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "^GUTTER$"
+}
+
+@test "different shell failures each accumulate separately (0.3.0)" {
+  export RALPH_SHELL_FAIL_THRESHOLD=5
+  local events=""
+  for _ in 1 2 3 4 5; do
+    events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm a")
+    events+=$'\n'
+  done
   events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm b")
   events+=$'\n'
 
   local output
   output=$(run_parser "$events")
-  echo "$output" | grep -q "RECOVER_ATTEMPT"
   echo "$output" | grep -q "^GUTTER$"
-  # Errors log records the budget-exhausted GUTTER reason
-  grep -q "recovery already used this loop" "$MOCK_WORKSPACE/.ralph/errors.log"
 }
 
 @test "git commit failure on .ralph/ path emits gitignored hint (0.9.0)" {
@@ -267,7 +199,7 @@ tool_result_json() {
   fi
 }
 
-@test "first file thrash emits RECOVER_ATTEMPT (not GUTTER) and writes hint (0.3.0)" {
+@test "file thrash at threshold emits GUTTER (0.10.0)" {
   local events=""
   for i in $(seq 1 5); do
     events+=$(tool_result_json "Write" 50 5 0 "/tmp/same-file.ts")
@@ -276,32 +208,6 @@ tool_result_json() {
 
   local output
   output=$(run_parser "$events")
-  echo "$output" | grep -q "RECOVER_ATTEMPT"
-  if echo "$output" | grep -q "^GUTTER$"; then
-    fail "First file-thrash trip should emit RECOVER_ATTEMPT, not GUTTER (0.3.0)"
-  fi
-  # Hint file written with thrashed path
-  [ -f "$MOCK_WORKSPACE/.ralph/recovery-hint.md" ]
-  grep -q "Recovery Hint from Prior Loop" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-  grep -q "/tmp/same-file.ts" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-  grep -q "5 times within 10 minutes" "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-}
-
-@test "thrash followed by repeat shell-fail in same loop: RECOVER_ATTEMPT then GUTTER (0.3.0)" {
-  # Thrash consumes the recovery slot; subsequent stuck shell-fail goes to GUTTER.
-  local events=""
-  for i in $(seq 1 5); do
-    events+=$(tool_result_json "Write" 50 5 0 "/tmp/thrashed.ts")
-    events+=$'\n'
-  done
-  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm test")
-  events+=$'\n'
-  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm test")
-  events+=$'\n'
-
-  local output
-  output=$(run_parser "$events")
-  echo "$output" | grep -q "RECOVER_ATTEMPT"
   echo "$output" | grep -q "^GUTTER$"
 }
 
