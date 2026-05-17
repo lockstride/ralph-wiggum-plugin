@@ -291,10 +291,7 @@ LOG
   # Loop-extras section is appended
   grep -q "Recent activity" "$effective"
   grep -q "GATE end label=basic exit=0" "$effective"
-  grep -q "Specialist skills available" "$effective"
-  grep -q "diagnosing-stuck-tasks" "$effective"
-  grep -q "running-gates" "$effective"
-  grep -q "reviewing-loop-progress" "$effective"
+  grep -q "root cause" "$effective"
 }
 
 @test "--prompt-file mode appends loop-extras (0.6.0)" {
@@ -308,7 +305,7 @@ PROMPT
   local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
   grep -q "do stuff" "$effective"
   grep -q "Recent activity" "$effective"
-  grep -q "Specialist skills available" "$effective"
+  grep -q "root cause" "$effective"
   # First-loop fallback message when no activity.log exists
   grep -q "no prior activity" "$effective"
 }

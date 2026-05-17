@@ -10,7 +10,7 @@ The Ralph loop is a **shell script you run in a terminal**. It spawns the agent 
 
 A healthy ralph **loop** runs as one continuous agent process — it commits as it goes and keeps moving until a real stop condition fires. It only respawns the agent (looping) on hard signals: context-window pressure, consecutive gate failures, or a rate-limit backoff. Looping is fine when needed but flow is much better — a single small spec usually completes in one loop.
 
-The Claude Code plugin wrapping (slash commands, plugin manifest, and specialist skills) is a Claude Code-only enrichment. **For Claude Code users, install as a plugin** — it unlocks the specialist skills (`running-gates`, `verifying-acceptance-criteria`, `addressing-acceptance-gaps`) that guide the agent through verification workflows. Standalone-script users still get the full loop infrastructure but the agent runs without those specialist prompts.
+The Claude Code plugin wrapping (slash commands, plugin manifest, and specialist skills) is a Claude Code-only enrichment. **For Claude Code users, install as a plugin** — it unlocks the acceptance-evaluation skills (`running-acceptance-evaluation`, `verifying-acceptance-criteria`, `addressing-acceptance-gaps`) and the guard hook that enforces gate discipline. Standalone-script users still get the full loop infrastructure but without those extras.
 
 ## ⚠️ Blast radius
 

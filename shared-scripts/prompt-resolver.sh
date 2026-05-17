@@ -141,27 +141,9 @@ $activity_tail
 \`\`\`
 
 If the snapshot above shows you've been running the same gate or editing
-the same file repeatedly without progress, do NOT continue the same
-approach — invoke the \`diagnosing-stuck-tasks\` skill instead.
-
-## Specialist skills available
-
-The plugin provides three skills you can invoke (via the Skill tool) when
-the situation calls for a different cognitive posture than executing the
-prompt above:
-
-- \`running-gates\` — gate-invocation contract (how to call gate-run.sh,
-  no-pipe rule, retry budget, failure-diagnosis protocol). Reference any
-  time you're about to run a verification command.
-- \`diagnosing-stuck-tasks\` — exploratory mode when the same gate keeps
-  failing or you've been on the same task too long. The loop sometimes
-  prompts you to invoke this via \`.ralph/skill-suggestion\`.
-- \`reviewing-loop-progress\` — lightweight meta-reflection. "Am I still
-  on the right track?" One paragraph, then act.
-
-If \`.ralph/skill-suggestion\` exists, the loop has detected a stuck
-pattern and is suggesting a specific skill — read that file and invoke
-the named skill before continuing.
+the same file repeatedly without progress, investigate the root cause
+before retrying — read the gate log, check screenshots, use \`curl\`
+against endpoints directly.
 EOF
 }
 
@@ -326,7 +308,7 @@ GENPROMPT
     return 1
   fi
   # 0.6.0 trimmed the target from 120 → 50 lines. Specialist behavior moved to
-  # plugin skills (running-gates, diagnosing-stuck-tasks, reviewing-loop-progress)
+  # plugin skills (acceptance evaluation)
   # so the framing prompt no longer needs to inline gate-discipline / diagnosis
   # protocols. Warn if the generated prompt drifts back over 75 lines.
   if [[ $line_count -gt 75 ]]; then

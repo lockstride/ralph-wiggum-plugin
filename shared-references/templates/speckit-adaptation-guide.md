@@ -41,14 +41,14 @@ and unattended execution. Stable across versions of speckit-implement.
 7. **Add loop handoff.** Read `.ralph/handoff.md` at start (if fresher
    than the latest commit). Write it at loop end (< 30 lines,
    navigation-only).
-8. **Reference the `running-gates` skill** for gate invocation. Don't
-   inline the no-pipe rule, retry budget, or failure-diagnosis
-   protocol — those live in the skill. The framing prompt only needs
-   to say: "Run gates via `{{GATE_RUN}}`. See the `running-gates`
-   skill for the contract."
-9. **Reference the `diagnosing-stuck-tasks` skill** for stuck cases.
-   Don't inline diagnostic protocols. Frame the skill as permission
-   to step out of the procedural cycle, not as a procedure to follow.
+8. **Hardcode the basic gate inline.** The per-task flow should say
+   `Run \`{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}\``. Reserve
+   `final` for the completion gate only (step 3). Keep failure-
+   diagnosis guidance to 2–3 lines: read the gate log, check
+   screenshots, use `curl` — don't re-run to "see if it's really
+   broken."
+9. **Keep stuck guidance brief.** A short paragraph on investigating
+   root causes. Don't inline full diagnostic protocols.
 10. **Add commit-per-task.** Conventional Commits
     `<type>(<scope>): <description> (T###)`. Stage by exact path. No
     agent-identifying footers.
@@ -98,14 +98,17 @@ context rotation and rate limits; you handle the work.
 - **Plan**: `{{PLAN_FILE}}`
 - **Spec**: `{{SPEC_FILE}}`
 - **Constitution**: `{{CONSTITUTION_PATH}}`
-- **Gate runner**: `{{GATE_RUN}}` — see the `running-gates` skill
+- **Gate runner**: `{{GATE_RUN}}`
+- **Basic gate**: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`
+- **Final gate**: `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
 
 ## Recent activity
 {{ACTIVITY_TAIL}}
 
 If the snapshot above shows you've been running the same gate or
-editing the same file repeatedly without progress, do NOT continue
-the same approach — invoke the `diagnosing-stuck-tasks` skill.
+editing the same file repeatedly without progress, investigate the
+root cause before retrying — read the gate log, check screenshots,
+use `curl` against endpoints directly.
 
 ## Loop handoff
 - **At start**: If `.ralph/handoff.md` exists and is fresher than
@@ -120,7 +123,7 @@ the same approach — invoke the `diagnosing-stuck-tasks` skill.
 2. For each unchecked task in `{{TASK_FILE}}`, in phase order:
    - Read only the files the task references.
    - Implement the minimum change. TDD where applicable.
-   - Run a gate via `{{GATE_RUN}}` (see `running-gates` skill).
+   - Run `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`.
    - Mark `[x]` in `{{TASK_FILE}}` only after the gate exits 0.
    - Commit: `git add <exact paths> && git commit -m "<type>(<scope>): <description> (T###)"`.
    - Check `.ralph/stop-requested`. If absent, your next tool call
@@ -128,9 +131,11 @@ the same approach — invoke the `diagnosing-stuck-tasks` skill.
 3. When all tasks are `[x]` AND the final gate passes, emit
    `<promise>ALL_TASKS_DONE</promise>`.
 
-If the gate keeps failing for the same reason after a real fix,
-you're probably investigating the wrong layer — invoke
-`diagnosing-stuck-tasks` rather than retrying.
+If a gate fails, read `.ralph/gates/basic-latest.log` (or the
+relevant label's log). Screenshots at `cypress/screenshots/` and
+direct `curl` against endpoints are cheaper evidence than re-running.
+After a genuine fix, if the gate still fails for the same reason,
+emit `<ralph>GUTTER</ralph>` — the loop will rotate to a fresh agent.
 
 ## Stop conditions (the only four)
 `<promise>ALL_TASKS_DONE</promise>`, rotation `WARN` from the loop,

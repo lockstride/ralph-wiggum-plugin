@@ -1,58 +1,14 @@
 # Plugin skills (operator reference)
 
-Ralph 0.6.0 ships **six** plugin skills — three for the main implementation loop (cognitive-mode switching when the agent gets stuck or needs to step back) and three for the post-completion acceptance evaluator (orchestrator + verifier + rework, previously inline templates). This doc is the *operator* view: what each skill does, when the loop suggests it, and how to override or disable. The agent-facing content lives in each skill's `SKILL.md`.
+Ralph ships **four** plugin skills — one maintenance skill (`ralph-plugin-speckit-update`) and three for the post-completion acceptance evaluator (orchestrator + verifier + rework). This doc is the *operator* view: what each skill does, when it's invoked, and how to override or disable. The agent-facing content lives in each skill's `SKILL.md`.
 
-> **Skills require plugin install.** Standalone-script users (Install Options A and B in the README) get the loop infrastructure, but the agent does NOT discover plugin skills. Install via the marketplace (Option C) to unlock the cognitive-mode behavior. See [README → Install](../README.md#install).
+> **Skills require plugin install.** Standalone-script users (Install Options A and B in the README) get the loop infrastructure, but the agent does NOT discover plugin skills. Install via the marketplace to unlock skill behavior. See [README → Install](../README.md#install).
 
-## Main-loop skills
-
-## `running-gates`
-
-**File:** `skills/running-gates/SKILL.md`
-
-**What it does:** Wraps everything previously inlined as the "Gate invocation contract" in the framing prompt — how to call `gate-run.sh`, the no-pipe rule, the per-task one-retry budget, the failure-diagnosis protocol, the post-success protocol. The agent invokes this skill any time it's about to run a gate or diagnose a gate failure.
-
-**When invoked:** Continuously, by the agent's own judgment. The framing prompt directs the agent to reference this skill for gate operations rather than relying on inlined rules. Pulling the contract out of the framing prompt saves ~500 tokens of working memory on every non-gate turn.
-
-**Override:** Edit `skills/running-gates/SKILL.md`. The framing prompt's reference (`See the running-gates skill for the contract`) survives any edit; only the contract details change.
-
-**Disable:** Not recommended — the gate discipline is load-bearing. To experiment, delete the skill directory and the agent will fall back to its training-time judgment about gate invocation. Expect more `pipe`-mediated calls and reruns.
-
-## `diagnosing-stuck-tasks`
-
-**File:** `skills/diagnosing-stuck-tasks/SKILL.md`
-
-**What it does:** Switches the agent into exploratory diagnosis mode. Suspends the procedural execute-gate-commit cycle. The agent reads the full failure log (not the bounded summary), questions whether the test itself is wrong, lists 2–3 alternative root causes, runs layer-bypassing diagnostics (`curl` directly against endpoints, Playwright if available), then either commits to a new approach or emits `<ralph>GUTTER</ralph>`. Findings written to `.ralph/diagnosis.md` for the next loop.
-
-**When invoked (auto-suggested by the loop):**
-- Same `gate-run.sh` command has failed 3+ times in this loop (`RALPH_SHELL_FAIL_SUGGEST_THRESHOLD`, default 3).
-- Same file rewritten 3+ times within 10 minutes (`RALPH_FILE_THRASH_SUGGEST_THRESHOLD`, default 3).
-- Stream-parser writes `.ralph/skill-suggestion` with the trigger context. Agent's prompt directs it to read that file and invoke the skill before continuing.
-
-**When invoked (agent self-judgment):** When the agent notices it's about to make the same edit-then-fail cycle for the third time.
-
-**Override:**
-- Raise/lower the suggestion thresholds via `RALPH_SHELL_FAIL_SUGGEST_THRESHOLD` and `RALPH_FILE_THRASH_SUGGEST_THRESHOLD` in the loop's environment.
-- Edit the skill body to change what counts as "honest diagnosis" or to add new diagnostic patterns.
-- The hard recovery threshold (`RALPH_SHELL_FAIL_THRESHOLD`, default 5) is unchanged by this skill — if the agent ignores the suggestion and keeps failing, the existing kill-and-restart-with-hint path still fires.
-
-**Disable:** Set `RALPH_SHELL_FAIL_SUGGEST_THRESHOLD=999` and `RALPH_FILE_THRASH_SUGGEST_THRESHOLD=999` to effectively suppress soft suggestions. The hard recovery path remains active.
-
-## `reviewing-loop-progress`
-
-**File:** `skills/reviewing-loop-progress/SKILL.md`
-
-**What it does:** Lightweight meta-reflection. The agent reads the activity-log tail, recent commits, and the current task description, then writes a one-paragraph "what I've been doing, what's working, what's not, recommendation" assessment. Different from `diagnosing-stuck-tasks` — this is for "step back and look at the bigger picture" rather than "this specific failure is blocking me."
-
-**When invoked:** Agent self-judgment, not loop-suggested. The framing prompt mentions this skill is available for uncertainty moments. Useful before invoking the heavier `diagnosing-stuck-tasks` — sometimes a meta-look reveals you're working the wrong task entirely.
-
-**Override:** Edit the skill body to change what gets read or how the assessment is structured.
-
-**Disable:** Not necessary — the skill is opt-in by the agent. If the agent never invokes it, it costs nothing.
+Gate discipline for the main implementation loop is handled by the guard hook (blocks direct test-tool invocations, pipe/redirect on protected scripts) and the speckit prompt template (hardcodes `basic` gate for per-task verification). No main-loop skills are needed — the prompt template and mechanical enforcement are more reliable than skills the agent may or may not read.
 
 ## Acceptance-evaluation skills
 
-These three drive the post-completion `ralph-evaluate` loop. Pre-0.6.0 the orchestrator + role bodies were inline markdown templates rendered into a 150-line effective prompt. 0.6.0 splits them into discoverable plugin skills that the loop's framing prompt references by name.
+These three drive the post-completion `ralph-evaluate` loop. The orchestrator + role bodies are discoverable plugin skills that the loop's framing prompt references by name.
 
 ### `running-acceptance-evaluation`
 
@@ -86,34 +42,24 @@ These three drive the post-completion `ralph-evaluate` loop. Pre-0.6.0 the orche
 
 **Override:** Edit `skills/addressing-acceptance-gaps/SKILL.md` to change what counts as legitimate "blocked" reasons, scope-creep guardrails, or commit-granularity expectations.
 
+## `ralph-plugin-speckit-update`
+
+**File:** `skills/ralph-plugin-speckit-update/SKILL.md`
+
+**What it does:** Maintenance skill for updating the plugin's own Spec Kit integration files when a new Spec Kit version is released. Covers the adaptation guide, prompt-resolver, fallback prompt template, docs, and tests.
+
+**When invoked:** By the operator (you) when Spec Kit releases a new tagged version.
+
 ## How skills are wired into the loop
 
 1. **Discovery** — when ralph-setup launches `claude`, the plugin install registers `skills/*/SKILL.md` with claude. Their frontmatter (name + description) is preloaded into the agent's system prompt at model load. Body is read on demand when the agent invokes the skill.
 
-2. **Suggestion** — stream-parser writes `.ralph/skill-suggestion` when an early stuck pattern fires (`SUGGEST_SKILL` signal, distinct from the harder `RECOVER_ATTEMPT`). The framing prompt directs the agent to check this file at startup and after every commit.
-
-3. **Invocation** — agent calls the `Skill` tool with the matching name. The skill's body becomes part of the conversation context. The agent follows the skill's workflow, then returns to the main loop's procedural cycle (or escalates via GUTTER per the skill's guidance).
-
-4. **Cleanup** — after invocation, the agent deletes `.ralph/skill-suggestion` so the same trigger doesn't re-prompt next turn. The per-loop suggested-skills tracker is cleared on every successful commit (`reset_failure_counters_on_task_boundary`).
-
-## Cross-CLI portability
-
-Anthropic published Agent Skills as an [open standard](https://agentskills.io) in December 2025. As adoption spreads, these skills should work in:
-
-- **Claude Code** — ✅ supported now (plugin install)
-- **Cursor** — supported as ecosystem matures
-- **Codex CLI** — supported as ecosystem matures
-- **Gemini CLI / Copilot** — supported as ecosystem matures
-
-For non-supporting CLIs, the loop's fallback path is to inline the relevant skill content into the framing prompt. This is mechanically straightforward but defeats the cognitive-load benefit of progressive disclosure. Track CLI support in [README → Install](../README.md#install).
+2. **Invocation** — agent calls the `Skill` tool with the matching name. The skill's body becomes part of the conversation context. The agent follows the skill's workflow, then returns to the main loop's procedural cycle (or escalates via GUTTER per the skill's guidance).
 
 ## Adding new skills
 
-If you find a class of stuck pattern the existing skills don't cover, add a new one:
-
 1. Create `skills/<gerund-form-name>/SKILL.md` (gerund form per [Anthropic best practices](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices)).
 2. Frontmatter: `name`, `description` (third-person, ≤1024 chars, includes both *what* and *when*). Body ≤500 lines.
-3. If the loop should auto-suggest the skill on a specific signal, add the trigger in `shared-scripts/stream-parser.sh` (see existing `_write_skill_suggestion` calls in `track_shell_failure` and `track_file_write` for the pattern).
-4. Reference the new skill from `shared-references/templates/speckit-prompt.md` and `shared-references/templates/speckit-adaptation-guide.md` so generated prompts mention it.
-5. Add a frontmatter-validation test case to `tests/skills.bats`.
-6. Document the skill here.
+3. Reference the new skill from `shared-references/templates/speckit-prompt.md` and `shared-references/templates/speckit-adaptation-guide.md` so generated prompts mention it.
+4. Add a frontmatter-validation test case to `tests/skills.bats`.
+5. Document the skill here.

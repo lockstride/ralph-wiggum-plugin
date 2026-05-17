@@ -120,7 +120,10 @@ _all_skills() {
 }
 
 @test "expected skills are present" {
-  [ -f "$SKILLS_DIR/running-gates/SKILL.md" ]
+  [ -f "$SKILLS_DIR/running-acceptance-evaluation/SKILL.md" ]
+  [ -f "$SKILLS_DIR/verifying-acceptance-criteria/SKILL.md" ]
+  [ -f "$SKILLS_DIR/addressing-acceptance-gaps/SKILL.md" ]
+  [ -f "$SKILLS_DIR/ralph-plugin-speckit-update/SKILL.md" ]
 }
 
 @test "ralph-plugin-speckit-update skill is present" {

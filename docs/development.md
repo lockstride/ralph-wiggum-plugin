@@ -91,7 +91,7 @@ The acceptance evaluator is a separate Ralph loop that runs *after* the main loo
 
 **Limitations.**
 - **Sub-agent support depends on the driving CLI** (above).
-- **UI verification requires Playwright MCP.** When the MCP server isn't installed, the verifier notes the limitation in the relevant gap rather than silently skipping UI requirements. Ralph 0.6.0 auto-detects Playwright at setup time; see [skills.md](skills.md#running-gates) for how the agent uses it.
+- **UI verification requires Playwright MCP.** When the MCP server isn't installed, the verifier notes the limitation in the relevant gap rather than silently skipping UI requirements.
 - **The verifier is only as good as the ground-truth requirements.** Vague requirements in `PROMPT.md` produce vague gap reports.
 
 ## Prompt generation deep details
@@ -118,10 +118,11 @@ ralph-wiggum-plugin/
 ├── .claude-plugin/
 │   └── plugin.json              # Single source of truth for version
 ├── commands/                    # Slash commands (/ralph, /ralph-once, /ralph-evaluate, /ralph-cancel)
-├── skills/                      # 0.6.0+ specialist cognitive modes
-│   ├── running-gates/SKILL.md
-│   ├── diagnosing-stuck-tasks/SKILL.md
-│   └── reviewing-loop-progress/SKILL.md
+├── skills/                      # Plugin skills (eval loop + maintenance)
+│   ├── running-acceptance-evaluation/SKILL.md
+│   ├── verifying-acceptance-criteria/SKILL.md
+│   ├── addressing-acceptance-gaps/SKILL.md
+│   └── ralph-plugin-speckit-update/SKILL.md
 ├── shared-scripts/              # The actual loop machinery
 │   ├── ralph-setup.sh           # Interactive launcher
 │   ├── ralph-loop.sh            # Scripted launcher

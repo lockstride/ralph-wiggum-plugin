@@ -8,8 +8,9 @@ context rotation; you handle the work.
 ## Paths
 - **Tasks**: `{{TASK_FILE}}` | **Plan**: `{{PLAN_FILE}}` | **Spec**: `{{SPEC_FILE}}`
 - **Constitution**: `{{CONSTITUTION_PATH}}`
-- **Gate runner**: `{{GATE_RUN}}` — see the `running-gates` skill
-- **Basic / Final check**: `{{BASIC_CHECK_COMMAND}}` / `{{FINAL_CHECK_COMMAND}}`
+- **Gate runner**: `{{GATE_RUN}}`
+- **Basic gate**: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`
+- **Final gate**: `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
 
 ## Recent activity
 {{ACTIVITY_TAIL}}
@@ -30,7 +31,7 @@ why, ≤ 5 architectural facts).
    contracts/ / research.md / quickstart.md if they exist.
 2. For each unchecked task in phase order:
    - Read only files the task references; implement the minimum change.
-   - Run a gate via `{{GATE_RUN}}` (see `running-gates` skill).
+   - Run `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`.
    - Mark `[x]` only after the gate exits 0.
    - `git add <exact paths> && git commit -m "<type>(<scope>): <desc> (T###)"`. No agent footers. No `--amend`. {{PUSH_GUIDANCE}}
    - Check `.ralph/stop-requested`. If absent, next tool call is the
@@ -38,9 +39,11 @@ why, ≤ 5 architectural facts).
 3. When all tasks are `[x]` AND `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
    exits 0, emit `<promise>ALL_TASKS_DONE</promise>`.
 
-If a gate keeps failing for the same reason after a genuine fix,
-emit `<ralph>GUTTER</ralph>` with what you learned — the loop will
-rotate to a fresh agent with troubleshooting guidance.
+If a gate fails, read `.ralph/gates/basic-latest.log` (or the
+relevant label's log). Screenshots at `cypress/screenshots/` and
+direct `curl` against endpoints are cheaper evidence than re-running.
+After a genuine fix, if the gate still fails for the same reason,
+emit `<ralph>GUTTER</ralph>` — the loop will rotate to a fresh agent.
 
 ## Stop conditions (the only four)
 `<promise>ALL_TASKS_DONE</promise>`, rotation `WARN`, `.ralph/stop-requested`,
