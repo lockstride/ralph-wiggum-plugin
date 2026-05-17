@@ -391,31 +391,6 @@ build_prompt() {
     user_body=$(cat "$user_prompt_file")
   fi
 
-  # 0.3.0: Active-recovery hint. If the prior loop tripped a recoverable
-  # stuck pattern, the stream-parser (or orphan-leak / wrong-file heuristic)
-  # wrote a hint to .ralph/recovery-hint.md and the driver killed/restarted
-  # the agent. Consume-once — delete immediately after reading so subsequent
-  # loops without a hint produce the normal prompt.
-  local hint_file="$workspace/.ralph/recovery-hint.md"
-  local hint_block=""
-  if [[ -f "$hint_file" ]]; then
-    hint_block=$(cat "$hint_file")
-    rm -f "$hint_file"
-  fi
-
-  # 0.7.0: Enforce skill suggestions. .ralph/skill-suggestion is a
-  # consume-once directive written by stream-parser (soft stuck pattern,
-  # ≥3 same-cmd failures) or by gate-run.sh (long-running failing gate).
-  # When present the agent MUST follow the skill before resuming the
-  # execute-gate-commit cycle. The file is consumed here so a missed
-  # suggestion doesn't persist into future loops.
-  local skill_suggestion_file="$workspace/.ralph/skill-suggestion"
-  local skill_block=""
-  if [[ -f "$skill_suggestion_file" ]]; then
-    skill_block=$(cat "$skill_suggestion_file")
-    rm -f "$skill_suggestion_file"
-  fi
-
   # 0.10.0: Troubleshoot overlay. When the prior turn ended on 5
   # consecutive gate failures, the TURN_END handler sets
   # _RALPH_OVERLAY_TROUBLESHOOT=1 and _RALPH_FAILING_GATE_LABEL.
@@ -479,74 +454,6 @@ GATE_EOF
     )
   fi
 
-  # 0.7.0 / 0.8.3: When a recovery hint is present, use a diagnostic-first
-  # prompt instead of the normal loop framing. The prior loop's fix-and-retry
-  # cycle didn't work — this loop's job is to understand WHY before acting.
-  #
-  # Design principle: the Tier 1 skill (diagnosing-stuck-tasks) already
-  # proved that suspending procedural rules and trusting the agent to
-  # investigate freely is more effective than a prescriptive checklist.
-  # Tier 2 should grant the same freedom — the agent needs MORE latitude
-  # at this stage, not less.
-  if [[ -n "$hint_block" ]]; then
-    cat <<EOF
-# Diagnostic Recovery — Loop $loop_n
-
-## What happened
-
-The prior loop got stuck and was killed by the recovery system:
-
-$hint_block
-
-## Your job
-
-Understand the root cause, fix it, and verify the gate passes. Then
-resume the task list.
-
-No procedural rules apply here. Investigate however the situation
-demands — read code, grep, run ad-hoc commands, check logs, inspect
-test setup, trace call graphs. Take as much time as you need to
-understand before you touch anything.
-
-The gate log is at \`.ralph/gates/<label>-latest.log\`. That's a
-starting point, not a boundary.
-
-If you cannot isolate the cause after a genuine investigation, emit
-\`<ralph>GUTTER</ralph>\` with what you learned. GUTTER is escalation
-to a human with fresh eyes, not failure.
-
-## Relevant state
-
-- \`.ralph/errors.log\` — recent failure details
-- \`.ralph/handoff.md\` — navigation pointers from prior loop (if present)
-- \`.ralph/guardrails.md\` — lessons from past failures
-$gate_block
-
-## Original task (context only — do not advance until gate is green)
-
-$user_body
-EOF
-    return
-  fi
-
-  # Normal prompt (no recovery). Include the skill-suggestion block
-  # prominently when present so the agent cannot miss it.
-  local skill_section=""
-  if [[ -n "$skill_block" ]]; then
-    skill_section=$(
-      cat <<SKILL_EOF
-
-## ⚠️ MANDATORY SKILL DIRECTIVE — follow before anything else
-
-$skill_block
-
-**You MUST follow the skill workflow above before resuming the
-execute-gate-commit cycle. This is not optional.**
-
-SKILL_EOF
-    )
-  fi
-
   # 0.10.0: troubleshoot overlay section (one-shot, from TURN_END on gate failures)
   local troubleshoot_section=""
   if [[ -n "$troubleshoot_block" ]]; then
@@ -557,7 +464,7 @@ $troubleshoot_block
 
   cat <<EOF
 # Ralph Loop $loop_n
-$skill_section$troubleshoot_section
+$troubleshoot_section
 You are running inside a Ralph loop. Git log and tasks.md checkboxes
 are the authoritative record of what is done. Commit after each task,
 read the next one, keep going.
@@ -646,6 +553,8 @@ _capture_loop_baseline() {
   if [[ -d "$_hook_state" ]]; then
     rm -f "$_hook_state/last-write-ts" "$_hook_state/last-gate-ts"
   fi
+  # Clean up stale 0.9.x state files that are no longer written or consumed.
+  rm -f "$ralph_dir/skill-suggestion" "$ralph_dir/recovery-hint.md" 2>/dev/null || true
 }
 
 # After a loop, compare the files touched by any new commits against
@@ -712,30 +621,6 @@ _check_orphan_leak() {
     echo ""
   } >>"$workspace/.ralph/errors.log"
 
-  # 0.7.0: Orphan leak is strong evidence the agent has lost context —
-  # files outside the task's scope being committed means it issued a
-  # broad 'git add'. Escalate to diagnostic recovery so the next loop
-  # pivots strategy instead of repeating the same broad-add pattern.
-  if [[ ! -f "$workspace/.ralph/recovery-hint.md" ]]; then
-    cat >"$workspace/.ralph/recovery-hint.md" <<ORPHAN_HINT_EOF
-## Orphan file leak — agent committed out-of-scope files
-
-**Leaked files committed this loop**: $leaked_inline
-
-Files that were untracked at loop start were committed, which means a
-broad \`git add .\`, \`git add -A\`, or \`git add <dir>\` was used instead of
-staging specific files. This is a strong signal the agent has lost context
-about which files belong to the current task.
-
-**Required diagnostic steps:**
-1. Run \`git log --oneline -10\` to identify which commit(s) included the orphan files.
-2. Run \`git show --name-only <sha>\` to see everything that commit touched.
-3. If the leaked files are not part of the current task, revert them:
-   \`git revert <sha>\` or surgically remove with \`git checkout <sha>~ -- <file>\` + commit.
-4. Going forward, stage files individually: \`git add <specific-file>\`.
-   Never use \`git add .\` or \`git add -A\` inside a Ralph loop.
-ORPHAN_HINT_EOF
-  fi
   return 1
 }
 
@@ -1518,133 +1403,6 @@ _complete_allowed() {
 }
 
 # =============================================================================
-# WRONG-FILE HEURISTIC (0.7.0)
-#
-# If the most recent failing gate log names error files that have NO
-# intersection with the files the agent has been writing (from activity.log
-# WRITE entries and recent git commits), the agent is editing the wrong files
-# while the real errors sit untouched. This is mechanical to detect and almost
-# always explains repeat-failure loops where the gate error message is stable
-# but the agent's edits never touch the named file.
-#
-# On mismatch: logs to activity.log and writes .ralph/recovery-hint.md (if
-# none already exists) so the next loop uses the diagnostic-first prompt.
-# Returns 1 on mismatch, 0 when the intersection is non-empty or no check
-# could be run.
-# =============================================================================
-
-_check_wrong_file_edits() {
-  local workspace="$1"
-  local gates_dir="$workspace/.ralph/gates"
-  [[ -d "$gates_dir" ]] || return 0
-
-  # Find the most recently modified gate log whose exit code is non-zero.
-  local failed_log="" failed_label=""
-  local exit_f
-  for exit_f in "$gates_dir"/*-latest.exit; do
-    [[ -f "$exit_f" ]] || continue
-    local ec
-    ec=$(cat "$exit_f" 2>/dev/null)
-    [[ "$ec" == "0" || -z "$ec" ]] && continue
-    local log_f="${exit_f%-latest.exit}-latest.log"
-    [[ -f "$log_f" ]] || continue
-    if [[ -z "$failed_log" ]] || [[ "$log_f" -nt "$failed_log" ]]; then
-      failed_log="$log_f"
-      failed_label="${exit_f##*/}"
-      failed_label="${failed_label%-latest.exit}"
-    fi
-  done
-  [[ -n "$failed_log" ]] || return 0
-
-  # Extract file paths named in error lines. Pattern covers TypeScript
-  # (src/foo.ts:4:1), Vitest/Jest (FAIL src/foo.spec.ts), ESLint, and
-  # generic stack traces. Strips line/col suffix so only the path remains.
-  #
-  # Filters applied to reduce false positives:
-  #   - First path segment must start with a letter (rules out "5.1.1/..."
-  #     fragments scraped from package versions in stack traces)
-  #   - Reject anything containing /node_modules/ (broader than ^node_modules/
-  #     since stack-trace paths often start with package prefixes)
-  #   - Final pass: require the path to exist on disk relative to workspace,
-  #     so URL fragments and version strings get dropped before the
-  #     intersection check ever runs
-  local gate_files raw_files
-  raw_files=$(grep -oE '[a-zA-Z][a-zA-Z0-9_./-]*\.(ts|tsx|js|jsx|mts|mjs|cjs|py|go|rs|java|rb|php|sh|css|scss|json|yaml|yml):[0-9]' \
-    "$failed_log" 2>/dev/null |
-    sed 's/:[0-9]*$//' |
-    grep -vE '(^|/)node_modules/' |
-    LC_ALL=C sort -u || true)
-  gate_files=""
-  while IFS= read -r path; do
-    [[ -z "$path" ]] && continue
-    if [[ -f "$workspace/$path" ]]; then
-      gate_files+="$path"$'\n'
-    fi
-  done <<<"$raw_files"
-  gate_files="${gate_files%$'\n'}"
-  [[ -n "$gate_files" ]] || return 0
-
-  # Agent write paths: recent git commits + WRITE entries in activity.log.
-  local agent_writes=""
-  local commit_files
-  commit_files=$(cd "$workspace" && git diff --name-only HEAD~5..HEAD 2>/dev/null || true)
-  local activity_writes
-  activity_writes=$(grep -oE 'WRITE [^ ]+' "$workspace/.ralph/activity.log" 2>/dev/null |
-    awk '{print $2}' || true)
-  if [[ -n "$commit_files" ]] || [[ -n "$activity_writes" ]]; then
-    agent_writes=$(printf '%s\n%s\n' "$commit_files" "$activity_writes" |
-      grep -v '^$' | LC_ALL=C sort -u || true)
-  fi
-  [[ -n "$agent_writes" ]] || return 0
-
-  # Intersection check.
-  local intersection
-  intersection=$(LC_ALL=C comm -12 \
-    <(printf '%s\n' "$gate_files" | LC_ALL=C sort -u) \
-    <(printf '%s\n' "$agent_writes" | LC_ALL=C sort -u) 2>/dev/null || true)
-  [[ -z "$intersection" ]] || return 0
-
-  # No intersection — log the mismatch and write a recovery hint.
-  local gate_files_inline agent_writes_inline
-  gate_files_inline=$(printf '%s' "$gate_files" | tr '\n' ' ')
-  agent_writes_inline=$(printf '%s' "$agent_writes" | tr '\n' ' ')
-
-  log_activity "$workspace" "⚠️  WRONG-FILE: gate errors name [$gate_files_inline] — agent wrote [$agent_writes_inline] — no intersection"
-  {
-    echo ""
-    echo "⚠️  WRONG-FILE MISMATCH DETECTED"
-    echo "   Gate label:       $failed_label"
-    echo "   Files in errors:  $gate_files_inline"
-    echo "   Files agent wrote: $agent_writes_inline"
-    echo "   The agent has been editing files not mentioned in the gate errors."
-    echo "   Open .ralph/gates/${failed_label}-latest.log and find the exact"
-    echo "   file path on the first failing error line — that is the edit target."
-    echo ""
-  } >>"$workspace/.ralph/errors.log"
-
-  if [[ ! -f "$workspace/.ralph/recovery-hint.md" ]]; then
-    cat >"$workspace/.ralph/recovery-hint.md" <<HINT_EOF
-## Wrong-file mismatch — gate errors name a different file than what you edited
-
-**Gate label**: \`$failed_label\`
-**Files named in gate errors**: $gate_files_inline
-**Files the agent has been writing**: $agent_writes_inline
-
-These sets do not intersect. The gate error will never go away until you
-edit the file it actually names.
-
-**Required diagnostic steps:**
-1. Open \`.ralph/gates/${failed_label}-latest.log\`.
-2. Find the FIRST error line. Copy the exact file path (before the colon).
-3. Run \`git diff --name-only HEAD~5..HEAD\` — verify that path appears.
-4. If it does not appear, open that file now and fix the error there.
-5. Re-run the gate. Do not touch any other file until the gate passes.
-HINT_EOF
-  fi
-  return 1
-}
-
-# =============================================================================
 # MAIN LOOP
 # =============================================================================
 
@@ -1710,17 +1468,13 @@ run_ralph_loop() {
     local signal
     signal=$(run_loop "$workspace" "$loop_n" "$session_id" "$script_dir" "$retry")
 
-    # 0.7.0: Post-loop forensics. Both checks are non-blocking (commits
-    # already landed) but write .ralph/recovery-hint.md on mismatch so
-    # the next loop uses the diagnostic-first prompt. If either fires and
-    # the loop didn't already end in GUTTER/COMPLETE, escalate the signal
-    # to RECOVER_ATTEMPT so the driver restarts with the hint injected.
-    local _forensic_escalate=0
-    _check_orphan_leak "$workspace" || _forensic_escalate=1
-    _check_wrong_file_edits "$workspace" || _forensic_escalate=1
-    if [[ $_forensic_escalate -eq 1 ]] && [[ "$signal" != "GUTTER" ]] && [[ "$signal" != "COMPLETE" ]]; then
-      log_activity "$workspace" "🔁 FORENSIC ESCALATION — orphan-leak or wrong-file mismatch; overriding signal '$signal' → RECOVER_ATTEMPT"
-      signal="RECOVER_ATTEMPT"
+    # Post-loop orphan-leak check. Non-blocking (commits already landed)
+    # but escalates to GUTTER if detected — the agent used broad git-add.
+    if ! _check_orphan_leak "$workspace"; then
+      if [[ "$signal" != "GUTTER" ]] && [[ "$signal" != "COMPLETE" ]]; then
+        log_activity "$workspace" "🚨 ORPHAN LEAK — overriding signal '$signal' → GUTTER"
+        signal="GUTTER"
+      fi
     fi
 
     local task_status
@@ -1886,8 +1640,6 @@ run_ralph_loop() {
           log_activity "$workspace" "LOOP $loop_label END — 🚨 GUTTER (recovery budget exhausted: $MAX_RECOVERY_ATTEMPTS attempts)$task_suffix"
           log_progress "$workspace" "**Loop $loop_label ended** — 🚨 GUTTER (recovery budget exhausted)"
           echo "🚨 Recovery budget exhausted ($MAX_RECOVERY_ATTEMPTS attempts) — escalating to GUTTER."
-          # Discard any leftover hint so the next ralph invocation starts clean.
-          rm -f "$workspace/.ralph/recovery-hint.md" 2>/dev/null || true
           _write_postmortem "$workspace" "gutter"
           return 1
         fi

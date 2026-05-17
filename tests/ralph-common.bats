@@ -150,271 +150,22 @@ teardown() {
   echo "$output" | grep -q "Mock task body"
 }
 
-@test "build_prompt uses diagnostic template when recovery hint present (0.9.0)" {
-  # Simulate a prior loop's stream-parser having written a hint.
-  # 0.9.0: recovery mode is open-ended — gives context, grants freedom,
-  # no prescriptive checklist. Mirrors the diagnosing-stuck-tasks skill.
-  cat > "$MOCK_WORKSPACE/.ralph/recovery-hint.md" <<EOF
-## Recovery Hint from Prior Loop
-
-Your prior loop ran \`pnpm test\` twice with exit code 1. Do not retry it.
-EOF
-
-  local output
-  output=$(build_prompt "$MOCK_WORKSPACE" 5)
-
-  # Diagnostic Recovery header, not the normal Ralph Loop header
-  echo "$output" | grep -q "Diagnostic Recovery"
-  echo "$output" | grep -q "Loop 5"
-  # Hint content is embedded in the output
-  echo "$output" | grep -q "Recovery Hint from Prior Loop"
-  echo "$output" | grep -q "pnpm test"
-  # 0.9.0: open-ended permission language, not a prescriptive checklist
-  echo "$output" | grep -qi "investigate however"
-  echo "$output" | grep -q "GUTTER"
-  # Prior prescriptive sequence is GONE (intentionally — biased agents
-  # toward narrow paths and false-confidence intersection checks).
-  if echo "$output" | grep -q "Confirm intersection"; then
-    fail "Prescriptive 'Confirm intersection' step removed in 0.9.0"
-  fi
-  if echo "$output" | grep -q "Mandatory diagnostic sequence"; then
-    fail "Prescriptive 'Mandatory diagnostic sequence' removed in 0.9.0"
-  fi
-}
-
-@test "build_prompt recovery template omits normal loop sections (0.9.0)" {
-  # In recovery mode, the normal-loop sections must be absent.
-  # Their presence would bury the diagnostic directive under familiar boilerplate.
-  cat > "$MOCK_WORKSPACE/.ralph/recovery-hint.md" <<EOF
-## Recovery Hint
-Some hint body.
-EOF
-
+@test "build_prompt uses normal template (0.10.0)" {
   local output
   output=$(build_prompt "$MOCK_WORKSPACE" 1)
 
-  # These normal-framing sections must NOT appear in recovery mode
-  if echo "$output" | grep -q "^## Completion$"; then
-    fail "Completion section must not appear in recovery prompt"
-  fi
-  if echo "$output" | grep -q "^## Stop conditions"; then
-    fail "Stop conditions must not appear in recovery prompt"
-  fi
-  if echo "$output" | grep -q "^## Git hygiene"; then
-    fail "Git hygiene must not appear in recovery prompt"
-  fi
-  # Original task body is still included (for context only)
-  echo "$output" | grep -q "Mock task body"
-}
-
-@test "build_prompt deletes recovery hint after consumption (consume-once) (0.3.0)" {
-  echo "## Recovery Hint from Prior Loop" > "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-  echo "Some hint body" >> "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-
-  build_prompt "$MOCK_WORKSPACE" 1 >/dev/null
-
-  # File must be gone
-  [ ! -f "$MOCK_WORKSPACE/.ralph/recovery-hint.md" ]
-}
-
-@test "build_prompt uses normal template when no hint file (0.9.0)" {
-  # No recovery-hint.md → normal framing must be used
-  rm -f "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-
-  local output
-  output=$(build_prompt "$MOCK_WORKSPACE" 1)
-
-  # Normal sections present (renamed in 0.9.0: "Completion Bar" → "Completion",
-  # "Loop Hygiene" → "Git hygiene")
   echo "$output" | grep -q "^## Completion$"
   echo "$output" | grep -q "^## State Files"
   echo "$output" | grep -q "^## Stop conditions"
   echo "$output" | grep -q "^## Git hygiene"
-
-  # Diagnostic Recovery header must NOT appear
-  if echo "$output" | grep -q "Diagnostic Recovery"; then
-    fail "Diagnostic Recovery header must not appear in normal prompt"
-  fi
+  echo "$output" | grep -q "Mock task body"
 }
 
 # ---------------------------------------------------------------------------
-# Skill suggestion enforcement (0.7.0) — consume-once, injected as mandatory
+# _check_orphan_leak — orphan file detection (0.7.0)
 # ---------------------------------------------------------------------------
 
-@test "build_prompt injects MANDATORY SKILL DIRECTIVE when skill-suggestion present (0.7.0)" {
-  cat > "$MOCK_WORKSPACE/.ralph/skill-suggestion" <<EOF
-**Skill to invoke**: \`diagnosing-stuck-tasks\`
-
-**Why**: 3 consecutive failures on the same gate command.
-
-**Context**: Switch cognitive posture before retrying.
-EOF
-
-  local output
-  output=$(build_prompt "$MOCK_WORKSPACE" 3)
-
-  echo "$output" | grep -q "MANDATORY SKILL DIRECTIVE"
-  echo "$output" | grep -q "diagnosing-stuck-tasks"
-  echo "$output" | grep -q "Switch cognitive posture"
-}
-
-@test "build_prompt deletes skill-suggestion after consumption (consume-once) (0.7.0)" {
-  cat > "$MOCK_WORKSPACE/.ralph/skill-suggestion" <<EOF
-**Skill to invoke**: \`diagnosing-stuck-tasks\`
-EOF
-
-  build_prompt "$MOCK_WORKSPACE" 1 >/dev/null
-
-  [ ! -f "$MOCK_WORKSPACE/.ralph/skill-suggestion" ]
-}
-
-@test "build_prompt normal prompt has no MANDATORY SKILL DIRECTIVE when no skill file (0.7.0)" {
-  rm -f "$MOCK_WORKSPACE/.ralph/skill-suggestion"
-
-  local output
-  output=$(build_prompt "$MOCK_WORKSPACE" 1)
-
-  if echo "$output" | grep -q "MANDATORY SKILL DIRECTIVE"; then
-    fail "MANDATORY SKILL DIRECTIVE must not appear when no skill-suggestion file exists"
-  fi
-}
-
-@test "build_prompt skill directive appears before main framing sections (0.7.0)" {
-  # Skill directive must be injected at the TOP of the normal prompt so the
-  # agent sees it before the execute-gate-commit framing it has internalized.
-  cat > "$MOCK_WORKSPACE/.ralph/skill-suggestion" <<EOF
-**Skill to invoke**: \`diagnosing-stuck-tasks\`
-EOF
-
-  local output
-  output=$(build_prompt "$MOCK_WORKSPACE" 1)
-
-  echo "$output" | awk '
-    /MANDATORY SKILL DIRECTIVE/ { saw_skill=1 }
-    /^## Completion$/           { if (saw_skill) ok=1 }
-    END { exit ok ? 0 : 1 }
-  '
-}
-
-# ---------------------------------------------------------------------------
-# _check_wrong_file_edits — wrong-file heuristic (0.7.0)
-# ---------------------------------------------------------------------------
-
-@test "_check_wrong_file_edits: no gates dir → returns 0 (0.7.0)" {
-  rm -rf "$MOCK_WORKSPACE/.ralph/gates"
-  _check_wrong_file_edits "$MOCK_WORKSPACE"
-}
-
-@test "_check_wrong_file_edits: no failing gates → returns 0 (0.7.0)" {
-  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
-  printf '0' >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
-  printf '0' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
-  printf 'gate content\n' >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
-  _check_wrong_file_edits "$MOCK_WORKSPACE"
-}
-
-@test "_check_wrong_file_edits: returns 0 when agent writes intersect gate error files (0.7.0)" {
-  mkdir -p "$MOCK_WORKSPACE/.ralph/gates" "$MOCK_WORKSPACE/src/app"
-  printf '1' >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
-  # Gate log names a specific TS file in an error line
-  printf 'src/app/app.module.ts:4:1 - error TS2304: Cannot find name foo\n' \
-    >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
-  # 0.9.0: file must exist on disk for the wrong-file heuristic to consider it
-  touch "$MOCK_WORKSPACE/src/app/app.module.ts"
-
-  # Activity log shows the agent wrote that same file
-  printf '[12:00:00] WRITE src/app/app.module.ts\n' \
-    >"$MOCK_WORKSPACE/.ralph/activity.log"
-
-  _check_wrong_file_edits "$MOCK_WORKSPACE"
-  # No recovery hint should be written
-  [ ! -f "$MOCK_WORKSPACE/.ralph/recovery-hint.md" ]
-}
-
-@test "_check_wrong_file_edits: returns 1 and writes hint when agent wrote wrong files (0.7.0)" {
-  mkdir -p "$MOCK_WORKSPACE/.ralph/gates" "$MOCK_WORKSPACE/src/app"
-  printf '1' >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
-  # Gate log names app.module.ts
-  printf 'src/app/app.module.ts:4:1 - error TS2304: Cannot find name foo\n' \
-    >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
-  # 0.9.0: file must exist on disk for the wrong-file heuristic to consider it
-  touch "$MOCK_WORKSPACE/src/app/app.module.ts"
-
-  # Agent wrote a completely different file
-  printf '[12:00:00] WRITE src/app/main.spec.ts\n' \
-    >"$MOCK_WORKSPACE/.ralph/activity.log"
-
-  local rc=0
-  _check_wrong_file_edits "$MOCK_WORKSPACE" || rc=$?
-  [ "$rc" -eq 1 ]
-
-  # Recovery hint must be written
-  [ -f "$MOCK_WORKSPACE/.ralph/recovery-hint.md" ]
-  grep -qi 'wrong-file mismatch' "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-  grep -q 'app.module.ts' "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-}
-
-@test "_check_wrong_file_edits: does not clobber existing recovery hint (0.7.0)" {
-  mkdir -p "$MOCK_WORKSPACE/.ralph/gates" "$MOCK_WORKSPACE/src/app"
-  printf '1' >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
-  printf 'src/app/app.module.ts:4:1 - error TS9999\n' \
-    >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
-  touch "$MOCK_WORKSPACE/src/app/app.module.ts"
-  printf '[12:00:00] WRITE src/other.ts\n' >"$MOCK_WORKSPACE/.ralph/activity.log"
-
-  # Pre-existing recovery hint from a prior escalation
-  printf 'Prior hint content\n' >"$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-
-  _check_wrong_file_edits "$MOCK_WORKSPACE" || true
-
-  # Original hint must be preserved
-  grep -q 'Prior hint content' "$MOCK_WORKSPACE/.ralph/recovery-hint.md"
-}
-
-@test "_check_wrong_file_edits: ignores false-positive paths from stack-trace fragments (0.9.0)" {
-  # Stack traces sometimes contain fragments like:
-  #   24m/index.js                          ← from vue-tsc@1.8.24m/index.js
-  #   5.1.1/node_modules/execa/index.js    ← package version + nested node_modules
-  #   5010/__cypress/runner/cypress_runner.js ← URL path fragment
-  # The 0.9.0 regex tightening rejects all three: first segment must start
-  # with a letter, /node_modules/ anywhere disqualifies, and paths must
-  # exist on disk to be considered.
-  mkdir -p "$MOCK_WORKSPACE/.ralph/gates" "$MOCK_WORKSPACE/src"
-  printf '1' >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
-  cat >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.log" <<'LOG'
-TypeError: foo
-  at vue-tsc@1.8.24m/index.js:42:5
-  at execa@5.1.1/node_modules/execa/index.js:118:9
-  at http://localhost:5010/__cypress/runner/cypress_runner.js:9999:1
-LOG
-  touch "$MOCK_WORKSPACE/src/foo.ts"
-  printf '[12:00:00] WRITE src/foo.ts\n' >"$MOCK_WORKSPACE/.ralph/activity.log"
-
-  # Should return 0 — none of the scraped paths exist on disk, so there
-  # is nothing legitimate to compare against.
-  _check_wrong_file_edits "$MOCK_WORKSPACE"
-  [ ! -f "$MOCK_WORKSPACE/.ralph/recovery-hint.md" ]
-}
-
-@test "_check_wrong_file_edits: ignores nested node_modules paths (0.9.0)" {
-  # Even when a node_modules path exists on disk, paths containing
-  # /node_modules/ should never be reported as wrong-file targets.
-  mkdir -p "$MOCK_WORKSPACE/.ralph/gates" "$MOCK_WORKSPACE/packages/foo/node_modules/bar/src"
-  printf '1' >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
-  printf 'packages/foo/node_modules/bar/src/index.ts:10:1 - error\n' \
-    >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
-  touch "$MOCK_WORKSPACE/packages/foo/node_modules/bar/src/index.ts"
-  printf '[12:00:00] WRITE src/main.ts\n' >"$MOCK_WORKSPACE/.ralph/activity.log"
-
-  _check_wrong_file_edits "$MOCK_WORKSPACE"
-  [ ! -f "$MOCK_WORKSPACE/.ralph/recovery-hint.md" ]
-}
-
-# ---------------------------------------------------------------------------
-# _check_orphan_leak escalation to recovery hint (0.7.0)
-# ---------------------------------------------------------------------------
-
-@test "_check_orphan_leak writes recovery-hint.md on leak (0.7.0)" {
+@test "_check_orphan_leak returns 1 on leak (0.7.0)" {
   # Set up a fake git repo with a baseline that shows a file as untracked
   # at loop start, then commits it — simulating the broad-add pattern.
   local ws
@@ -443,9 +194,8 @@ LOG
   _check_orphan_leak "$ws" || rc=$?
   [ "$rc" -eq 1 ]
 
-  [ -f "$ws/.ralph/recovery-hint.md" ]
-  grep -q 'Orphan file leak' "$ws/.ralph/recovery-hint.md"
-  grep -q 'orphan.txt' "$ws/.ralph/recovery-hint.md"
+  # Errors.log should record the leak
+  grep -q 'ORPHAN FILE LEAK' "$ws/.ralph/errors.log"
 
   rm -rf "$ws"
 }
