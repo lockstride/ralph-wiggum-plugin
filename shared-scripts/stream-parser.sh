@@ -87,7 +87,17 @@ _cleanup_parser() {
 trap _cleanup_parser EXIT
 
 SHELL_FAIL_THRESHOLD="${RALPH_SHELL_FAIL_THRESHOLD:-5}"
-FILE_THRASH_THRESHOLD="${RALPH_FILE_THRASH_THRESHOLD:-5}"
+# 0.11.5: thrash threshold raised from 5/10min → 10/5min and the per-file
+# counter resets on successful commit (see reset_failure_counters_on_task_boundary).
+# Rationale: 0.11.4 folded Edit operations into the thrash counter, and a normal
+# fix-up cycle commonly does 5+ Edits to one file. The original 5/600s threshold
+# was tuned for Write-only traffic. The new threshold lets bursty Edit cycles
+# breathe, but tightens the window so genuine no-progress churn still trips.
+# Combined with the commit-reset, this fires when there are 10+ writes/edits to
+# the same file inside 5 min WITHOUT any commit landing — the actual "stuck"
+# signal we want to catch.
+FILE_THRASH_THRESHOLD="${RALPH_FILE_THRASH_THRESHOLD:-10}"
+FILE_THRASH_WINDOW_SECONDS="${RALPH_FILE_THRASH_WINDOW_SECONDS:-300}"
 
 get_health_emoji() {
   local tokens=$1
@@ -298,6 +308,11 @@ track_shell_failure() {
 # session and the run-loop's `signal` variable never clears once set.
 reset_failure_counters_on_task_boundary() {
   : >"$FAILURES_FILE"
+  # 0.11.5: also wipe per-file write/edit history. A successful commit is
+  # forward progress; any prior thrash history is no longer evidence the
+  # agent is stuck. Without this, a 10-edit fix-up cycle followed by a
+  # clean commit would still poison the next 5-min window.
+  : >"$WRITES_FILE"
   echo "RECOVER" 2>/dev/null || true
 }
 
@@ -306,14 +321,15 @@ track_file_write() {
   local now
   now=$(date +%s)
   echo "$now:$path" >>"$WRITES_FILE"
-  local cutoff=$((now - 600))
+  local cutoff=$((now - FILE_THRASH_WINDOW_SECONDS))
   local count
   count=$(awk -F: -v cutoff="$cutoff" -v path="$path" '
     $1 >= cutoff && $2 == path { count++ }
     END { print count+0 }
   ' "$WRITES_FILE")
   if [[ $count -ge $FILE_THRASH_THRESHOLD ]]; then
-    log_error "THRASHING: $path written ${count}x in 10 min"
+    local window_min=$((FILE_THRASH_WINDOW_SECONDS / 60))
+    log_error "THRASHING: $path written ${count}x in ${window_min} min"
     log_error "⚠️ GUTTER: file thrash on $path"
     echo "GUTTER" 2>/dev/null || true
   fi

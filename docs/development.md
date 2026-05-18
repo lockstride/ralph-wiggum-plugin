@@ -63,10 +63,8 @@ Emitted by the stream parser to the loop on stdout:
 
 - `ROTATE` — token threshold hit; loop kills the agent and starts a fresh loop.
 - `WARN` — approaching the threshold; agent is told to wrap up.
-- `GUTTER` — hard stuck pattern, OR agent self-signals via `<ralph>GUTTER</ralph>`. Loop ends with a postmortem bundle.
-- `RECOVER_ATTEMPT` (0.3.0+) — soft stuck pattern (5 same-cmd failures or 5 same-file thrashes) tripped for the first time this loop. Loop kills the agent and restarts with `.ralph/recovery-hint.md` prepended.
-- `SUGGEST_SKILL` (0.6.0+) — early stuck pattern (3 same-cmd failures or 3 same-file thrashes), below the hard recovery threshold. Loop writes `.ralph/skill-suggestion` pointing at `diagnosing-stuck-tasks` and continues — same agent session, no kill.
-- `RECOVER` — emitted on every successful `git commit`. Clears any latched GUTTER and resets the per-loop shell-failure counter.
+- `GUTTER` — hard stuck pattern (e.g., 10 writes/edits to the same file inside a 5-min window with no commit; 5 consecutive shell failures of the same shape), OR agent self-signals via `<ralph>GUTTER</ralph>`. Loop ends with a postmortem bundle. Thresholds tunable via `RALPH_FILE_THRASH_THRESHOLD`, `RALPH_FILE_THRASH_WINDOW_SECONDS`, `RALPH_SHELL_FAIL_THRESHOLD`.
+- `RECOVER` — emitted on every successful `git commit`. Clears any latched GUTTER, the per-loop shell-failure counter, and the per-file write/edit thrash history (a successful commit is evidence of progress).
 - `COMPLETE` — agent emits `<ralph>COMPLETE</ralph>` or `<promise>ALL_TASKS_DONE</promise>`. The parser re-checks the real checkbox state before honoring.
 - `DEFER` — retryable API / network error (rate limit, 5xx, timeout). Loop waits with exponential backoff (15s → 120s + 0–25% jitter) and retries.
 - `HEARTBEAT` — synthetic liveness ping from the parser sidecar (0.5.3+). Resets the loop's `read -t` timer; never causes any agent-side action.

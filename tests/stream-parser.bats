@@ -268,6 +268,54 @@ tool_result_json() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Thrash counter reset on successful commit (0.11.5)
+# ---------------------------------------------------------------------------
+
+@test "successful commit resets per-file thrash counter (0.11.5)" {
+  # With RALPH_FILE_THRASH_THRESHOLD=5 (test override): a 4-edit burst,
+  # then a successful commit, then another 4-edit burst should NOT trip
+  # GUTTER. Without the reset, the combined 8 edits would exceed the
+  # threshold within the rolling window.
+  local events=""
+  for i in $(seq 1 4); do
+    events+=$(tool_result_json "Edit" 50 5 0 "/tmp/same-file.ts")
+    events+=$'\n'
+  done
+  # Successful git commit — triggers reset_failure_counters_on_task_boundary
+  events+=$(tool_result_json "Shell" 50 2 0 "" "git commit -m 'fix tests'")
+  events+=$'\n'
+  for i in $(seq 1 4); do
+    events+=$(tool_result_json "Edit" 50 5 0 "/tmp/same-file.ts")
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+
+  # GUTTER must not fire — the commit between bursts cleared the counter.
+  if echo "$output" | grep -q "^GUTTER$"; then
+    fail "GUTTER fired despite commit between edit bursts — counter reset regressed"
+  fi
+  # RECOVER must have fired (proves the commit was detected as a boundary).
+  echo "$output" | grep -q "^RECOVER$"
+}
+
+@test "thrash still trips when bursts cross threshold without intervening commit (0.11.5)" {
+  # Regression guard: removing the commit from the previous test's
+  # sequence — 8 edits with no commit — must still trip GUTTER once the
+  # threshold (5 under test override) is crossed.
+  local events=""
+  for i in $(seq 1 8); do
+    events+=$(tool_result_json "Edit" 50 5 0 "/tmp/no-commit-thrash.ts")
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "^GUTTER$"
+}
+
 @test "emits COMPLETE on promise signal" {
   local events='{"kind":"assistant_text","text":"All done. <promise>ALL_TASKS_DONE</promise>"}'
 
