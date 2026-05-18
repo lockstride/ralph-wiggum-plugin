@@ -384,10 +384,24 @@ process_line() {
       cmd=$(echo "$line" | jq -r '.cmd // ""' 2>/dev/null) || cmd=""
 
       case "$name" in
-        Read | Edit | MultiEdit | NotebookEdit)
+        Read)
           BYTES_READ=$((BYTES_READ + bytes))
           local kb=$((bytes / 1024))
           log_activity "READ $path (${lines} lines, ~${kb}KB)"
+          ;;
+        Edit | MultiEdit | NotebookEdit)
+          # 0.11.4: Edit operations are modifications, not reads. Distinct
+          # `EDIT` token in activity.log lets monitors and operators tell
+          # active editing from investigative reads at a glance. Bytes flow
+          # to BYTES_WRITTEN (aligned with ralph-guard.sh, which already
+          # treats Write/Edit/MultiEdit uniformly as writes). track_file_write
+          # is called so Edit thrashing contributes to the file-thrash
+          # GUTTER threshold — Edit thrash is more common in practice than
+          # Write thrash (Edit is for fix-up loops; Write is for new files).
+          BYTES_WRITTEN=$((BYTES_WRITTEN + bytes))
+          local kb=$((bytes / 1024))
+          log_activity "EDIT $path (${lines} lines, ${kb}KB)"
+          track_file_write "$path"
           ;;
         Write)
           BYTES_WRITTEN=$((BYTES_WRITTEN + bytes))

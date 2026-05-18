@@ -50,13 +50,12 @@ The hook runs shellcheck and shfmt on staged `.sh` files. Bypass with `git commi
 
 ## Watchdogs
 
-Three watchdogs prevent the loop from hanging indefinitely.
+Two watchdogs prevent the loop from hanging indefinitely.
 
 | Watchdog | Env var | Default | What it does |
 |---|---|---|---|
 | **Heartbeat timeout** | `RALPH_HEARTBEAT_TIMEOUT` | 300s | If the stream parser produces no output for this long, kills the agent and retries via DEFER with exponential backoff. The 0.5.3 sidecar emits a synthetic `HEARTBEAT` every 60s so this only fires when the agent is genuinely silent (not just deep in a long tool call). |
 | **Gate timeout** | `RALPH_GATE_TIMEOUT` (blanket) / `RALPH_BASIC_GATE_TIMEOUT` / `RALPH_FINAL_GATE_TIMEOUT` | 600s basic / 900s final | If a gate command doesn't finish within this time, kills it and returns exit 124. Catches hung nx daemons and build processes. Requires `timeout` (Linux) or `gtimeout` (macOS via `brew install coreutils`). |
-| **Read-without-write stall** | `RALPH_MAX_READS_WITHOUT_WRITE` | 40 | If the agent executes this many consecutive Read/Shell operations without any Write/Edit, logs an informational warning to `errors.log` and `activity.log`. Does NOT emit GUTTER on its own (real stuckness is caught elsewhere). |
 
 ## Signals the loop understands
 

@@ -211,6 +211,63 @@ tool_result_json() {
   echo "$output" | grep -q "^GUTTER$"
 }
 
+# ---------------------------------------------------------------------------
+# Edit token distinction (0.11.4)
+#
+# Edit / MultiEdit / NotebookEdit are modifications, not reads. They emit a
+# distinct `EDIT` token in activity.log and contribute to BYTES_WRITTEN and
+# the file-thrash counter, aligned with the hook's view that these are write
+# operations.
+# ---------------------------------------------------------------------------
+
+@test "Edit operation emits EDIT token, not READ (0.11.4)" {
+  local events
+  events=$(tool_result_json "Edit" 100 5 0 "/tmp/changed.ts")
+  run_parser "$events" >/dev/null
+  grep -q "EDIT /tmp/changed.ts" "$MOCK_WORKSPACE/.ralph/activity.log"
+  if grep -q "READ /tmp/changed.ts" "$MOCK_WORKSPACE/.ralph/activity.log"; then
+    fail "Edit operation was logged as READ — token split regressed"
+  fi
+}
+
+@test "MultiEdit operation emits EDIT token (0.11.4)" {
+  local events
+  events=$(tool_result_json "MultiEdit" 100 5 0 "/tmp/multi.ts")
+  run_parser "$events" >/dev/null
+  grep -q "EDIT /tmp/multi.ts" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "NotebookEdit operation emits EDIT token (0.11.4)" {
+  local events
+  events=$(tool_result_json "NotebookEdit" 100 5 0 "/tmp/nb.ipynb")
+  run_parser "$events" >/dev/null
+  grep -q "EDIT /tmp/nb.ipynb" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "Edit thrash at threshold emits GUTTER (0.11.4)" {
+  # Mirrors the Write-thrash test — Edit operations on the same file
+  # should accumulate toward FILE_THRASH_THRESHOLD just like Writes.
+  local events=""
+  for i in $(seq 1 5); do
+    events+=$(tool_result_json "Edit" 50 5 0 "/tmp/thrash-edit.ts")
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "^GUTTER$"
+}
+
+@test "Read operation still emits READ token (regression guard, 0.11.4)" {
+  local events
+  events=$(tool_result_json "Read" 100 5 0 "/tmp/read-only.ts")
+  run_parser "$events" >/dev/null
+  grep -q "READ /tmp/read-only.ts" "$MOCK_WORKSPACE/.ralph/activity.log"
+  if grep -q "EDIT /tmp/read-only.ts" "$MOCK_WORKSPACE/.ralph/activity.log"; then
+    fail "Read operation was logged as EDIT — token split misclassified"
+  fi
+}
+
 @test "emits COMPLETE on promise signal" {
   local events='{"kind":"assistant_text","text":"All done. <promise>ALL_TASKS_DONE</promise>"}'
 
