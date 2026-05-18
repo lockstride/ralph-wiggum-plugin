@@ -1442,6 +1442,18 @@ run_ralph_loop() {
     local signal
     signal=$(run_loop "$workspace" "$loop_n" "$session_id" "$script_dir" "$retry")
 
+    # 0.11.1: driver-side graceful-stop check. If the file exists and
+    # wasn't written by the DEFER handler (which sets signal=DEFER and
+    # has its own retry logic), a user touched it — honor immediately.
+    if [[ -f "$workspace/.ralph/stop-requested" ]] && [[ "$signal" != "DEFER" ]]; then
+      log_activity "$workspace" "LOOP $loop_label END — 🛑 STOP REQUESTED (user)"
+      log_progress "$workspace" "**Loop $loop_label ended** — 🛑 User requested stop"
+      echo ""
+      echo "🛑 Stop requested. Yielding after loop $loop_label."
+      rm -f "$workspace/.ralph/stop-requested" 2>/dev/null || true
+      return 0
+    fi
+
     # Post-loop orphan-leak check. Non-blocking (commits already landed)
     # but escalates to GUTTER if detected — the agent used broad git-add.
     if ! _check_orphan_leak "$workspace"; then
