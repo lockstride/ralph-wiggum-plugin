@@ -472,7 +472,7 @@ read the next one, keep going.
 ## Completion
 
 - A task is NOT complete until its verification gate exits 0.
-- If a check fails, fix it. If you cannot fix it, emit \`<ralph>GUTTER</ralph>\` with root cause.
+- You own every failure you see — regardless of what caused it. Fix it. If you truly cannot, emit \`<ralph>GUTTER</ralph>\` with root cause.
 - Never mark \`[x]\` around a failing gate.
 
 ## State Files (read on startup)
