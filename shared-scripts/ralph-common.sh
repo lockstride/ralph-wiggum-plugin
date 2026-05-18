@@ -480,6 +480,7 @@ read the next one, keep going.
 1. \`.ralph/handoff.md\` — if present and fresher than the latest commit, read first.
 2. \`.ralph/guardrails.md\` — lessons from past failures.
 3. \`.ralph/errors.log\` — recent failures to avoid repeating.
+4. \`.ralph/orphan-leak.md\` — if present, prior loop committed files that were untracked at its start; classify and proceed.
 
 ## Stop conditions
 
@@ -555,6 +556,9 @@ _capture_loop_baseline() {
   fi
   # Clean up stale 0.9.x state files that are no longer written or consumed.
   rm -f "$ralph_dir/skill-suggestion" "$ralph_dir/recovery-hint.md" 2>/dev/null || true
+  # 0.11.3: clear any prior loop's orphan-leak warning so the next loop sees
+  # a fresh slate. _check_orphan_leak will recreate it if it fires again.
+  rm -f "$ralph_dir/orphan-leak.md" 2>/dev/null || true
 }
 
 # After a loop, compare the files touched by any new commits against
@@ -620,6 +624,28 @@ _check_orphan_leak() {
     echo "           not part of the current task"
     echo ""
   } >>"$workspace/.ralph/errors.log"
+
+  # 0.11.3: Write an objective handoff stanza for the next loop. The framing
+  # prompt directs the agent to read .ralph/orphan-leak.md on startup if
+  # present. Strictly facts — file list and detector state, no editorial — so
+  # the next turn can quickly classify (intended new module vs. real leak) and
+  # proceed without inheriting confusion.
+  {
+    echo "# Orphan-leak warning (previous loop)"
+    echo ""
+    echo "The previous loop committed files that were untracked at its start."
+    echo "This is informational — the warning does not block continuation. Verify"
+    echo "the files below are intentional (e.g. new module per the active task);"
+    echo "if any are scratch / debug / unrelated, revert them in a new commit."
+    echo ""
+    echo "**Loop baseline HEAD**: \`$before_head\`"
+    echo "**Loop end HEAD**: \`$after_head\`"
+    echo ""
+    echo "**Files**:"
+    while IFS= read -r _leak_path; do
+      [[ -n "$_leak_path" ]] && echo "- \`$_leak_path\`"
+    done <<<"$leaked"
+  } >"$workspace/.ralph/orphan-leak.md"
 
   return 1
 }
@@ -1454,13 +1480,18 @@ run_ralph_loop() {
       return 0
     fi
 
-    # Post-loop orphan-leak check. Non-blocking (commits already landed)
-    # but escalates to GUTTER if detected — the agent used broad git-add.
+    # Post-loop orphan-leak check. As of 0.11.3, this is a non-blocking
+    # warning: the file list and detector facts are surfaced to the next
+    # loop via .ralph/orphan-leak.md (written inside _check_orphan_leak),
+    # and a post-mortem bundle is captured for forensic review. The active
+    # signal is preserved — file-pattern heuristics on a clean-tree
+    # end-of-loop no longer override ROTATE / NATURAL_END / etc. Prior
+    # versions escalated to GUTTER, but the false-positive rate on the
+    # spec-driven workflow (new module + paired spec, both committed in
+    # the same loop) made that net-negative. Gutter triggers are reserved
+    # for actual progress pathologies (heartbeat timeout, gate-fail streak).
     if ! _check_orphan_leak "$workspace"; then
-      if [[ "$signal" != "GUTTER" ]] && [[ "$signal" != "COMPLETE" ]]; then
-        log_activity "$workspace" "🚨 ORPHAN LEAK — overriding signal '$signal' → GUTTER"
-        signal="GUTTER"
-      fi
+      _write_postmortem "$workspace" "orphan-leak"
     fi
 
     local task_status

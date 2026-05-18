@@ -200,6 +200,75 @@ teardown() {
   rm -rf "$ws"
 }
 
+@test "_check_orphan_leak writes objective orphan-leak.md handoff (0.11.3)" {
+  # 0.11.3 demoted ORPHAN_LEAK from gutter trigger to non-blocking warning.
+  # The leak file list must surface to the next loop via .ralph/orphan-leak.md,
+  # with strictly objective content (file list + detector facts, no editorial).
+  local ws
+  ws=$(mktemp -d "$BATS_TMPDIR/orphan-handoff.XXXXXX")
+  git -C "$ws" init -q
+  git -C "$ws" config user.email "test@test.com"
+  git -C "$ws" config user.name "Test"
+
+  echo "init" >"$ws/init.txt"
+  git -C "$ws" add init.txt
+  git -C "$ws" commit -q -m "init"
+
+  mkdir -p "$ws/.ralph"
+  git -C "$ws" rev-parse HEAD >"$ws/.ralph/loop-baseline-head"
+
+  # Create two orphans and commit them
+  echo "scratch" >"$ws/scratch.tmp"
+  echo "debug" >"$ws/debug.log"
+  git -C "$ws" ls-files --others --exclude-standard >"$ws/.ralph/loop-baseline-untracked"
+  git -C "$ws" add scratch.tmp debug.log
+  git -C "$ws" commit -q -m "add orphans"
+
+  _check_orphan_leak "$ws" || true
+
+  # The handoff file exists and is non-empty
+  [ -f "$ws/.ralph/orphan-leak.md" ]
+  [ -s "$ws/.ralph/orphan-leak.md" ]
+
+  # Lists both leaked files
+  grep -Fq 'scratch.tmp' "$ws/.ralph/orphan-leak.md"
+  grep -Fq 'debug.log' "$ws/.ralph/orphan-leak.md"
+
+  # Mentions it's informational / non-blocking — not a stop signal
+  grep -Fqi 'does not block' "$ws/.ralph/orphan-leak.md"
+
+  # Records HEAD context for forensic clarity
+  grep -Fq 'Loop baseline HEAD' "$ws/.ralph/orphan-leak.md"
+  grep -Fq 'Loop end HEAD' "$ws/.ralph/orphan-leak.md"
+
+  # Strictly objective: must not editorialize the agent's intent
+  ! grep -Eqi 'confused|stuck|broken|panic|wrong' "$ws/.ralph/orphan-leak.md"
+
+  rm -rf "$ws"
+}
+
+@test "_capture_loop_baseline clears stale orphan-leak.md (0.11.3)" {
+  # Each fresh loop starts with a clean slate — a prior loop's orphan
+  # warning must not bleed into an unrelated subsequent loop.
+  local ws
+  ws=$(mktemp -d "$BATS_TMPDIR/orphan-cleanup.XXXXXX")
+  git -C "$ws" init -q
+  git -C "$ws" config user.email "test@test.com"
+  git -C "$ws" config user.name "Test"
+  echo "init" >"$ws/init.txt"
+  git -C "$ws" add init.txt
+  git -C "$ws" commit -q -m "init"
+
+  mkdir -p "$ws/.ralph"
+  echo "stale warning from a prior loop" >"$ws/.ralph/orphan-leak.md"
+
+  _capture_loop_baseline "$ws"
+
+  [ ! -f "$ws/.ralph/orphan-leak.md" ]
+
+  rm -rf "$ws"
+}
+
 @test "_check_orphan_leak skips files named in task-summary (0.9.1)" {
   local ws
   ws=$(mktemp -d "$BATS_TMPDIR/orphan-allowlist.XXXXXX")
