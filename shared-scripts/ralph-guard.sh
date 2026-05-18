@@ -38,9 +38,13 @@ TOOL_INPUT_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/
 # Detect Ralph loop context — only enforce when running inside a Ralph loop
 # ---------------------------------------------------------------------------
 
-# The loop sets RALPH_WORKSPACE; if unset, this isn't a Ralph-managed session.
-WORKSPACE="${RALPH_WORKSPACE:-}"
-[[ -z "$WORKSPACE" ]] && exit 0
+# Prefer RALPH_WORKSPACE env var; fall back to pwd. Hook subprocesses spawned
+# by Claude Code do not inherit exported env vars from the shell that launched
+# claude, so RALPH_WORKSPACE is typically empty here. pwd is reliable because
+# Claude Code sets the hook cwd to the project root (the same directory
+# run_loop() cd-s into before launching claude). The .ralph/ guard below
+# handles the non-Ralph case cleanly.
+WORKSPACE="${RALPH_WORKSPACE:-$(pwd)}"
 [[ -d "$WORKSPACE/.ralph" ]] || exit 0
 
 # ---------------------------------------------------------------------------

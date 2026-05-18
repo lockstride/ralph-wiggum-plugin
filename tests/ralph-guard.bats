@@ -38,11 +38,12 @@ _run_guard() {
 
 # --- Pass-through when not in Ralph context ---
 
-@test "allows everything when RALPH_WORKSPACE is unset" {
+@test "uses cwd fallback when RALPH_WORKSPACE is unset — guard still enforces rules" {
+  # setup() cd-s into MOCK_WORKSPACE which has .ralph/, so pwd fallback activates.
   unset RALPH_WORKSPACE
   run _run_guard Bash "rm -rf .ralph/"
   [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  echo "$output" | jq -e '.result == "block"'
 }
 
 @test "allows everything when .ralph/ dir does not exist" {
@@ -50,6 +51,17 @@ _run_guard() {
   run _run_guard Bash "rm -rf .ralph/"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "pwd fallback records gate timestamp without RALPH_WORKSPACE set" {
+  unset RALPH_WORKSPACE
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  rm -f "$STATE_DIR/last-gate-ts"
+  _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
+  [ -f "$STATE_DIR/last-gate-ts" ]
+  local ts
+  ts=$(cat "$STATE_DIR/last-gate-ts")
+  [[ "$ts" =~ ^[0-9]+$ ]]
 }
 
 # --- State-tampering denial ---
