@@ -105,7 +105,7 @@ agent_build_cmd() {
       # child processes. An empty ANTHROPIC_API_KEY triggers API-key auth mode
       # with an invalid credential, causing 401. Unset both so the CLI falls
       # back to the logged-in OAuth session.
-      local cmd="unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL; claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model '$esc_model'"
+      local cmd="unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL; RALPH_AGENT_GUARD=1 claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model '$esc_model'"
       # 0.6.0: optional extra plugin-dirs for browser-flow / UI debugging.
       # RALPH_EXTRA_PLUGIN_DIRS is a colon-separated list (RALPH_SETUP detects
       # Playwright at startup and populates this; users may override). Empty
@@ -129,7 +129,7 @@ agent_build_cmd() {
       echo "$cmd"
       ;;
     cursor-agent)
-      local cmd="cursor-agent -p --force --output-format stream-json --model '$esc_model'"
+      local cmd="RALPH_AGENT_GUARD=1 cursor-agent -p --force --output-format stream-json --model '$esc_model'"
       if [[ -n "$session_id" ]]; then
         cmd="$cmd --resume='$esc_session'"
       fi

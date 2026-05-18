@@ -35,6 +35,7 @@ create_mock_workspace() {
 
   export MOCK_WORKSPACE
   export RALPH_WORKSPACE="$MOCK_WORKSPACE"
+  export RALPH_AGENT_GUARD=1
 }
 
 # Create a mock spec directory inside the workspace

@@ -38,19 +38,18 @@ _run_guard() {
 
 # --- Pass-through when not in Ralph context ---
 
-@test "uses cwd fallback when RALPH_WORKSPACE is unset — guard still enforces rules" {
-  # setup() cd-s into MOCK_WORKSPACE which has .ralph/, so pwd fallback activates.
-  unset RALPH_WORKSPACE
-  run _run_guard Bash "rm -rf .ralph/"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-}
-
-@test "allows everything when .ralph/ dir does not exist" {
-  rm -rf "$MOCK_WORKSPACE/.ralph"
+@test "allows everything when RALPH_AGENT_GUARD is unset" {
+  unset RALPH_AGENT_GUARD
   run _run_guard Bash "rm -rf .ralph/"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "enforces rules when RALPH_AGENT_GUARD is set" {
+  export RALPH_AGENT_GUARD=1
+  run _run_guard Bash "rm -rf .ralph/"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
 }
 
 @test "pwd fallback records gate timestamp without RALPH_WORKSPACE set" {
