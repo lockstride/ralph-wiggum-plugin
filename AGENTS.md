@@ -68,7 +68,10 @@ Emergency bypass is `--no-verify`, but this should be rare and justified in the 
 
 The prompt sent to the agent has two layers:
 
-1. **Framing** (`build_prompt()` in `ralph-common.sh`, ~25 lines of non-conditional content) — iteration awareness, state file reading, signals, loop hygiene, gate-runner pointer. Keep this under ~40 lines including the conditional `## Gate Runner` block. Longer framing crowds out the user's task body and hurts warm-up every iteration.
+1. **Framing** (`build_prompt()` in `ralph-common.sh`) — loop awareness, state-file pointers, stop conditions, git hygiene, gate-runner pointer, gate-selection guidance. Currently capped at ~90 framing lines (enforced by `tests/ralph-common.bats`). The conditional blocks that count toward the cap:
+   - `## Handoff from previous loop` — inlines `.ralph/handoff.md` when present (0.12.0)
+   - `## Gate Runner` — only when `gate-run.sh` ships next to `ralph-common.sh`
+   - `## Gate Selection` — default basic-check vs. risky-task all-check guidance (0.12.0)
 2. **Body** (`.ralph/effective-prompt.md`) — the task execution instructions. In Spec Kit mode, this is generated from `speckit.implement.md` via the adaptation guide.
 
 Key rules:
@@ -76,6 +79,7 @@ Key rules:
 - Generated prompts should stay under 120 lines
 - Never duplicate guidance that belongs in the project's constitution (naming conventions, architecture rules, etc.)
 - The framing and body should not have competing instruction sets — if both cover the same topic (git protocol, error handling), keep it in one place only
+- When growing the framing further, update the 90-line cap in `ralph-common.bats` AND this section in the same commit
 
 ## Gate runner (`shared-scripts/gate-run.sh`)
 

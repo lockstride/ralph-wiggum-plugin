@@ -169,6 +169,10 @@ Re-reading a green gate log is the second-most common waste pattern (after blind
 
 `.ralph/gates/<label>-latest.exit` is a single-decimal breadcrumb read by Ralph's completion guard (`_complete_allowed` in `ralph-common.sh`) to refuse `<promise>ALL_TASKS_DONE</promise>` when the most recent gate was red. It is not something an agent needs to `cat` or `Read` — the summary line `exit=<N>` is the same fact in a more readable form.
 
+### 5. Failure summary (0.12.0).
+
+On failure, gate-run also writes `.ralph/gates/<label>-latest.summary` — a small structured digest (failure-signature lines + any `coverage_gaps` block found in the log). `stream-parser` copies this into the `## Last gate state` section of `.ralph/handoff.md`, which the next loop's framing prompt inlines automatically. You don't need to read the summary file directly — it's delivered to you in the next prompt. On a passing gate the summary file is removed so it doesn't go stale.
+
 ## Integration notes
 
 ### In Spec Kit loops

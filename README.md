@@ -133,8 +133,8 @@ After the loop starts, Ralph writes to `.ralph/` (git-ignored automatically):
 - `errors.log` — failures detected by the stream parser
 - `activity.log` — real-time token usage + tool calls
 - `effective-prompt.md` — the rendered prompt fed to the agent at each loop start
-- `handoff.md` — navigation breadcrumb between loops (used when the loop must respawn)
-- `gates/` — per-label logs, exit breadcrumbs, lock dirs for gate-run.sh
+- `handoff.md` — rolling state document, injected into the framing prompt every loop (see [Handoff state](#handoff-state) below)
+- `gates/` — per-label logs, exit breadcrumbs, summary files, lock dirs for gate-run.sh
 
 **Breadcrumb files** (optional, placed in `.ralph/` to configure behavior):
 
@@ -142,22 +142,56 @@ After the loop starts, Ralph writes to `.ralph/` (git-ignored automatically):
 |---|---|
 | `basic-check-command` | Override the basic gate command (default: `pnpm basic-check`) |
 | `final-check-command` | Override the final gate command (default: `pnpm all-check`) |
-| `protected-scripts` | Commands that must not be piped/redirected (one per line) |
-| `denied-commands` | Commands to block outright, format: `command\|reason` per line |
+| `command-policy` | Unified rewrite/deny/protect rules — see [Command policy](#command-policy) below |
+| `denied-commands` | *(deprecated, prefer `command-policy`)* Commands to block outright, `command\|reason` per line |
+| `protected-scripts` | *(deprecated, prefer `command-policy`)* Commands that must not be piped/redirected, one prefix per line |
 | `push-policy` | Push behavior: `never` (default), `completion-only` |
 | `stop-requested` | Touch this file to signal the agent to stop after the current task |
 
 Your commits are your durable memory. Ralph commits frequently during each loop so any involuntary kill is recoverable from the last commit.
+
+### Handoff state
+
+`.ralph/handoff.md` is a rolling state document the framing prompt injects at the start of every loop. It has two sections:
+
+- **`## Last gate state`** — owned by the plugin. `gate-run.sh` writes a structured summary to `.ralph/gates/<label>-latest.summary` on every failed gate (parsed failure signatures + optional `coverage_gaps` block), and `stream-parser` rewrites this section on every gate-end. Do not edit it from the agent.
+- **`## Working set`** — owned by the agent. Update this before yielding the turn — current task, files in flight, next planned step. The plugin emits a soft `Stop`-hook reminder when this section isn't refreshed during a loop.
+
+A skeleton is seeded automatically by `init_ralph_dir` on first run.
+
+### Command policy
+
+`.ralph/command-policy` consolidates the deny / rewrite / protect rules into one file. Three sections, scanned in order: `[rewrite]` → `[deny]` → `[protect]`.
+
+```
+[rewrite]
+# regex | replacement | reason  (backrefs \1, \2, … supported in replacement)
+^pnpm -w run (.+)$ | pnpm \1 | this repo's package.json has no -w workspace flag
+
+[deny]
+# command-prefix | reason
+pnpm test-e2e | containerized E2E is too expensive — use pnpm test-e2e:local
+
+[protect]
+# one prefix per line — bare OK, pipe/redirect denied
+pnpm all-check
+pnpm basic-check
+```
+
+Rewrites and denies both block the command; rewrites name the canonical form via regex substitution so the agent learns the right shape from the error message. Protect allows the bare command and only blocks pipes/redirects.
+
+The legacy `.ralph/denied-commands` + `.ralph/protected-scripts` are still read as a fallback when `command-policy` is absent (with a one-time deprecation notice in `.ralph/errors.log`). Migrate when convenient — the template at [`shared-references/templates/command-policy.md`](shared-references/templates/command-policy.md) is a starting point.
 
 ### Guard hook
 
 When installed as a Claude Code plugin, Ralph registers a `PreToolUse` hook (`ralph-guard.sh`) that intercepts Bash and Write tool calls to enforce discipline:
 
 - **Direct test-tool denial** — blocks `vitest`, `jest`, `cypress`, `tsc --noEmit` and their `npx`/`pnpm`/`pnpm exec` variants unless wrapped in `gate-run.sh`.
-- **Protected-script pipe/redirect denial** — prevents `| tail`, `> /tmp/out`, etc. on commands listed in `.ralph/protected-scripts`.
-- **Denied-command blocking** — outright blocks commands in `.ralph/denied-commands`.
+- **Command-policy enforcement** — rewrite/deny/protect from `.ralph/command-policy` (see above).
 - **Gate-without-write detection** — blocks re-running a gate when no file has been written since the last gate, preventing pointless reruns.
 - **State-file protection** — prevents the agent from tampering with `.ralph/gates/`, `.ralph/activity.log`, and other loop-owned state.
+
+A `Stop` hook (`handoff-check.sh`) emits a soft reminder when the `## Working set` section of `handoff.md` wasn't updated during the loop. Advisory only — does not block the agent from yielding.
 
 ### Rotation signals
 
@@ -166,7 +200,7 @@ The stream parser emits signals that the main loop uses to decide when to rotate
 | Signal | Trigger | Effect |
 |---|---|---|
 | `ROTATE` | Token usage exceeds threshold | Hard rotation — context window is full |
-| `TURN_END` | 5 consecutive gate failures (configurable via `RALPH_GATE_FAIL_STREAK_THRESHOLD`) | Rotation with troubleshoot overlay in next prompt |
+| `TURN_END` | 5 consecutive gate failures (configurable via `RALPH_GATE_FAIL_STREAK_THRESHOLD`) | Rotation; next loop reads the freshly-written handoff block |
 | `WARN` | Approaching token threshold | Agent told to wrap up |
 | `GUTTER` | Stuck pattern (repeated failures, file thrashing) or agent self-signal | Rotation with diagnostic context |
 | `COMPLETE` | Agent emits `<promise>ALL_TASKS_DONE</promise>` | Loop exits successfully |
