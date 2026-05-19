@@ -7,8 +7,8 @@
 #
 #   - Gate-without-write block (Bash: gate-run.sh without intervening write)
 #   - Direct-test-tool denial (Bash: vitest/cypress/tsc without gate-run.sh)
-#   - Protected-script pipe/redirect denial (Bash: .ralph/protected-scripts)
-#   - Denied-command blocking (Bash: .ralph/denied-commands)
+#   - Command-policy enforcement (Bash: .ralph/command-policy — rewrite/deny/protect)
+#     Legacy fallback: .ralph/denied-commands + .ralph/protected-scripts
 #   - State-tampering denial (Bash: rm -rf .ralph/, edits to state paths)
 #   - Forbidden-path denial (Write/Edit/MultiEdit: .ralph/gates/*, state dir)
 #   - Write-event recording (Write/Edit/MultiEdit: updates last-write-ts)
@@ -104,6 +104,182 @@ _strip_env_prefix() {
 }
 
 # ---------------------------------------------------------------------------
+# Command policy (rewrite / deny / protect)
+# ---------------------------------------------------------------------------
+#
+# .ralph/command-policy syntax:
+#   [rewrite]
+#   regex | replacement | reason     # regex anchored implicitly by ^/$ in pattern
+#
+#   [deny]
+#   command-prefix | reason
+#
+#   [protect]
+#   command-prefix                   # bare OK; pipe/redirect denied
+#
+# Falls back to .ralph/denied-commands (deny) + .ralph/protected-scripts
+# (protect) when command-policy is absent. Legacy fallback never gets
+# rewrite — only the new format supports it.
+
+_warn_legacy_policy() {
+  local sentinel="$STATE_DIR/.policy-deprecation-warned"
+  [[ -f "$sentinel" ]] && return 0
+  : >"$sentinel"
+  local errlog="$WORKSPACE/.ralph/errors.log"
+  [[ -f "$errlog" ]] || return 0
+  {
+    echo ""
+    echo "[$(date '+%H:%M:%S')] DEPRECATION: .ralph/denied-commands and"
+    echo "  .ralph/protected-scripts are deprecated. Migrate to .ralph/command-policy"
+    echo "  (see shared-references/templates/command-policy.md in the plugin)."
+  } >>"$errlog" 2>/dev/null || true
+}
+
+# Parse command-policy into three temp files for the three sections.
+# Output paths are echoed space-separated: "rewrite_file deny_file protect_file"
+# Caller is responsible for cleanup.
+_parse_command_policy() {
+  local policy_file="$1"
+  local rw dn pt
+  rw=$(mktemp)
+  dn=$(mktemp)
+  pt=$(mktemp)
+  local section=""
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Strip CR if present, trim trailing whitespace.
+    line="${line%$'\r'}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in
+      "" | \#*) continue ;;
+      "[rewrite]") section="rewrite" ;;
+      "[deny]") section="deny" ;;
+      "[protect]") section="protect" ;;
+      "["*"]") section="" ;;
+      *)
+        case "$section" in
+          rewrite) printf '%s\n' "$line" >>"$rw" ;;
+          deny) printf '%s\n' "$line" >>"$dn" ;;
+          protect) printf '%s\n' "$line" >>"$pt" ;;
+        esac
+        ;;
+    esac
+  done <"$policy_file"
+  printf '%s %s %s' "$rw" "$dn" "$pt"
+}
+
+_apply_rewrites() {
+  # $1 = stripped command, $2 = rewrite file
+  # On match: _block with the canonical form + reason.
+  local stripped="$1" rwfile="$2"
+  [[ -s "$rwfile" ]] || return 0
+  local rule pattern replacement reason canonical
+  while IFS= read -r rule || [[ -n "$rule" ]]; do
+    [[ -z "$rule" ]] && continue
+    # Split on ' | ' (with optional surrounding whitespace).
+    pattern="${rule%%|*}"
+    rule="${rule#*|}"
+    replacement="${rule%%|*}"
+    reason="${rule#*|}"
+    # Trim whitespace from each field.
+    pattern="$(printf '%s' "$pattern" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+    replacement="$(printf '%s' "$replacement" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+    reason="$(printf '%s' "$reason" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+    [[ -z "$pattern" ]] && continue
+    # Apply regex. We use sed with the pattern as-is; the pattern may use ^ and $.
+    if printf '%s' "$stripped" | grep -qE "$pattern" 2>/dev/null; then
+      canonical=$(printf '%s' "$stripped" | sed -E "s|$pattern|$replacement|")
+      local msg="[ralph] use '$canonical' instead"
+      [[ -n "$reason" ]] && msg="$msg — $reason"
+      _block "$msg"
+    fi
+  done <"$rwfile"
+}
+
+_apply_deny() {
+  local stripped="$1" dnfile="$2"
+  [[ -s "$dnfile" ]] || return 0
+  local rule denied_cmd denied_reason
+  while IFS= read -r rule || [[ -n "$rule" ]]; do
+    [[ -z "$rule" ]] && continue
+    denied_cmd="${rule%%|*}"
+    denied_reason=""
+    [[ "$rule" == *"|"* ]] && denied_reason="${rule#*|}"
+    denied_cmd="$(printf '%s' "$denied_cmd" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+    denied_reason="$(printf '%s' "$denied_reason" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+    [[ -z "$denied_cmd" ]] && continue
+    if [[ "$stripped" == "$denied_cmd" || "$stripped" == "$denied_cmd "* ]]; then
+      _block "${denied_reason:-Command denied by project configuration.}"
+    fi
+  done <"$dnfile"
+}
+
+_apply_protect() {
+  local cmd="$1" stripped="$2" ptfile="$3"
+  [[ -s "$ptfile" ]] || return 0
+  local prefix
+  while IFS= read -r prefix || [[ -n "$prefix" ]]; do
+    prefix="$(printf '%s' "$prefix" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+    [[ -z "$prefix" ]] && continue
+    if [[ "$stripped" == "$prefix"* ]]; then
+      if echo "$cmd" | grep -qE '\||\s*>\s*|>>'; then
+        _block "Protected script pipe/redirect denied: '$prefix' must not be piped or redirected. Run bare or through gate-run.sh."
+      fi
+      return 0
+    fi
+  done <"$ptfile"
+}
+
+_enforce_command_policy() {
+  local cmd="$1" stripped="$2"
+  local policy="$WORKSPACE/.ralph/command-policy"
+  local rwfile="" dnfile="" ptfile=""
+
+  if [[ -f "$policy" ]]; then
+    local parsed
+    parsed=$(_parse_command_policy "$policy")
+    rwfile="${parsed%% *}"
+    parsed="${parsed#* }"
+    dnfile="${parsed%% *}"
+    ptfile="${parsed#* }"
+  else
+    # Legacy fallback. Only deny + protect; no rewrite.
+    local legacy_used=0
+    if [[ -f "$WORKSPACE/.ralph/denied-commands" ]]; then
+      dnfile=$(mktemp)
+      grep -v '^\s*#' "$WORKSPACE/.ralph/denied-commands" 2>/dev/null | grep -v '^\s*$' >"$dnfile" || true
+      legacy_used=1
+    fi
+    if [[ -f "$WORKSPACE/.ralph/protected-scripts" ]]; then
+      ptfile=$(mktemp)
+      grep -v '^\s*#' "$WORKSPACE/.ralph/protected-scripts" 2>/dev/null | grep -v '^\s*$' >"$ptfile" || true
+      legacy_used=1
+    elif [[ -n "${RALPH_PROTECTED_SCRIPTS:-}" ]]; then
+      ptfile=$(mktemp)
+      printf '%s' "$RALPH_PROTECTED_SCRIPTS" | tr ' ' '\n' >"$ptfile"
+    fi
+    if [[ "$legacy_used" -eq 1 ]]; then
+      _warn_legacy_policy
+    fi
+  fi
+
+  # Apply policies. Each call may _block (which exits the script). Cleanup
+  # is best-effort — temp files in /tmp survive only until next reboot, and
+  # the hook process is short-lived. Avoid installing an EXIT trap because
+  # _block calls `exit 0` and on macOS `rm -f '/dev/null'` errors out under
+  # `set -e`, masking the block result.
+  [[ -n "$rwfile" ]] && _apply_rewrites "$stripped" "$rwfile"
+  [[ -n "$dnfile" ]] && _apply_deny "$stripped" "$dnfile"
+  [[ -n "$ptfile" ]] && _apply_protect "$cmd" "$stripped" "$ptfile"
+
+  # No block fired — clean up tempfiles on the success path.
+  [[ -n "$rwfile" ]] && rm -f "$rwfile"
+  [[ -n "$dnfile" ]] && rm -f "$dnfile"
+  [[ -n "$ptfile" ]] && rm -f "$ptfile"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Bash dispatch
 # ---------------------------------------------------------------------------
 
@@ -135,47 +311,11 @@ _guard_bash() {
     fi
   fi
 
-  # --- Denied-commands blocking (.ralph/denied-commands) ---
-  # Each line: command-prefix|denial reason
-  # Exact-command match (not prefix of longer command), so
-  # "pnpm api:test-e2e" blocks "pnpm api:test-e2e --flag" but NOT
-  # "pnpm api:test-e2e:local".
-  if [[ -f "$WORKSPACE/.ralph/denied-commands" ]]; then
-    local denied_cmd denied_reason
-    while IFS='|' read -r denied_cmd denied_reason; do
-      [[ -z "$denied_cmd" || "$denied_cmd" == \#* ]] && continue
-      denied_cmd="${denied_cmd%"${denied_cmd##*[![:space:]]}"}"
-      denied_cmd="${denied_cmd#"${denied_cmd%%[![:space:]]*}"}"
-      [[ -z "$denied_cmd" ]] && continue
-      if [[ "$stripped" == "$denied_cmd" || "$stripped" == "$denied_cmd "* ]]; then
-        denied_reason="${denied_reason%"${denied_reason##*[![:space:]]}"}"
-        denied_reason="${denied_reason#"${denied_reason%%[![:space:]]*}"}"
-        _block "${denied_reason:-Command denied by project configuration.}"
-      fi
-    done <"$WORKSPACE/.ralph/denied-commands"
-  fi
-
-  # --- Protected-script pipe/redirect denial (.ralph/protected-scripts) ---
-  # One command prefix per line. Falls back to RALPH_PROTECTED_SCRIPTS env var.
-  local _protected_scripts=""
-  if [[ -f "$WORKSPACE/.ralph/protected-scripts" ]]; then
-    _protected_scripts=$(grep -v '^\s*#' "$WORKSPACE/.ralph/protected-scripts" | grep -v '^\s*$' | tr '\n' '|')
-  elif [[ -n "${RALPH_PROTECTED_SCRIPTS:-}" ]]; then
-    _protected_scripts=$(echo "$RALPH_PROTECTED_SCRIPTS" | tr ' ' '|')
-  fi
-
-  if [[ -n "$_protected_scripts" ]]; then
-    local prefix
-    while IFS='|' read -r prefix; do
-      [[ -z "$prefix" ]] && continue
-      if [[ "$stripped" == "$prefix"* ]]; then
-        if echo "$cmd" | grep -qE '\||\s*>\s*|>>'; then
-          _block "Protected script pipe/redirect denied: '$prefix' must not be piped or redirected. Run bare or through gate-run.sh."
-        fi
-        break
-      fi
-    done <<<"${_protected_scripts//|/$'\n'}"
-  fi
+  # --- Command-policy enforcement ---
+  # Preferred:  .ralph/command-policy  (sections: [rewrite] [deny] [protect])
+  # Legacy:     .ralph/denied-commands + .ralph/protected-scripts
+  # On legacy use, append a one-shot deprecation note to .ralph/errors.log.
+  _enforce_command_policy "$cmd" "$stripped"
 
   # --- Gate-without-write check ---
   if echo "$cmd" | grep -qE 'gate-run\.sh'; then

@@ -149,6 +149,71 @@ log_error() {
   echo "[$timestamp] $message" >>"$RALPH_DIR/errors.log"
 }
 
+# 0.12.0: Rewrite the "## Last gate state" section of handoff.md.
+# Called from the gate-end handler. The section is replaced in-place;
+# the rest of handoff.md (notably the "Working set" section maintained
+# by the agent) is preserved. New body comes from
+# .ralph/gates/<label>-latest.summary on failure, or a one-liner on success.
+update_handoff_gate_state() {
+  local label="$1" exit_code="$2"
+  local handoff="$RALPH_DIR/handoff.md"
+  local summary="$RALPH_DIR/gates/$label-latest.summary"
+
+  # If handoff.md does not exist (project on a pre-0.12 layout), do nothing.
+  [[ -f "$handoff" ]] || return 0
+
+  local new_body
+  if [[ "$exit_code" -eq 0 ]]; then
+    new_body=$(printf 'label: %s\nexit: 0\n(passing — no details to surface)\n' "$label")
+  elif [[ -f "$summary" ]]; then
+    new_body=$(cat "$summary")
+  else
+    new_body=$(printf 'label: %s\nexit: %s\n(no summary available — see .ralph/gates/%s-latest.log)\n' \
+      "$label" "$exit_code" "$label")
+  fi
+
+  # Rewrite the section. Two cases: section exists (replace), or it doesn't
+  # (append). Multi-line bodies don't pass cleanly through `awk -v`, so write
+  # the body to a sidecar tempfile and `getline` it in.
+  local tmp body_tmp
+  tmp=$(mktemp)
+  body_tmp=$(mktemp)
+  printf '%s\n' "$new_body" >"$body_tmp"
+  awk -v body_file="$body_tmp" '
+    BEGIN {
+      in_section=0
+      printed=0
+      body=""
+      while ((getline line < body_file) > 0) {
+        body = (body == "") ? line : body "\n" line
+      }
+      close(body_file)
+    }
+    /^## Last gate state[[:space:]]*$/ {
+      print "## Last gate state"
+      print ""
+      print body
+      print ""
+      in_section=1
+      printed=1
+      next
+    }
+    in_section==1 && /^## / { in_section=0; print; next }
+    in_section==1 { next }
+    { print }
+    END {
+      if (printed==0) {
+        print ""
+        print "## Last gate state"
+        print ""
+        print body
+      }
+    }
+  ' "$handoff" >"$tmp" 2>/dev/null
+  mv "$tmp" "$handoff"
+  rm -f "$body_tmp"
+}
+
 log_token_status() {
   local tokens
   tokens=$(calc_tokens)
@@ -467,6 +532,8 @@ process_line() {
             track_shell_failure "$cmd" "$exit_code"
           fi
           # 0.10.0: gate-fail-streak tracking for TURN_END signal.
+          # 0.12.0: also write the ## Last gate state section of handoff.md
+          # on every gate-end (pass or fail) so the next loop has fresh state.
           if [[ "$cmd" == *gate-run.sh* ]]; then
             if [[ $exit_code -eq 0 ]]; then
               GATE_FAIL_STREAK=0
@@ -477,6 +544,12 @@ process_line() {
                 TURN_END_LATCHED=1
                 echo "TURN_END" 2>/dev/null || true
               fi
+            fi
+            # Extract label from the gate-run.sh invocation: `bash …/gate-run.sh <label> …`
+            local _gate_label
+            _gate_label=$(echo "$cmd" | grep -oE 'gate-run\.sh[[:space:]]+[A-Za-z0-9_-]+' | awk '{print $2}' | head -1)
+            if [[ -n "$_gate_label" ]]; then
+              update_handoff_gate_state "$_gate_label" "$exit_code" 2>/dev/null || true
             fi
           fi
           ;;

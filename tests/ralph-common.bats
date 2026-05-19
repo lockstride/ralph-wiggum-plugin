@@ -26,7 +26,7 @@ teardown() {
   rm -rf "$MOCK_WORKSPACE"
 }
 
-@test "build_prompt framing is under 55 lines (excluding user body)" {
+@test "build_prompt framing is under 90 lines (excluding user body)" {
   local output
   output=$(build_prompt "$MOCK_WORKSPACE" 1)
 
@@ -38,12 +38,11 @@ teardown() {
   #   0.3.3 added Completion Bar          (cap was 35)
   #   0.3.6 added Gate Runner section     (cap bumped to 55)
   #   0.6.3 expanded the Stop conditions  (cap bumped to 70)
-  #         section so the four real stop conditions are explicit and
-  #         reframed gate-failure guidance away from a procedure.
+  #   0.12.0 added Handoff + Gate Selection blocks (cap bumped to 90)
   # The Gate Runner block only renders when gate-run.sh exists next to
   # ralph-common.sh (it does in-tree). If it ever needs to grow further,
   # update this cap AND AGENTS.md §Prompt Architecture in the same commit.
-  [ "$framing_lines" -le 70 ]
+  [ "$framing_lines" -le 90 ]
 }
 
 @test "build_prompt includes Completion section (0.9.0)" {
@@ -159,6 +158,82 @@ teardown() {
   echo "$output" | grep -q "^## Stop conditions"
   echo "$output" | grep -q "^## Git hygiene"
   echo "$output" | grep -q "Mock task body"
+}
+
+# --- 0.12.0: handoff injection + Gate Selection block ---
+
+@test "build_prompt injects handoff block when handoff.md exists (0.12.0)" {
+  cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<'HOFF'
+# Loop Handoff
+
+## Last gate state
+
+label: basic
+exit: 1
+failures:
+1:src/foo.spec.ts > assertion failed
+
+## Working set
+
+Active task: T031 — wire up X.
+HOFF
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+  echo "$output" | grep -q "^## Handoff from previous loop$"
+  echo "$output" | grep -q "## Last gate state"
+  echo "$output" | grep -q "Active task: T031"
+  echo "$output" | grep -q "src/foo.spec.ts"
+}
+
+@test "build_prompt omits handoff section when handoff.md is absent (0.12.0)" {
+  rm -f "$MOCK_WORKSPACE/.ralph/handoff.md"
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+  ! echo "$output" | grep -q "^## Handoff from previous loop$"
+}
+
+@test "build_prompt includes Gate Selection block (0.12.0)" {
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+  echo "$output" | grep -q "^## Gate Selection$"
+  # Default gate guidance is the only load-bearing thing here.
+  echo "$output" | grep -q "pnpm basic-check"
+  echo "$output" | grep -q "\[risky\]"
+}
+
+@test "build_prompt does NOT include removed troubleshoot overlay (0.12.0)" {
+  # 0.12.0 sunset _RALPH_OVERLAY_TROUBLESHOOT. Setting the env var must be
+  # a no-op now — failures are surfaced via the inlined handoff block.
+  export _RALPH_OVERLAY_TROUBLESHOOT=1
+  export _RALPH_FAILING_GATE_LABEL=basic
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+  unset _RALPH_OVERLAY_TROUBLESHOOT
+  unset _RALPH_FAILING_GATE_LABEL
+  # The overlay sentence ("Test failure recovery") from the old template
+  # must not appear, and no {{FAILING_LABEL}} placeholder either.
+  ! echo "$output" | grep -qi "consecutive gate failures"
+  ! echo "$output" | grep -q "FAILING_LABEL"
+}
+
+@test "init_ralph_dir seeds handoff.md skeleton on first init (0.12.0)" {
+  local fresh
+  fresh=$(mktemp -d "$BATS_TMPDIR/rb-init.XXXXXX")
+  init_ralph_dir "$fresh"
+  [ -f "$fresh/.ralph/handoff.md" ]
+  grep -q "## Last gate state" "$fresh/.ralph/handoff.md"
+  grep -q "## Working set" "$fresh/.ralph/handoff.md"
+  rm -rf "$fresh"
+}
+
+@test "init_ralph_dir does not overwrite existing handoff.md (0.12.0)" {
+  local fresh
+  fresh=$(mktemp -d "$BATS_TMPDIR/rb-init2.XXXXXX")
+  mkdir -p "$fresh/.ralph"
+  echo "existing content" > "$fresh/.ralph/handoff.md"
+  init_ralph_dir "$fresh"
+  grep -q "existing content" "$fresh/.ralph/handoff.md"
+  rm -rf "$fresh"
 }
 
 # ---------------------------------------------------------------------------

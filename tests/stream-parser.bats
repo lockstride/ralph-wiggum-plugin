@@ -431,3 +431,68 @@ tool_result_json() {
   grep -q 'COMMIT "fix: bar (T002)"' "$MOCK_WORKSPACE/.ralph/activity.log"
 }
 
+# --- 0.12.0: handoff "Last gate state" section writer ---
+
+@test "gate-end failure rewrites Last gate state section of handoff.md (0.12.0)" {
+  # Seed a handoff with the expected sections and a Working set the writer
+  # must preserve.
+  cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<'HOFF'
+# Loop Handoff
+
+## Last gate state
+
+(none yet)
+
+## Working set
+
+Active task: T031
+HOFF
+  # Seed a summary file that gate-run.sh would have produced on failure.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  cat > "$MOCK_WORKSPACE/.ralph/gates/basic-latest.summary" <<'SUM'
+label: basic
+exit: 1
+failures:
+1:src/foo.spec.ts > assertion failed
+SUM
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "bash /plugin/shared-scripts/gate-run.sh basic pnpm basic-check")
+  run_parser "$events" >/dev/null
+
+  # Working set is preserved.
+  grep -q "Active task: T031" "$MOCK_WORKSPACE/.ralph/handoff.md"
+  # Summary is inlined under "## Last gate state".
+  grep -q "label: basic" "$MOCK_WORKSPACE/.ralph/handoff.md"
+  grep -q "src/foo.spec.ts" "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+@test "gate-end success rewrites Last gate state with a one-liner (0.12.0)" {
+  cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<'HOFF'
+# Loop Handoff
+
+## Last gate state
+
+(stale failure context)
+
+## Working set
+
+Active task: T041
+HOFF
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 0 "" "bash /plugin/shared-scripts/gate-run.sh basic pnpm basic-check")
+  run_parser "$events" >/dev/null
+
+  grep -q "Active task: T041" "$MOCK_WORKSPACE/.ralph/handoff.md"
+  grep -q "exit: 0" "$MOCK_WORKSPACE/.ralph/handoff.md"
+  ! grep -q "stale failure context" "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+@test "gate-end is a no-op when handoff.md is absent (0.12.0)" {
+  rm -f "$MOCK_WORKSPACE/.ralph/handoff.md"
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "bash /plugin/shared-scripts/gate-run.sh basic pnpm basic-check")
+  # Must not error or create handoff.md.
+  run_parser "$events" >/dev/null
+  [ ! -f "$MOCK_WORKSPACE/.ralph/handoff.md" ]
+}
+

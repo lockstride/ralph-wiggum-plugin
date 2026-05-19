@@ -366,3 +366,94 @@ _run_guard() {
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.result == "block"'
 }
+
+# --- .ralph/command-policy unified file (0.12.0) ---
+
+@test "command-policy rewrite section blocks with canonical form" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[rewrite]
+^pnpm -w run (.+)\$ | pnpm \1 | no -w workspace flag
+EOF
+  run _run_guard Bash "pnpm -w run basic-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.reason | test("pnpm basic-check")'
+  echo "$output" | jq -e '.reason | test("no -w workspace flag")'
+}
+
+@test "command-policy deny section blocks exact prefix" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[deny]
+pnpm test-e2e | use pnpm test-e2e:local instead
+EOF
+  run _run_guard Bash "pnpm test-e2e --headed"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.reason | test("local")'
+}
+
+@test "command-policy deny does not block longer command names" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[deny]
+pnpm api:test-e2e | use local
+EOF
+  run _run_guard Bash "pnpm api:test-e2e:local"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "command-policy protect blocks pipe but allows bare" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[protect]
+pnpm all-check
+EOF
+  run _run_guard Bash "pnpm all-check"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run _run_guard Bash "pnpm all-check | tail -20"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.reason | test("pipe/redirect")'
+}
+
+@test "command-policy applies rewrite before deny" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[rewrite]
+^pnpm -w run (.+)\$ | pnpm \1 | strip -w flag
+
+[deny]
+pnpm test | denied
+EOF
+  # The -w form should be caught by rewrite, with the canonical 'pnpm test'
+  # surfaced in the message. The deny entry never fires because rewrite
+  # blocks first.
+  run _run_guard Bash "pnpm -w run test"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.reason | test("strip -w flag")'
+}
+
+@test "command-policy ignores comments and section markers" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+# top-level comment
+[deny]
+# inside-section comment
+
+pnpm test-e2e | denied
+EOF
+  run _run_guard Bash "pnpm test-e2e"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "command-policy takes precedence over legacy denied-commands" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[deny]
+pnpm new-cmd | new policy fires
+EOF
+  printf 'pnpm new-cmd|legacy policy fires\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
+  run _run_guard Bash "pnpm new-cmd"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.reason | test("new policy fires")'
+}

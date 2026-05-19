@@ -506,4 +506,46 @@ if [[ $cmd_status -ne 0 ]]; then
   printf '%s' "$rel_latest" >"$gates_dir/last-failed-log"
 fi
 
+# 0.12.0: Structured failure summary at .ralph/gates/<label>-latest.summary.
+# Consumed by stream-parser to write the "Last gate state" section of
+# handoff.md, and by the framing prompt's handoff block on the next loop.
+# Capped at ~2KB so it never balloons the next prompt.
+if [[ $cmd_status -ne 0 ]]; then
+  summary_file="$gates_dir/$label-latest.summary"
+  {
+    printf 'label: %s\n' "$label"
+    printf 'exit: %s\n' "$cmd_status"
+    printf 'duration: %ss\n' "$duration"
+    printf 'log: %s\n' "$rel_latest"
+    printf 'cmd: %s\n' "$*"
+    printf '\n'
+    # Coverage gaps section — present when the wrapped command's log contains
+    # a "=== coverage gaps ===" block (produced by a project-side coverage
+    # summarizer). Surface it verbatim if found.
+    if grep -q '^=== coverage gaps ===' "$log_file" 2>/dev/null; then
+      printf 'coverage_gaps:\n'
+      awk '/^=== coverage gaps ===/{flag=1;next} /^=== /{flag=0} flag' \
+        "$log_file" 2>/dev/null | head -n 30
+      printf '\n'
+    fi
+    # Failing-signature lines (line-anchored, same regex as the console summary).
+    printf 'failures:\n'
+    grep -n -E \
+      '^\s*(FAIL|✗|× |Error:|AssertionError|TypeError|ReferenceError|SyntaxError|\s+at\s|expected|Expected|    [0-9]+\)|ERROR in|error TS[0-9]+|error\s+@|✖ )' \
+      "$log_file" 2>/dev/null | head -n 20 || true
+  } >"$summary_file"
+  # Hard cap at 2KB.
+  if [[ -f "$summary_file" ]]; then
+    summary_bytes=$(wc -c <"$summary_file" 2>/dev/null | tr -d ' ')
+    if [[ -n "$summary_bytes" && "$summary_bytes" -gt 2048 ]]; then
+      head -c 2000 "$summary_file" >"$summary_file.tmp"
+      printf '\n[truncated — see %s]\n' "$rel_latest" >>"$summary_file.tmp"
+      mv "$summary_file.tmp" "$summary_file"
+    fi
+  fi
+else
+  # On success, remove any stale summary so the agent's view matches reality.
+  rm -f "$gates_dir/$label-latest.summary"
+fi
+
 exit "$cmd_status"

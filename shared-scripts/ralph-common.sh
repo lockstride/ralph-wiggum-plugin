@@ -252,6 +252,17 @@ EOF
 EOF
   fi
 
+  # 0.12.0: Seed handoff.md skeleton from the shared template if absent.
+  # build_prompt injects this block at every loop start; gate-run.sh +
+  # stream-parser maintain the "Last gate state" section automatically.
+  if [[ ! -f "$ralph_dir/handoff.md" ]]; then
+    local _handoff_skel
+    _handoff_skel="$(dirname "${BASH_SOURCE[0]}")/../shared-references/templates/handoff-skeleton.md"
+    if [[ -f "$_handoff_skel" ]]; then
+      cp "$_handoff_skel" "$ralph_dir/handoff.md"
+    fi
+  fi
+
   # Make sure .ralph is ignored. Idempotent.
   local gitignore="$workspace/.gitignore"
   if [[ -f "$gitignore" ]]; then
@@ -391,27 +402,14 @@ build_prompt() {
     user_body=$(cat "$user_prompt_file")
   fi
 
-  # 0.10.0: Troubleshoot overlay. When the prior turn ended on 5
-  # consecutive gate failures, the TURN_END handler sets
-  # _RALPH_OVERLAY_TROUBLESHOOT=1 and _RALPH_FAILING_GATE_LABEL.
-  # Consume once — unset after reading.
-  local troubleshoot_block=""
-  if [[ "${_RALPH_OVERLAY_TROUBLESHOOT:-0}" == "1" ]]; then
-    local _ts_template
-    _ts_template="$(dirname "${BASH_SOURCE[0]}")/../shared-references/templates/troubleshoot-test-failure.md"
-    local _ts_label="${_RALPH_FAILING_GATE_LABEL:-unknown}"
-    if [[ -f "$_ts_template" ]]; then
-      troubleshoot_block=$(sed -e "s|{{FAILING_LABEL}}|$_ts_label|g" \
-        -e "s|{{CONSECUTIVE_FAILURES}}|5|g" \
-        "$_ts_template")
-    fi
-    # Also load project-specific supplement if present
-    local _ts_supplement="$workspace/.ralph/troubleshoot-test-failure.md"
-    if [[ -f "$_ts_supplement" ]]; then
-      troubleshoot_block="$troubleshoot_block"$'\n\n'"$(cat "$_ts_supplement")"
-    fi
-    unset _RALPH_OVERLAY_TROUBLESHOOT
-    unset _RALPH_FAILING_GATE_LABEL
+  # 0.12.0: Handoff block — rolling state document injected every loop.
+  # Maintained by stream-parser (Last gate state section) and the agent
+  # (Working set section). The troubleshoot overlay (0.10.0–0.11.x) is gone;
+  # the framing-prompt Gate Selection block below + the per-loop handoff
+  # injection cover what it used to deliver.
+  local handoff_block=""
+  if [[ -f "$workspace/.ralph/handoff.md" ]]; then
+    handoff_block=$(cat "$workspace/.ralph/handoff.md")
   fi
 
   # 0.3.6: Surface gate-run.sh in the non-speckit framing. Speckit-mode
@@ -454,17 +452,44 @@ GATE_EOF
     )
   fi
 
-  # 0.10.0: troubleshoot overlay section (one-shot, from TURN_END on gate failures)
-  local troubleshoot_section=""
-  if [[ -n "$troubleshoot_block" ]]; then
-    troubleshoot_section="
-$troubleshoot_block
+  # 0.12.0: Inline the handoff block when present so the agent reads the last
+  # gate state + working set as part of the framing prompt (not a separate
+  # state-file Read it has to remember). Section markers preserved so the
+  # next loop's writers (stream-parser, the agent) can find their slot.
+  local handoff_section=""
+  if [[ -n "$handoff_block" ]]; then
+    handoff_section="
+## Handoff from previous loop
+
+$handoff_block
 "
   fi
 
+  # 0.12.0: Gate selection guidance. Three short paragraphs covering the
+  # default gate, when to escalate to all-check, and where the failure
+  # summary lives. Replaces the on-demand troubleshoot overlay.
+  local gate_selection_block
+  gate_selection_block=$(
+    cat <<'GSEL_EOF'
+
+## Gate Selection
+
+Run `pnpm basic-check` by default after each task. Only run `pnpm all-check`
+when the current task line is marked `[risky]` in tasks.md. After a `[risky]`
+task or at the end of the loop, one `all-check` is sufficient — do not re-run
+to "double-check" green gates.
+
+When a gate fails, the failure summary appears under `## Last gate state` in
+the handoff block above. Read it before editing. To rerun just the failing
+file, prefer the per-app targeted wrapper your project documents (e.g.
+`pnpm <app>:test-unit -- --testFile=<path>`) rather than re-running the full
+gate.
+GSEL_EOF
+  )
+
   cat <<EOF
 # Ralph Loop $loop_n
-$troubleshoot_section
+$handoff_section
 You are running inside a Ralph loop. Git log and tasks.md checkboxes
 are the authoritative record of what is done. Commit after each task,
 read the next one, keep going.
@@ -477,7 +502,7 @@ read the next one, keep going.
 
 ## State Files (read on startup)
 
-1. \`.ralph/handoff.md\` — if present and fresher than the latest commit, read first.
+1. \`.ralph/handoff.md\` — already inlined above. The same file is the rolling state document; the agent updates the **Working set** section before yielding.
 2. \`.ralph/guardrails.md\` — lessons from past failures.
 3. \`.ralph/errors.log\` — recent failures to avoid repeating.
 4. \`.ralph/orphan-leak.md\` — if present, prior loop committed files that were untracked at its start; classify and proceed.
@@ -490,13 +515,14 @@ End your turn on:
 - The loop sends \`WARN\` (rotation imminent) — wrap up your current edit
 - \`.ralph/stop-requested\` exists — yield cleanly
 
-Before yielding, write \`.ralph/handoff.md\` (< 30 lines: last completed, next task, key facts).
+Before yielding, update the **Working set** section of \`.ralph/handoff.md\` (≤ 10 lines: current task, files in flight, next planned steps). The **Last gate state** section is rewritten by the plugin — leave it alone.
 
 ## Git hygiene
 
 - Never \`git add .ralph/\` — it is gitignored.
 - Never \`--amend\`, \`--force\`, or \`reset --hard\`. Fix mistakes with a new commit.
 $gate_block
+$gate_selection_block
 
 ## Task Execution
 
@@ -1614,8 +1640,9 @@ run_ralph_loop() {
               -e "s|{{CONSECUTIVE_FAILURES}}|5|g" \
               "$_handoff_template" >"$workspace/.ralph/handoff.md"
           fi
-          export _RALPH_OVERLAY_TROUBLESHOOT=1
-          export _RALPH_FAILING_GATE_LABEL="$_failing_label"
+          # 0.12.0: troubleshoot overlay removed. Failure context is now
+          # carried in the inlined handoff block (stream-parser writes the
+          # ## Last gate state section from gate-run.sh's summary file).
         fi
         log_progress "$workspace" "**Loop $loop_label ended** — 🛑 TURN_END"
         echo "🛑 Turn ended — rotating to fresh context..."

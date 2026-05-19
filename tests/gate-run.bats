@@ -298,6 +298,48 @@ EOF
   grep -q "hello-split" "$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
 }
 
+# --- 0.12.0: failure summary file ---
+
+@test "writes <label>-latest.summary on failure (0.12.0)" {
+  # Use bash -c to emit a recognizable failure signature, then fail.
+  bash "$SCRIPTS_DIR/gate-run.sh" basic bash -c 'echo "FAIL  src/foo.spec.ts > test name"; echo "AssertionError: expected 1 to be 2"; exit 1' || true
+
+  local summary="$MOCK_WORKSPACE/.ralph/gates/basic-latest.summary"
+  [ -f "$summary" ]
+  grep -q "^label: basic" "$summary"
+  grep -q "^exit: 1" "$summary"
+  grep -q "^failures:" "$summary"
+  grep -q "AssertionError" "$summary"
+}
+
+@test "removes stale summary on success (0.12.0)" {
+  # First, produce a failing run that creates the summary.
+  bash "$SCRIPTS_DIR/gate-run.sh" basic bash -c 'echo "Error: nope"; exit 1' || true
+  local summary="$MOCK_WORKSPACE/.ralph/gates/basic-latest.summary"
+  [ -f "$summary" ]
+
+  # Then a passing run on the same label — summary should be gone.
+  bash "$SCRIPTS_DIR/gate-run.sh" basic true || true
+  [ ! -f "$summary" ]
+}
+
+@test "summary surfaces coverage gaps block when present in log (0.12.0)" {
+  bash "$SCRIPTS_DIR/gate-run.sh" basic bash -c 'cat <<LOG
+=== coverage gaps ===
+src/foo.ts
+  branches  88.5%  uncovered: 12, 14-18
+=== end coverage gaps ===
+Error: coverage threshold not met
+LOG
+exit 1' || true
+
+  local summary="$MOCK_WORKSPACE/.ralph/gates/basic-latest.summary"
+  [ -f "$summary" ]
+  grep -q "^coverage_gaps:" "$summary"
+  grep -q "src/foo.ts" "$summary"
+  grep -q "uncovered: 12, 14-18" "$summary"
+}
+
 @test "retains only RALPH_GATE_KEEP logs" {
   export RALPH_GATE_KEEP=2
 

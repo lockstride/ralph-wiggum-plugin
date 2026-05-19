@@ -19,6 +19,15 @@
           "timeout": 5000
         }
       ]
+    },
+    {
+      "type": "Stop",
+      "hooks": [
+        {
+          "command": "bash \"$(dirname \"$CLAUDE_PLUGIN_DIR\")/shared-scripts/handoff-check.sh\"",
+          "timeout": 2000
+        }
+      ]
     }
   ]
 }
