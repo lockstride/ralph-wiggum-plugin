@@ -161,7 +161,7 @@ A skeleton is seeded automatically by `init_ralph_dir` on first run.
 
 ### Command policy
 
-`.ralph/command-policy` consolidates the deny / rewrite / protect rules into one file. Three sections, scanned in order: `[rewrite]` → `[deny]` → `[protect]`.
+`.ralph/command-policy` consolidates the rewrite / deny / gate-wrapped / protect rules into one file. Four sections, scanned in order: `[rewrite]` → `[deny]` → `[gate-wrapped]` → `[protect]`.
 
 ```
 [rewrite]
@@ -172,15 +172,24 @@ A skeleton is seeded automatically by `init_ralph_dir` on first run.
 # command-prefix | reason
 pnpm test-e2e | containerized E2E is too expensive — use pnpm test-e2e:local
 
-[protect]
-# one prefix per line — bare OK, pipe/redirect denied
+[gate-wrapped]
+# MUST be invoked through gate-run.sh so the loop captures tracking artifacts
 pnpm all-check
 pnpm basic-check
+
+[protect]
+# bare OK, pipe/redirect denied
+pnpm format:write
 ```
 
-Rewrites and denies both block the command; rewrites name the canonical form via regex substitution so the agent learns the right shape from the error message. Protect allows the bare command and only blocks pipes/redirects.
+Section semantics:
 
-The legacy `.ralph/denied-commands` + `.ralph/protected-scripts` are still read as a fallback when `command-policy` is absent (with a one-time deprecation notice in `.ralph/errors.log`). Migrate when convenient — the template at [`shared-references/templates/command-policy.md`](shared-references/templates/command-policy.md) is a starting point.
+- **`[rewrite]`** — regex match; blocks and tells the agent the canonical form via substitution. Use to retrain the agent on incorrect command shapes.
+- **`[deny]`** — literal prefix match; blocks outright. Use for commands the agent should never run.
+- **`[gate-wrapped]`** — listed command MUST be invoked through `gate-run.sh`, else blocked. The matcher strips env-var prefixes AND normalizes `pnpm run X` / `pnpm exec X` to `pnpm X` before prefix matching, so the agent can't slip past with `CI=true pnpm run all-check` or similar. Bare, piped, redirected, env-prefixed, and run/exec-prefixed forms are all caught. Use for the gates whose tracking the loop depends on (final / basic / test gates).
+- **`[protect]`** — bare invocation OK; only pipe / redirect of the command is denied. Use for commands you want to allow bare but not let the agent dump into a sidecar log. Prefer `[gate-wrapped]` when you also want the loop's tracking artifacts.
+
+The legacy `.ralph/denied-commands` + `.ralph/protected-scripts` are still read as a fallback when `command-policy` is absent (with a one-time deprecation notice in `.ralph/errors.log`); they only get `[deny]` + `[protect]` semantics — `[rewrite]` and `[gate-wrapped]` require the unified file. Migrate when convenient — the template at [`shared-references/templates/command-policy.md`](shared-references/templates/command-policy.md) is a starting point.
 
 ### Guard hook
 

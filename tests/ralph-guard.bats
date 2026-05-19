@@ -457,3 +457,149 @@ EOF
   echo "$output" | jq -e '.result == "block"'
   echo "$output" | jq -e '.reason | test("new policy fires")'
 }
+
+# --- 0.12.1: [gate-wrapped] enforcement ---
+#
+# These tests drive the agent's known evasion patterns: bare, with args,
+# with pipe/redirect, with env prefix, with `pnpm run`/`pnpm exec`, etc.
+# Every one of them must be blocked. Only the gate-run.sh wrapped form
+# should pass.
+
+setup_gate_wrapped_policy() {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[gate-wrapped]
+pnpm all-check
+pnpm basic-check
+EOF
+}
+
+@test "[gate-wrapped] blocks bare invocation" {
+  setup_gate_wrapped_policy
+  run _run_guard Bash "pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.reason | test("gate-run.sh")'
+  echo "$output" | jq -e '.reason | test("pnpm all-check")'
+}
+
+@test "[gate-wrapped] blocks bare invocation with trailing args" {
+  setup_gate_wrapped_policy
+  run _run_guard Bash "pnpm all-check --silent"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "[gate-wrapped] blocks piped invocation" {
+  setup_gate_wrapped_policy
+  run _run_guard Bash "pnpm all-check | tail -50"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "[gate-wrapped] blocks redirect invocation" {
+  setup_gate_wrapped_policy
+  run _run_guard Bash "pnpm all-check > /tmp/out.log"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "[gate-wrapped] blocks 2>&1 pipe variant" {
+  setup_gate_wrapped_policy
+  run _run_guard Bash "pnpm all-check 2>&1 | grep error"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "[gate-wrapped] blocks env-prefixed invocation" {
+  setup_gate_wrapped_policy
+  run _run_guard Bash "CI=true pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "[gate-wrapped] blocks VERBOSE-prefixed invocation" {
+  setup_gate_wrapped_policy
+  run _run_guard Bash "VERBOSE=1 pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "[gate-wrapped] blocks 'pnpm run' variant (0.12.1)" {
+  setup_gate_wrapped_policy
+  run _run_guard Bash "pnpm run all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "[gate-wrapped] blocks 'pnpm exec' variant (0.12.1)" {
+  setup_gate_wrapped_policy
+  run _run_guard Bash "pnpm exec basic-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+}
+
+@test "[gate-wrapped] allows gate-run.sh wrapped invocation" {
+  setup_gate_wrapped_policy
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm basic-check"
+  [ "$status" -eq 0 ]
+  # Should not block (gate-without-write may fire on re-run, but a fresh
+  # workspace's last-gate-ts is empty so the first wrapped call passes).
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.result == "block"' 2>/dev/null
+  fi
+}
+
+@test "[gate-wrapped] allows non-listed command (no false positives)" {
+  setup_gate_wrapped_policy
+  run _run_guard Bash "pnpm format:write"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "[gate-wrapped] does not block on prefix-of-a-longer-name" {
+  setup_gate_wrapped_policy
+  # pnpm all-check-extended is a different (hypothetical) script
+  run _run_guard Bash "pnpm all-check-extended"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "[gate-wrapped] message names the canonical command" {
+  setup_gate_wrapped_policy
+  run _run_guard Bash "pnpm run all-check"
+  [ "$status" -eq 0 ]
+  # The message should cite the *prefix* (canonical), not the agent's
+  # `pnpm run` form, so the agent learns the right shape.
+  echo "$output" | jq -e '.reason | test("pnpm all-check")'
+  ! echo "$output" | jq -e '.reason | test("pnpm run all-check")' 2>/dev/null
+}
+
+@test "[gate-wrapped] interacts cleanly with [rewrite] for 'pnpm -w run'" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[rewrite]
+^pnpm -w run (.+)\$ | pnpm \1 | strip -w flag
+
+[gate-wrapped]
+pnpm all-check
+EOF
+  # Rewrite catches first (before gate-wrapped); message names canonical form.
+  run _run_guard Bash "pnpm -w run all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.reason | test("pnpm all-check")'
+}
+
+@test "[gate-wrapped] applies after [deny] (deny wins on overlap)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[deny]
+pnpm all-check | hard deny
+
+[gate-wrapped]
+pnpm all-check
+EOF
+  run _run_guard Bash "pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.result == "block"'
+  # Deny ran first; gate-wrapped never fired.
+  echo "$output" | jq -e '.reason | test("hard deny")'
+}
