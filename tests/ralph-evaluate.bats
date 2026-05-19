@@ -76,6 +76,34 @@ teardown() {
 }
 
 # -----------------------------------------------------------------------------
+# RALPH_EVAL_MAX_LOOPS env var (0.11.8)
+# -----------------------------------------------------------------------------
+
+@test "eval MAX_LOOPS defaults to 10 when no flag or env var is set (0.11.8)" {
+  unset RALPH_EVAL_MAX_LOOPS
+  EVAL_ITER_FROM_FLAG=""
+  local MAX_LOOPS="${EVAL_ITER_FROM_FLAG:-${RALPH_EVAL_MAX_LOOPS:-10}}"
+  [ "$MAX_LOOPS" = "10" ]
+}
+
+@test "RALPH_EVAL_MAX_LOOPS env var overrides the default (0.11.8)" {
+  export RALPH_EVAL_MAX_LOOPS=15
+  EVAL_ITER_FROM_FLAG=""
+  local MAX_LOOPS="${EVAL_ITER_FROM_FLAG:-${RALPH_EVAL_MAX_LOOPS:-10}}"
+  [ "$MAX_LOOPS" = "15" ]
+  unset RALPH_EVAL_MAX_LOOPS
+}
+
+@test "--loops flag takes precedence over RALPH_EVAL_MAX_LOOPS env var (0.11.8)" {
+  export RALPH_EVAL_MAX_LOOPS=15
+  EVAL_ITER_FROM_FLAG=""
+  parse_args --loops 7
+  local MAX_LOOPS="${EVAL_ITER_FROM_FLAG:-${RALPH_EVAL_MAX_LOOPS:-10}}"
+  [ "$MAX_LOOPS" = "7" ]
+  unset RALPH_EVAL_MAX_LOOPS
+}
+
+# -----------------------------------------------------------------------------
 # resolve_ground_truth
 # -----------------------------------------------------------------------------
 

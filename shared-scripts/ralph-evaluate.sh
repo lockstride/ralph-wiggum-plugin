@@ -6,7 +6,7 @@
 # roles (each delegated to a sub-agent via the Task tool). The orchestrator
 # maintains .ralph/acceptance-report.md; the loop exits when the report's
 # top-level "All acceptance criteria met and verified" checkbox is flipped
-# to [x] by the verifier, or when the loop cap (default 5) is hit.
+# to [x] by the verifier, or when the loop cap (default 10) is hit.
 #
 # Usage:
 #   ./ralph-evaluate.sh --prompt                 # ground truth = PROMPT.md
@@ -18,7 +18,8 @@
 # Flags:
 #   --cli <claude|cursor-agent>   Agent CLI (default: claude)
 #   -m, --model <id>              Model (default: CLI-specific default)
-#   -n, --loops N                 Eval loop cap (default: 5).
+#   -n, --loops N                 Eval loop cap (default: 10).
+#                                 Env: RALPH_EVAL_MAX_LOOPS.
 #                                 --iterations is the deprecated alias.
 #   --prompt | --prompt-md        Ground truth = PROMPT.md in workspace root
 #   --prompt-file <path>          Ground truth = specified file
@@ -35,7 +36,7 @@ source "$SCRIPT_DIR/ralph-common.sh"
 source "$SCRIPT_DIR/prompt-resolver.sh"
 
 show_help() {
-  sed -n '3,28p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,29p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 WORKSPACE=""
@@ -236,7 +237,7 @@ main() {
   local ROTATE_THRESHOLD WARN_THRESHOLD
   ROTATE_THRESHOLD="$(agent_default_rotate_threshold "$RALPH_AGENT_CLI" "$MODEL")"
   WARN_THRESHOLD="$(agent_default_warn_threshold "$RALPH_AGENT_CLI" "$MODEL")"
-  local MAX_LOOPS="${EVAL_ITER_FROM_FLAG:-5}"
+  local MAX_LOOPS="${EVAL_ITER_FROM_FLAG:-${RALPH_EVAL_MAX_LOOPS:-10}}"
 
   export RALPH_AGENT_CLI MODEL ROTATE_THRESHOLD WARN_THRESHOLD MAX_LOOPS
 
