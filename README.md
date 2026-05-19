@@ -110,7 +110,7 @@ ralph --cli claude --spec 20260131-example-feature --branch feature/example --pr
 | `--branch <name>` | Work on a named branch | current branch |
 | `--pr` | Open a PR when complete; requires `--branch` | off |
 | `--evaluate` | Chain acceptance evaluation loop after main loop completes (env: `RALPH_CHAIN_EVALUATE=1`) | off |
-| `--eval-loops N` | Cap for the chained eval loop (`--eval-iterations` is the deprecated alias) | 5 |
+| `--eval-loops N` | Cap for the chained eval loop (`--eval-iterations` is the deprecated alias; env: `RALPH_EVAL_MAX_LOOPS`) | 10 |
 | `-v, --version` | Print version and exit | — |
 | `-h, --help` | Show help | — |
 
@@ -196,7 +196,7 @@ ralph-evaluate --spec            # against newest spec dir
 ralph-evaluate --prompt --fresh  # wipe prior report
 
 # Chain after a main loop
-ralph --cli claude --spec --evaluate --eval-loops 5
+ralph --cli claude --spec --evaluate --eval-loops 10
 ```
 
 For mode mechanics, artifacts, and limitations, see [docs/development.md → Acceptance evaluation loop](docs/development.md#acceptance-evaluation-loop--internals).
@@ -214,6 +214,7 @@ For mode mechanics, artifacts, and limitations, see [docs/development.md → Acc
 | `RALPH_GATE_STALE_LOCK_SEC` | `600` | Steal locks older than this (seconds) |
 | `RALPH_GATE_FAIL_STREAK_THRESHOLD` | `5` | Consecutive gate failures before TURN_END |
 | `RALPH_MAX_LOOPS` | `10` | Safety cap on agent respawns |
+| `RALPH_EVAL_MAX_LOOPS` | `10` | Safety cap on eval loop iterations |
 | `RALPH_SKIP_GUARDRAILS` | — | Set to `1` to omit the guardrails preamble |
 | `RALPH_SKIP_GENERATION` | — | Set to `1` to skip speckit prompt generation |
 

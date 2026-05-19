@@ -124,7 +124,8 @@ Options:
   --pr                         Open PR when complete (requires --branch)
   --evaluate                   Chain acceptance evaluation loop on COMPLETE
                                (equivalent env var: RALPH_CHAIN_EVALUATE=1)
-  --eval-loops N               Cap for the eval loop when chained (default 5).
+  --eval-loops N               Cap for the eval loop when chained (default 10).
+                               Env: RALPH_EVAL_MAX_LOOPS.
                                (--eval-iterations is the deprecated alias.)
   -v, --version                Show version
   -h, --help                   Show this help
