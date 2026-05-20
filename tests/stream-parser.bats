@@ -74,6 +74,21 @@ tool_result_json() {
   echo "$output" | grep -q "WARN"
 }
 
+@test "WARN creates context-warning-active breadcrumb (0.12.2)" {
+  # Same setup as "emits WARN before ROTATE" — trigger WARN only.
+  export WARN_THRESHOLD=500
+  export ROTATE_THRESHOLD=1000
+
+  local events=""
+  for i in $(seq 1 6); do
+    events+=$(tool_result_json "Read" 400 10 0 "/tmp/file${i}.ts")
+    events+=$'\n'
+  done
+
+  run_parser "$events" >/dev/null
+  [ -f "$MOCK_WORKSPACE/.ralph/context-warning-active" ]
+}
+
 @test "log_activity emits HEARTBEAT to stdout (0.4.0)" {
   # Regression for the 0.4.0 activity-based heartbeat. Every Read /
   # Shell / Write (which routes through log_activity) should emit a

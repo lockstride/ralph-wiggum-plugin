@@ -309,6 +309,7 @@ check_gutter() {
   if [[ $tokens -ge $WARN_THRESHOLD ]] && [[ $WARN_SENT -eq 0 ]]; then
     log_activity "WARN: Approaching token limit ($tokens >= $WARN_THRESHOLD)"
     WARN_SENT=1
+    touch "$RALPH_DIR/context-warning-active" 2>/dev/null || true
     echo "WARN" 2>/dev/null || true
   fi
 }

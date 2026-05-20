@@ -34,8 +34,10 @@ why, ≤ 5 architectural facts).
    - Run `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`.
    - Mark `[x]` only after the gate exits 0.
    - `git add <exact paths> && git commit -m "<type>(<scope>): <desc> (T###)"`. No agent footers. No `--amend`. {{PUSH_GUIDANCE}}
-   - Check `.ralph/stop-requested`. If absent, next tool call is the
-     read of the next unchecked task — no summary, no turn-end.
+   - Check `.ralph/stop-requested` or `.ralph/context-warning-active`.
+     If either exists, write handoff and yield. If absent, next tool
+     call is the read of the next unchecked task — no summary, no
+     turn-end.
 3. When all tasks are `[x]` AND `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
    exits 0, emit `<promise>ALL_TASKS_DONE</promise>`.
 
@@ -46,8 +48,9 @@ After a genuine fix, if the gate still fails for the same reason,
 emit `<ralph>GUTTER</ralph>` — the loop will rotate to a fresh agent.
 
 ## Stop conditions (the only four)
-`<promise>ALL_TASKS_DONE</promise>`, rotation `WARN`, `.ralph/stop-requested`,
-or `<ralph>GUTTER</ralph>`. A successful commit is NOT a stop condition.
+`<promise>ALL_TASKS_DONE</promise>`, `.ralph/context-warning-active` (yield for
+rotation), `.ralph/stop-requested`, or `<ralph>GUTTER</ralph>`.
+A successful commit is NOT a stop condition.
 
 ## Constitution
 Ground every decision in `{{CONSTITUTION_PATH}}`. A task that would

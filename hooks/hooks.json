@@ -5,7 +5,7 @@
       "matcher": "Bash",
       "hooks": [
         {
-          "command": "bash \"$(dirname \"$CLAUDE_PLUGIN_DIR\")/shared-scripts/ralph-guard.sh\"",
+          "command": "bash \"${CLAUDE_PLUGIN_ROOT}/shared-scripts/ralph-guard.sh\"",
           "timeout": 5000
         }
       ]
@@ -15,7 +15,7 @@
       "matcher": "Write|Edit|MultiEdit",
       "hooks": [
         {
-          "command": "bash \"$(dirname \"$CLAUDE_PLUGIN_DIR\")/shared-scripts/ralph-guard.sh\"",
+          "command": "bash \"${CLAUDE_PLUGIN_ROOT}/shared-scripts/ralph-guard.sh\"",
           "timeout": 5000
         }
       ]
@@ -24,7 +24,7 @@
       "type": "Stop",
       "hooks": [
         {
-          "command": "bash \"$(dirname \"$CLAUDE_PLUGIN_DIR\")/shared-scripts/handoff-check.sh\"",
+          "command": "bash \"${CLAUDE_PLUGIN_ROOT}/shared-scripts/handoff-check.sh\"",
           "timeout": 2000
         }
       ]

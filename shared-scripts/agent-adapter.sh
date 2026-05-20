@@ -155,8 +155,11 @@ agent_normalize_filter() {
       # Uses foreach+inputs to track tool_use_id -> name/path/cmd across
       # events, so tool_result events carry the real tool identity.
       # Requires jq -n so inputs reads the stream.
+      # 0.12.2: `try inputs catch empty` — malformed JSON lines (e.g. numeric
+      # literal truncation from the CLI) are silently skipped instead of
+      # crashing the entire pipeline.
       cat <<'JQ'
-foreach inputs as $e (
+foreach (try inputs catch empty) as $e (
   {};
   if $e.type == "assistant" then
     reduce (($e.message.content // [])[] | select(.type == "tool_use")) as $tu (
@@ -229,7 +232,7 @@ JQ
       # Uses foreach+inputs for consistency with the Claude filter
       # (both require jq -n). State is unused here.
       cat <<'JQ'
-foreach inputs as $e (
+foreach (try inputs catch empty) as $e (
   {};
   .;
   if $e.type == "system" and ($e.subtype // "") == "init" then
@@ -319,7 +322,7 @@ agent_default_rotate_threshold() {
       if [[ "$model" == *"[1m]"* ]]; then
         echo "700000"
       else
-        echo "150000"
+        echo "170000"
       fi
       ;;
     cursor-agent) echo "150000" ;;

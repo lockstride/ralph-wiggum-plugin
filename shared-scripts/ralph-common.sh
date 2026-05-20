@@ -512,7 +512,7 @@ read the next one, keep going.
 End your turn on:
 - \`<promise>ALL_TASKS_DONE</promise>\` — every task [x] AND final gate green
 - \`<ralph>GUTTER</ralph>\` — genuinely stuck after honest investigation
-- The loop sends \`WARN\` (rotation imminent) — wrap up your current edit
+- \`.ralph/context-warning-active\` exists — finish the current task, then yield
 - \`.ralph/stop-requested\` exists — yield cleanly
 
 Before yielding, update the **Working set** section of \`.ralph/handoff.md\` (≤ 10 lines: current task, files in flight, next planned steps). The **Last gate state** section is rewritten by the plugin — leave it alone.
@@ -959,6 +959,9 @@ run_loop() {
   # case below) and must be absent at loop start or the agent would
   # bail out on its first commit.
   rm -f "$workspace/.ralph/stop-requested" 2>/dev/null || true
+  # 0.12.2: clear the context-warning breadcrumb so a fresh agent
+  # doesn't immediately yield on its first task boundary.
+  rm -f "$workspace/.ralph/context-warning-active" 2>/dev/null || true
 
   local fifo="$workspace/.ralph/.parser_fifo"
   local spinner_pid="" agent_pid="" norm_filter=""
@@ -1130,6 +1133,7 @@ run_loop() {
       "WARN")
         [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "⚠️  Context warning — agent should wrap up soon..." >&2
+        touch "$workspace/.ralph/context-warning-active" 2>/dev/null || true
         ;;
       "GUTTER")
         [[ -t 2 ]] && printf "\r\033[K" >&2

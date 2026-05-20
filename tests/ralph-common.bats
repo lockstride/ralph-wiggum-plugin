@@ -960,7 +960,7 @@ EOF
   # The framing names the four real stop conditions.
   echo "$output" | grep -q "ALL_TASKS_DONE"
   echo "$output" | grep -q "GUTTER"
-  echo "$output" | grep -q "WARN"
+  echo "$output" | grep -q "context-warning-active"
   echo "$output" | grep -q "stop-requested"
 
   # 0.9.0: "cold-start tax" guilt-tripping language was removed — it
@@ -1006,4 +1006,26 @@ EOF
   cmd=$(agent_build_cmd cursor-agent "composer-2" "hello")
   # cursor-agent uses its own auth; don't touch ANTHROPIC vars.
   ! echo "$cmd" | grep -q "unset ANTHROPIC"
+}
+
+# =============================================================================
+# rotate/warn thresholds — 0.12.2 bump
+# =============================================================================
+
+@test "200K-model rotate threshold is 170000 (0.12.2)" {
+  local threshold
+  threshold=$(agent_default_rotate_threshold claude "opus")
+  [ "$threshold" = "170000" ]
+}
+
+@test "200K-model warn threshold is 148750 (0.12.2)" {
+  local threshold
+  threshold=$(agent_default_warn_threshold claude "opus")
+  [ "$threshold" = "148750" ]
+}
+
+@test "1M-model rotate threshold is unchanged at 700000" {
+  local threshold
+  threshold=$(agent_default_rotate_threshold claude "opus[1m]")
+  [ "$threshold" = "700000" ]
 }
