@@ -49,6 +49,10 @@ TOOL_INPUT_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/
 
 WORKSPACE="${RALPH_WORKSPACE:-$(pwd)}"
 
+# Plugin root — used to construct absolute paths in [wrap] auto-rewrites
+# so the agent's bash can find gate-run.sh regardless of cwd.
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || PLUGIN_ROOT=""
+
 # ---------------------------------------------------------------------------
 # State directory (outside workspace so agent can't tamper)
 # ---------------------------------------------------------------------------
@@ -71,8 +75,16 @@ LAST_GATE_TS="$STATE_DIR/last-gate-ts"
 # ---------------------------------------------------------------------------
 
 _block() {
+  # 0.12.3: Use Claude Code's documented PreToolUse hook response format.
+  # The legacy `{"result":"block","reason":"..."}` form is SILENTLY IGNORED
+  # by the CLI — every block call before 0.12.3 was a no-op. This was the
+  # root cause of every "guard isn't enforcing" symptom: gate-wrapped bypass
+  # via pipes, direct vitest invocations, state-tampering rm -rf .ralph/,
+  # etc. all went through unblocked because the hook output was unrecognized.
   local reason="$1"
-  printf '{"result":"block","reason":"%s"}\n' "$reason"
+  jq -nc --arg reason "$reason" \
+    '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$reason}}' \
+    2>/dev/null
   exit 0
 }
 
@@ -108,8 +120,8 @@ _strip_env_prefix() {
 # matching catches equivalent variants:
 #   pnpm run <script>  → pnpm <script>
 #   pnpm exec <script> → pnpm <script>
-# Used by the [gate-wrapped] policy check so the agent can't slip past a
-# rule on "pnpm all-check" by writing "pnpm run all-check".
+# Used by the [wrap] policy check so the agent can't slip past a rule on
+# "pnpm all-check" by writing "pnpm run all-check".
 # (npx pnpm and pnpm -w run are handled separately by the [rewrite] section.)
 _normalize_pnpm() {
   local cmd="$1"
@@ -117,26 +129,70 @@ _normalize_pnpm() {
   echo "$cmd"
 }
 
+# Strip everything after the first pipe, redirect, or command separator so
+# prefix matching sees only the head command. The agent's `pnpm basic-check
+# 2>&1 | tail -30` reduces to `pnpm basic-check` for matching purposes.
+# The [wrap] rewrite uses this stripped form to construct the gate-run.sh
+# invocation (pipes are dropped — gate-run.sh already bounds output).
+#
+# Recognized terminators (in order of precedence in the regex):
+#   ` && `, ` || `, ` ; `, ` | `, ` > `, ` >> `, ` 2>&1`
+# Trailing whitespace is trimmed.
+_strip_pipes_redirects() {
+  local cmd="$1"
+  cmd=$(echo "$cmd" | sed -E 's/[[:space:]]+(2>&1|>>|>|\|\||\||&&|;).*$//')
+  echo "$cmd" | sed -E 's/[[:space:]]+$//'
+}
+
+# Compose the canonicalization pipeline:
+#   strip env prefix → strip pipes/redirects → normalize pnpm wrappers
+# The result is the form used for matching against [deny]/[wrap] rules.
+# [rewrite] rules are applied on top of this (in _enforce_command_policy)
+# to handle project-specific patterns like `pnpm nx X → pnpm X`.
+_canonicalize() {
+  local cmd
+  cmd=$(_strip_env_prefix "$1")
+  cmd=$(_strip_pipes_redirects "$cmd")
+  cmd=$(_normalize_pnpm "$cmd")
+  echo "$cmd"
+}
+
 # ---------------------------------------------------------------------------
-# Command policy (rewrite / deny / protect)
+# Command policy (rewrite / deny / wrap / protect)
 # ---------------------------------------------------------------------------
+#
+# 0.12.3 enforcement model: canonicalize → rewrite → deny → wrap → protect.
+# Every Bash command is first canonicalized (env-strip + pipe/redirect-strip
+# + pnpm-wrapper-normalize). The canonical form is then matched against the
+# four policy sections. Whenever a transformation fires, the hook emits an
+# `updatedInput` so the agent's tool call is TRANSPARENTLY corrected — the
+# agent sees its command "just work" without a block-and-retry puzzle. The
+# only thing that still hard-blocks is [deny] (genuinely dangerous commands)
+# and a small set of state-tampering patterns enforced outside this policy.
 #
 # .ralph/command-policy syntax:
+#
 #   [rewrite]
 #   regex | replacement | reason     # regex anchored implicitly by ^/$ in pattern
+#                                    # project-specific transforms (e.g. pnpm nx X → pnpm X)
 #
 #   [deny]
-#   command-prefix | reason
+#   command-prefix | reason          # genuinely dangerous; hard block
 #
-#   [gate-wrapped]
-#   command-prefix                   # MUST be invoked via gate-run.sh, else denied
+#   [wrap]                           # 0.12.3 — replaces [gate-wrapped]
+#   command-prefix | label           # auto-wrapped in gate-run.sh with <label>
+#                                    # (label must be one of: basic|final|e2e|lint|custom)
 #
 #   [protect]
 #   command-prefix                   # bare OK; pipe/redirect denied
 #
+# Backward compat: [gate-wrapped] entries are accepted and treated as [wrap]
+# entries with the default label "basic". Projects should migrate to [wrap]
+# with explicit labels for accurate gate logging.
+#
 # Falls back to .ralph/denied-commands (deny) + .ralph/protected-scripts
 # (protect) when command-policy is absent. Legacy fallback never gets
-# rewrite or gate-wrapped — only the new format supports them.
+# rewrite or wrap — only the new format supports them.
 
 _warn_legacy_policy() {
   local sentinel="$STATE_DIR/.policy-deprecation-warned"
@@ -154,14 +210,18 @@ _warn_legacy_policy() {
 
 # Parse command-policy into four temp files for the four sections.
 # Output paths are echoed space-separated:
-#   "rewrite_file deny_file gate_wrapped_file protect_file"
+#   "rewrite_file deny_file wrap_file protect_file"
 # Caller is responsible for cleanup.
+#
+# 0.12.3: [gate-wrapped] is a backward-compat alias for [wrap]. Entries
+# from a [gate-wrapped] section are appended to the wrap file with no
+# label (defaulting downstream to "basic").
 _parse_command_policy() {
   local policy_file="$1"
-  local rw dn gw pt
+  local rw dn wr pt
   rw=$(mktemp)
   dn=$(mktemp)
-  gw=$(mktemp)
+  wr=$(mktemp)
   pt=$(mktemp)
   local section=""
   local line
@@ -173,26 +233,36 @@ _parse_command_policy() {
       "" | \#*) continue ;;
       "[rewrite]") section="rewrite" ;;
       "[deny]") section="deny" ;;
-      "[gate-wrapped]") section="gate_wrapped" ;;
+      "[wrap]") section="wrap" ;;
+      "[gate-wrapped]") section="wrap_legacy" ;;
       "[protect]") section="protect" ;;
       "["*"]") section="" ;;
       *)
         case "$section" in
           rewrite) printf '%s\n' "$line" >>"$rw" ;;
           deny) printf '%s\n' "$line" >>"$dn" ;;
-          gate_wrapped) printf '%s\n' "$line" >>"$gw" ;;
+          wrap) printf '%s\n' "$line" >>"$wr" ;;
+          wrap_legacy) printf '%s\n' "$line" >>"$wr" ;;
           protect) printf '%s\n' "$line" >>"$pt" ;;
         esac
         ;;
     esac
   done <"$policy_file"
-  printf '%s %s %s %s' "$rw" "$dn" "$gw" "$pt"
+  printf '%s %s %s %s' "$rw" "$dn" "$wr" "$pt"
 }
+
+# 0.12.2: Rewrites are passthrough — the command is transparently
+# corrected via the hook's updatedInput mechanism, not blocked.
+# Sets _REWRITE_CANONICAL to the rewritten command if a rule matched.
+_REWRITE_CANONICAL=""
 
 _apply_rewrites() {
   # $1 = stripped command, $2 = rewrite file
-  # On match: _block with the canonical form + reason.
+  # On match: sets _REWRITE_CANONICAL and returns 0.
+  # Caller is responsible for feeding the rewritten form to downstream checks
+  # and emitting the updatedInput hook response if nothing blocks.
   local stripped="$1" rwfile="$2"
+  _REWRITE_CANONICAL=""
   [[ -s "$rwfile" ]] || return 0
   local rule pattern replacement reason canonical
   while IFS= read -r rule || [[ -n "$rule" ]]; do
@@ -209,12 +279,18 @@ _apply_rewrites() {
     [[ -z "$pattern" ]] && continue
     # Apply regex. We use sed with the pattern as-is; the pattern may use ^ and $.
     if printf '%s' "$stripped" | grep -qE "$pattern" 2>/dev/null; then
-      canonical=$(printf '%s' "$stripped" | sed -E "s|$pattern|$replacement|")
-      local msg="[ralph] use '$canonical' instead"
-      [[ -n "$reason" ]] && msg="$msg — $reason"
-      _block "$msg"
+      _REWRITE_CANONICAL=$(printf '%s' "$stripped" | sed -E "s|$pattern|$replacement|")
+      return 0
     fi
   done <"$rwfile"
+}
+
+_emit_rewrite() {
+  local cmd="$1"
+  # Use jq for safe JSON escaping of the command string.
+  jq -n --arg cmd "$cmd" \
+    '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":$cmd}}}' 2>/dev/null
+  exit 0
 }
 
 _apply_deny() {
@@ -251,46 +327,76 @@ _apply_protect() {
   done <"$ptfile"
 }
 
-# [gate-wrapped] enforcement (0.12.1).
-# A listed command MUST be invoked through the plugin's gate-run.sh wrapper,
-# so the loop gets its tracking artifacts (latest.log/.exit/.cmd/.summary,
-# handoff section update, gate-fail streak tracking, completion guard).
+# [wrap] auto-wrap enforcement (0.12.3).
+# A listed command is TRANSPARENTLY rewritten to its gate-run.sh-wrapped
+# form via the hook's `updatedInput` mechanism. The agent sees its command
+# "just work" — no block, no retry, no puzzle to solve. The loop still gets
+# its tracking artifacts (latest.log/.exit/.cmd/.summary, handoff section
+# update, gate-fail streak tracking, completion guard) because the wrapped
+# form is what actually runs.
 #
-# Matching tightness:
-#   - Env-var prefix already stripped by caller (_strip_env_prefix)
-#   - `pnpm run X` and `pnpm exec X` are normalized to `pnpm X` before
-#     prefix matching, so the agent can't slip past by adding `run`/`exec`
-#   - Pipe/redirect of a bare invocation is still bare → blocked here
-#   - Wrapping in gate-run.sh allows the command through (the wrapper
-#     handles output bounding; piping the wrapped form is OK because the
-#     wrapper has already done its summary work)
-_apply_gate_wrapped() {
-  local cmd="$1" stripped="$2" gwfile="$3"
-  [[ -s "$gwfile" ]] || return 0
+# Matching uses the canonical form (env-stripped, pipe-stripped, pnpm-
+# normalized) so every variant of `pnpm X | tail`, `CI=1 pnpm run X`, etc.
+# resolves to the same prefix and gets wrapped identically.
+#
+# Rule syntax (one per line):
+#   command-prefix | label
+# label must be one of basic|final|e2e|lint|custom. Missing label defaults
+# to "basic" (used for backward-compat [gate-wrapped] entries).
+#
+# On match, sets _WRAP_REWRITE to the rewritten command. _enforce_command_policy
+# emits it via _emit_rewrite after all checks pass.
+_WRAP_REWRITE=""
 
-  # If the raw command routes through gate-run.sh, the contract is satisfied.
+_apply_wrap() {
+  # $1 = original command (raw, for gate-run.sh detection)
+  # $2 = canonical command (env/pipe/pnpm-normalized) for matching AND wrapping
+  # $3 = wrap file
+  local cmd="$1" canonical="$2" wrfile="$3"
+  _WRAP_REWRITE=""
+  [[ -s "$wrfile" ]] || return 0
+
+  # Already wrapped — nothing to do. The agent's deliberate invocation of
+  # gate-run.sh is the contract being satisfied.
   if echo "$cmd" | grep -qE 'gate-run\.sh'; then
     return 0
   fi
 
-  local normalized
-  normalized=$(_normalize_pnpm "$stripped")
+  # If we can't resolve PLUGIN_ROOT, fall back to a relative path. This
+  # would only happen if BASH_SOURCE resolution failed during sourcing.
+  local gate_run_path="${PLUGIN_ROOT:-..}/shared-scripts/gate-run.sh"
 
-  local prefix
-  while IFS= read -r prefix || [[ -n "$prefix" ]]; do
-    prefix="$(printf '%s' "$prefix" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
-    [[ -z "$prefix" ]] && continue
-    if [[ "$normalized" == "$prefix" || "$normalized" == "$prefix "* ]]; then
-      _block "[ralph] '$prefix' must be invoked through gate-run.sh so the loop can track its result (handoff state, exit breadcrumb, fail-streak counter). Use: bash <plugin>/shared-scripts/gate-run.sh <label> $prefix"
+  local rule prefix label
+  while IFS= read -r rule || [[ -n "$rule" ]]; do
+    [[ -z "$rule" ]] && continue
+    if [[ "$rule" == *"|"* ]]; then
+      prefix="${rule%%|*}"
+      label="${rule#*|}"
+    else
+      prefix="$rule"
+      label="basic"
     fi
-  done <"$gwfile"
+    prefix="$(printf '%s' "$prefix" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+    label="$(printf '%s' "$label" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+    [[ -z "$prefix" ]] && continue
+    case "$label" in
+      basic | final | e2e | lint | custom) ;;
+      *) label="basic" ;;
+    esac
+    if [[ "$canonical" == "$prefix" || "$canonical" == "$prefix "* ]]; then
+      _WRAP_REWRITE="bash $gate_run_path $label $canonical"
+      return 0
+    fi
+  done <"$wrfile"
   return 0
 }
 
 _enforce_command_policy() {
-  local cmd="$1" stripped="$2"
+  # $1 = original command (pipes/redirects/env intact)
+  # $2 = canonical command (env-stripped, pipe-stripped, pnpm-normalized)
+  local cmd="$1" canonical="$2"
   local policy="$WORKSPACE/.ralph/command-policy"
-  local rwfile="" dnfile="" gwfile="" ptfile=""
+  local rwfile="" dnfile="" wrfile="" ptfile=""
 
   if [[ -f "$policy" ]]; then
     local parsed
@@ -299,10 +405,10 @@ _enforce_command_policy() {
     parsed="${parsed#* }"
     dnfile="${parsed%% *}"
     parsed="${parsed#* }"
-    gwfile="${parsed%% *}"
+    wrfile="${parsed%% *}"
     ptfile="${parsed#* }"
   else
-    # Legacy fallback. Only deny + protect; no rewrite, no gate-wrapped.
+    # Legacy fallback. Only deny + protect; no rewrite, no wrap.
     local legacy_used=0
     if [[ -f "$WORKSPACE/.ralph/denied-commands" ]]; then
       dnfile=$(mktemp)
@@ -322,26 +428,47 @@ _enforce_command_policy() {
     fi
   fi
 
-  # Apply policies. Each call may _block (which exits the script). Cleanup
-  # is best-effort — temp files in /tmp survive only until next reboot, and
-  # the hook process is short-lived. Avoid installing an EXIT trap because
-  # _block calls `exit 0` and on macOS `rm -f '/dev/null'` errors out under
-  # `set -e`, masking the block result.
+  # Enforcement order: rewrite → deny → wrap → protect.
   #
-  # Order: rewrite → deny → gate-wrapped → protect.
-  # gate-wrapped fires BEFORE protect because a bare-piped invocation
-  # ("pnpm all-check | tail") fails both rules — gate-wrapped's message
-  # is more actionable ("wrap it") than protect's ("don't pipe it").
-  [[ -n "$rwfile" ]] && _apply_rewrites "$stripped" "$rwfile"
-  [[ -n "$dnfile" ]] && _apply_deny "$stripped" "$dnfile"
-  [[ -n "$gwfile" ]] && _apply_gate_wrapped "$cmd" "$stripped" "$gwfile"
-  [[ -n "$ptfile" ]] && _apply_protect "$cmd" "$stripped" "$ptfile"
+  # 0.12.3 model:
+  #   - [rewrite] applies regex transforms to the canonical form (and
+  #     anywhere else it appears). Project-specific (e.g. `pnpm nx X → pnpm X`).
+  #     Result feeds into all downstream checks.
+  #   - [deny] hard-blocks the canonical form. Only path that calls _block().
+  #   - [wrap] sets _WRAP_REWRITE to the gate-run.sh-wrapped form, which we
+  #     emit via updatedInput at the end. Agent sees the wrapped command
+  #     execute transparently.
+  #   - [protect] hard-blocks pipe/redirect of bare commands (separate from
+  #     wrap because protected scripts may not be gate-runnable).
+  #
+  # Cleanup is best-effort — temp files in /tmp survive only until next
+  # reboot, and the hook process is short-lived. Avoid installing an EXIT
+  # trap because _block calls `exit 0` and on macOS `rm -f '/dev/null'`
+  # errors out under `set -e`, masking the block result.
+  [[ -n "$rwfile" ]] && _apply_rewrites "$canonical" "$rwfile"
+  if [[ -n "$_REWRITE_CANONICAL" ]]; then
+    canonical="$_REWRITE_CANONICAL"
+  fi
+  [[ -n "$dnfile" ]] && _apply_deny "$canonical" "$dnfile"
+  [[ -n "$wrfile" ]] && _apply_wrap "$cmd" "$canonical" "$wrfile"
+  [[ -n "$ptfile" ]] && _apply_protect "$cmd" "$canonical" "$ptfile"
 
   # No block fired — clean up tempfiles on the success path.
   [[ -n "$rwfile" ]] && rm -f "$rwfile"
   [[ -n "$dnfile" ]] && rm -f "$dnfile"
-  [[ -n "$gwfile" ]] && rm -f "$gwfile"
+  [[ -n "$wrfile" ]] && rm -f "$wrfile"
   [[ -n "$ptfile" ]] && rm -f "$ptfile"
+
+  # Decide what to emit. Priority:
+  #   1. If [wrap] matched, emit the gate-run.sh-wrapped form (the canonical
+  #      is already baked in, so [rewrite] transforms are reflected too).
+  #   2. Else if [rewrite] matched (but not wrap), emit the rewritten form.
+  #   3. Otherwise return — the agent's original command runs as-is.
+  if [[ -n "$_WRAP_REWRITE" ]]; then
+    _emit_rewrite "$_WRAP_REWRITE"
+  elif [[ -n "$_REWRITE_CANONICAL" ]]; then
+    _emit_rewrite "$_REWRITE_CANONICAL"
+  fi
   return 0
 }
 
@@ -362,26 +489,29 @@ _guard_bash() {
     _block "State tampering denied: cannot delete .ralph/ contents via find -delete."
   fi
 
-  local stripped
-  stripped=$(_strip_env_prefix "$cmd")
+  # Canonicalize once — env prefix stripped, pipes/redirects stripped, pnpm
+  # run/exec normalized. Every downstream check matches against this form
+  # so the agent can't slip past via env-vars, pipes, or wrapper aliases.
+  local canonical
+  canonical=$(_canonicalize "$cmd")
 
   # --- Direct test tool denial ---
   # Block direct invocations of test tools without gate-run.sh wrapper.
   # Only bypass when the command is going through gate-run.sh itself.
   if ! echo "$cmd" | grep -qE 'gate-run\.sh'; then
-    if echo "$stripped" | grep -qE '^(exec )?(vitest|npx vitest|pnpm vitest|pnpm exec vitest|yarn vitest|jest|npx jest|cypress|npx cypress|pnpm cypress|pnpm exec cypress)(\s|$)'; then
+    if echo "$canonical" | grep -qE '^(exec )?(vitest|npx vitest|pnpm vitest|yarn vitest|jest|npx jest|cypress|npx cypress|pnpm cypress)(\s|$)'; then
       _block "Direct test tool invocation denied. Run tests through gate-run.sh: bash <plugin>/shared-scripts/gate-run.sh <label> <cmd>"
     fi
-    if echo "$stripped" | grep -qE '^(exec )?(tsc|npx tsc|pnpm tsc|pnpm exec tsc)\s+--noEmit'; then
+    if echo "$canonical" | grep -qE '^(exec )?(tsc|npx tsc|pnpm tsc)\s+--noEmit'; then
       _block "Direct tsc --noEmit denied. Run type checks through gate-run.sh: bash <plugin>/shared-scripts/gate-run.sh lint tsc --noEmit"
     fi
   fi
 
   # --- Command-policy enforcement ---
-  # Preferred:  .ralph/command-policy  (sections: [rewrite] [deny] [protect])
+  # Preferred:  .ralph/command-policy  (sections: [rewrite] [deny] [wrap] [protect])
   # Legacy:     .ralph/denied-commands + .ralph/protected-scripts
   # On legacy use, append a one-shot deprecation note to .ralph/errors.log.
-  _enforce_command_policy "$cmd" "$stripped"
+  _enforce_command_policy "$cmd" "$canonical"
 
   # --- Gate-without-write check ---
   if echo "$cmd" | grep -qE 'gate-run\.sh'; then

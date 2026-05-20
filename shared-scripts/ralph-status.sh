@@ -163,7 +163,7 @@ if [[ -f "$task_file_path" ]]; then
     _done=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[x\]' "$_task_file" 2>/dev/null || echo 0)
     if [[ "$_total" -gt 0 ]]; then
       _remaining=$((_total - _done))
-      _pct=$((_done * 100 / _total))
+      _pct=$((_remaining * 100 / _total))
       printf '\n📋 TASKS: %s / %s complete  (%s remaining, %s%%)\n' \
         "$_done" "$_total" "$_remaining" "$_pct"
     fi
@@ -219,6 +219,17 @@ if [[ -f "$activity_log" ]]; then
   if [[ -n "$_last_tokens" ]]; then
     printf '  tokens:    %s\n' "$_last_tokens"
   fi
+fi
+
+# Active signals (breadcrumb files)
+_signals=""
+[[ -f "$ralph_dir/stop-requested" ]] && _signals="stop-requested"
+if [[ -f "$ralph_dir/context-warning-active" ]]; then
+  [[ -n "$_signals" ]] && _signals="$_signals, "
+  _signals="${_signals}context-warning-active"
+fi
+if [[ -n "$_signals" ]]; then
+  printf '  signals:   ⚠️  %s\n' "$_signals"
 fi
 
 # -----------------------------------------------------------------------------

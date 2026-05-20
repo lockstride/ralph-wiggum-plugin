@@ -49,7 +49,7 @@ _run_guard() {
   export RALPH_AGENT_GUARD=1
   run _run_guard Bash "rm -rf .ralph/"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "pwd fallback records gate timestamp without RALPH_WORKSPACE set" {
@@ -68,20 +68,20 @@ _run_guard() {
 @test "blocks rm -rf .ralph/" {
   run _run_guard Bash "rm -rf .ralph/"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("State tampering")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("State tampering")'
 }
 
 @test "blocks rm -r .ralph/gates" {
   run _run_guard Bash "rm -r .ralph/gates"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "blocks find .ralph -delete" {
   run _run_guard Bash "find .ralph -name '*.log' -delete"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 # --- Direct test tool denial ---
@@ -89,20 +89,20 @@ _run_guard() {
 @test "blocks direct vitest invocation" {
   run _run_guard Bash "vitest run"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("gate-run.sh")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("gate-run.sh")'
 }
 
 @test "blocks npx vitest" {
   run _run_guard Bash "npx vitest run tests/"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "blocks tsc --noEmit" {
   run _run_guard Bash "tsc --noEmit"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "allows vitest through gate-run.sh" {
@@ -112,38 +112,38 @@ _run_guard() {
   [ "$status" -eq 0 ]
   # Either empty (allowed) or has gate-ts update
   if [ -n "$output" ]; then
-    ! echo "$output" | jq -e '.result == "block"' 2>/dev/null
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
   fi
 }
 
 @test "blocks exec vitest (0.10.3)" {
   run _run_guard Bash "exec vitest run"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "blocks pnpm vitest" {
   run _run_guard Bash "pnpm vitest run"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "blocks pnpm exec vitest (0.10.3)" {
   run _run_guard Bash "pnpm exec vitest run"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "blocks pnpm exec cypress (0.10.3)" {
   run _run_guard Bash "pnpm exec cypress run"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "blocks pnpm exec tsc --noEmit (0.10.3)" {
   run _run_guard Bash "pnpm exec tsc --noEmit"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "allows bare pnpm test (not in deny list)" {
@@ -158,15 +158,15 @@ _run_guard() {
   export RALPH_PROTECTED_SCRIPTS="pnpm basic-check pnpm all-check"
   run _run_guard Bash "pnpm basic-check | tail -20"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("pipe/redirect")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("pipe/redirect")'
 }
 
 @test "blocks redirect on protected script" {
   export RALPH_PROTECTED_SCRIPTS="pnpm basic-check"
   run _run_guard Bash "pnpm basic-check > /tmp/out.log"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "allows protected script without pipe" {
@@ -190,8 +190,8 @@ _run_guard() {
   echo "0" > "$STATE_DIR/last-write-ts"
   run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("identical output")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("identical output")'
 }
 
 @test "allows gate run after a write" {
@@ -200,7 +200,7 @@ _run_guard() {
   run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
   [ "$status" -eq 0 ]
   if [ -n "$output" ]; then
-    ! echo "$output" | jq -e '.result == "block"' 2>/dev/null
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
   fi
 }
 
@@ -209,7 +209,7 @@ _run_guard() {
   run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
   [ "$status" -eq 0 ]
   if [ -n "$output" ]; then
-    ! echo "$output" | jq -e '.result == "block"' 2>/dev/null
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
   fi
 }
 
@@ -218,20 +218,20 @@ _run_guard() {
 @test "blocks write to .ralph/gates/" {
   run _run_guard Write "$MOCK_WORKSPACE/.ralph/gates/foo.log"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "blocks write to .ralph/activity.log" {
   run _run_guard Edit "$MOCK_WORKSPACE/.ralph/activity.log"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "allows write to .ralph/handoff.md" {
   run _run_guard Write "$MOCK_WORKSPACE/.ralph/handoff.md"
   [ "$status" -eq 0 ]
   if [ -n "$output" ]; then
-    ! echo "$output" | jq -e '.result == "block"' 2>/dev/null
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
   fi
 }
 
@@ -239,7 +239,7 @@ _run_guard() {
   run _run_guard Write "$MOCK_WORKSPACE/.ralph/errors.log"
   [ "$status" -eq 0 ]
   if [ -n "$output" ]; then
-    ! echo "$output" | jq -e '.result == "block"' 2>/dev/null
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
   fi
 }
 
@@ -247,7 +247,7 @@ _run_guard() {
   run _run_guard Write "$MOCK_WORKSPACE/.ralph/guardrails.md"
   [ "$status" -eq 0 ]
   if [ -n "$output" ]; then
-    ! echo "$output" | jq -e '.result == "block"' 2>/dev/null
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
   fi
 }
 
@@ -255,7 +255,7 @@ _run_guard() {
   run _run_guard Write "$MOCK_WORKSPACE/src/app.ts"
   [ "$status" -eq 0 ]
   if [ -n "$output" ]; then
-    ! echo "$output" | jq -e '.result == "block"' 2>/dev/null
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
   fi
 }
 
@@ -275,13 +275,13 @@ _run_guard() {
 @test "blocks vitest even with env prefix" {
   run _run_guard Bash "NODE_ENV=test vitest run"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "blocks cypress with env prefix" {
   run _run_guard Bash "CI=true npx cypress run"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 # --- .ralph/protected-scripts breadcrumb ---
@@ -290,8 +290,8 @@ _run_guard() {
   printf 'pnpm all-check\npnpm basic-check\n' > "$MOCK_WORKSPACE/.ralph/protected-scripts"
   run _run_guard Bash "pnpm all-check | tail -20"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("pipe/redirect")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("pipe/redirect")'
 }
 
 @test "allows bare command listed in .ralph/protected-scripts" {
@@ -305,7 +305,7 @@ _run_guard() {
   printf '# gate commands\npnpm all-check\n\n# lint\npnpm lint:check\n' > "$MOCK_WORKSPACE/.ralph/protected-scripts"
   run _run_guard Bash "pnpm lint:check | grep error"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "protected-scripts file takes precedence over env var" {
@@ -318,7 +318,7 @@ _run_guard() {
   # new-check from file SHOULD be protected
   run _run_guard Bash "pnpm new-check | tail"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "falls back to RALPH_PROTECTED_SCRIPTS env var when no file" {
@@ -326,7 +326,7 @@ _run_guard() {
   export RALPH_PROTECTED_SCRIPTS="pnpm env-check"
   run _run_guard Bash "pnpm env-check | tail"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 # --- .ralph/denied-commands breadcrumb ---
@@ -335,15 +335,15 @@ _run_guard() {
   printf 'pnpm api:test-e2e|Use pnpm api:test-e2e:local instead\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
   run _run_guard Bash "pnpm api:test-e2e"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("local")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("local")'
 }
 
 @test "blocks denied command with trailing args" {
   printf 'pnpm api:test-e2e|Use the local variant\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
   run _run_guard Bash "pnpm api:test-e2e --headed"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "denied command does not block longer command names" {
@@ -357,28 +357,28 @@ _run_guard() {
   printf '# expensive commands\n\npnpm test-e2e|Use pnpm test-e2e:local\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
   run _run_guard Bash "pnpm test-e2e"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "denied command with env prefix is still blocked" {
   printf 'pnpm test-e2e|Use the local variant\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
   run _run_guard Bash "CI=true pnpm test-e2e"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 # --- .ralph/command-policy unified file (0.12.0) ---
 
-@test "command-policy rewrite section blocks with canonical form" {
+@test "command-policy rewrite section passes through with updatedInput (0.12.2)" {
   cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
 [rewrite]
 ^pnpm -w run (.+)\$ | pnpm \1 | no -w workspace flag
 EOF
-  run _run_guard Bash "pnpm -w run basic-check"
+  run _run_guard Bash "pnpm -w run format"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("pnpm basic-check")'
-  echo "$output" | jq -e '.reason | test("no -w workspace flag")'
+  # 0.12.2: rewrite is passthrough — emits updatedInput, not a block.
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "allow"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "pnpm format"'
 }
 
 @test "command-policy deny section blocks exact prefix" {
@@ -388,8 +388,8 @@ pnpm test-e2e | use pnpm test-e2e:local instead
 EOF
   run _run_guard Bash "pnpm test-e2e --headed"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("local")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("local")'
 }
 
 @test "command-policy deny does not block longer command names" {
@@ -412,11 +412,11 @@ EOF
   [ -z "$output" ]
   run _run_guard Bash "pnpm all-check | tail -20"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("pipe/redirect")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("pipe/redirect")'
 }
 
-@test "command-policy applies rewrite before deny" {
+@test "command-policy applies rewrite before deny (0.12.2)" {
   cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
 [rewrite]
 ^pnpm -w run (.+)\$ | pnpm \1 | strip -w flag
@@ -424,13 +424,12 @@ EOF
 [deny]
 pnpm test | denied
 EOF
-  # The -w form should be caught by rewrite, with the canonical 'pnpm test'
-  # surfaced in the message. The deny entry never fires because rewrite
-  # blocks first.
+  # 0.12.2: rewrite is passthrough — the rewritten 'pnpm test' flows into
+  # deny, which blocks it. The agent sees the deny message, not a rewrite.
   run _run_guard Bash "pnpm -w run test"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("strip -w flag")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("denied")'
 }
 
 @test "command-policy ignores comments and section markers" {
@@ -443,7 +442,7 @@ pnpm test-e2e | denied
 EOF
   run _run_guard Bash "pnpm test-e2e"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "command-policy takes precedence over legacy denied-commands" {
@@ -454,18 +453,31 @@ EOF
   printf 'pnpm new-cmd|legacy policy fires\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
   run _run_guard Bash "pnpm new-cmd"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("new policy fires")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("new policy fires")'
 }
 
-# --- 0.12.1: [gate-wrapped] enforcement ---
+# --- 0.12.3: [wrap] auto-wrap enforcement ---
 #
 # These tests drive the agent's known evasion patterns: bare, with args,
 # with pipe/redirect, with env prefix, with `pnpm run`/`pnpm exec`, etc.
-# Every one of them must be blocked. Only the gate-run.sh wrapped form
-# should pass.
+# Every one of them must be transparently rewritten via the hook's
+# `updatedInput` mechanism to the gate-run.sh-wrapped form — no blocks,
+# no retry puzzle. The agent sees its command "just work" and the loop
+# gets its tracking artifacts because the wrapped form is what runs.
+#
+# Also covers backward compat: [gate-wrapped] entries (no label) are
+# accepted and default to label "basic".
 
-setup_gate_wrapped_policy() {
+setup_wrap_policy() {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[wrap]
+pnpm all-check | final
+pnpm basic-check | basic
+EOF
+}
+
+setup_legacy_gate_wrapped_policy() {
   cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
 [gate-wrapped]
 pnpm all-check
@@ -473,133 +485,255 @@ pnpm basic-check
 EOF
 }
 
-@test "[gate-wrapped] blocks bare invocation" {
-  setup_gate_wrapped_policy
+@test "[wrap] auto-wraps bare invocation via updatedInput" {
+  setup_wrap_policy
   run _run_guard Bash "pnpm all-check"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("gate-run.sh")'
-  echo "$output" | jq -e '.reason | test("pnpm all-check")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "allow"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
 }
 
-@test "[gate-wrapped] blocks bare invocation with trailing args" {
-  setup_gate_wrapped_policy
+@test "[wrap] preserves trailing args in rewrite" {
+  setup_wrap_policy
   run _run_guard Bash "pnpm all-check --silent"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check --silent")'
 }
 
-@test "[gate-wrapped] blocks piped invocation" {
-  setup_gate_wrapped_policy
+@test "[wrap] auto-wraps piped invocation (pipe is stripped)" {
+  setup_wrap_policy
   run _run_guard Bash "pnpm all-check | tail -50"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "allow"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
+  # Pipe should not appear in the rewritten command — gate-run.sh bounds output.
+  ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("tail -50")' 2>/dev/null
 }
 
-@test "[gate-wrapped] blocks redirect invocation" {
-  setup_gate_wrapped_policy
+@test "[wrap] auto-wraps redirect invocation (redirect is stripped)" {
+  setup_wrap_policy
   run _run_guard Bash "pnpm all-check > /tmp/out.log"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "allow"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
 }
 
-@test "[gate-wrapped] blocks 2>&1 pipe variant" {
-  setup_gate_wrapped_policy
+@test "[wrap] auto-wraps 2>&1 pipe variant" {
+  setup_wrap_policy
   run _run_guard Bash "pnpm all-check 2>&1 | grep error"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
 }
 
-@test "[gate-wrapped] blocks env-prefixed invocation" {
-  setup_gate_wrapped_policy
+@test "[wrap] auto-wraps env-prefixed invocation" {
+  setup_wrap_policy
   run _run_guard Bash "CI=true pnpm all-check"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
 }
 
-@test "[gate-wrapped] blocks VERBOSE-prefixed invocation" {
-  setup_gate_wrapped_policy
+@test "[wrap] auto-wraps VERBOSE-prefixed invocation" {
+  setup_wrap_policy
   run _run_guard Bash "VERBOSE=1 pnpm all-check"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
 }
 
-@test "[gate-wrapped] blocks 'pnpm run' variant (0.12.1)" {
-  setup_gate_wrapped_policy
+@test "[wrap] auto-wraps 'pnpm run' variant" {
+  setup_wrap_policy
   run _run_guard Bash "pnpm run all-check"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
 }
 
-@test "[gate-wrapped] blocks 'pnpm exec' variant (0.12.1)" {
-  setup_gate_wrapped_policy
+@test "[wrap] auto-wraps 'pnpm exec' variant" {
+  setup_wrap_policy
   run _run_guard Bash "pnpm exec basic-check"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
 }
 
-@test "[gate-wrapped] allows gate-run.sh wrapped invocation" {
-  setup_gate_wrapped_policy
+@test "[wrap] picks correct label per entry" {
+  setup_wrap_policy
+  # basic-check should get label "basic", not "final"
+  run _run_guard Bash "pnpm basic-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
+  ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final")' 2>/dev/null
+}
+
+@test "[wrap] allows already-wrapped gate-run.sh invocation through" {
+  setup_wrap_policy
   run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm basic-check"
   [ "$status" -eq 0 ]
-  # Should not block (gate-without-write may fire on re-run, but a fresh
-  # workspace's last-gate-ts is empty so the first wrapped call passes).
+  # Should not rewrite or block — agent's explicit gate-run.sh is the contract.
   if [ -n "$output" ]; then
-    ! echo "$output" | jq -e '.result == "block"' 2>/dev/null
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+    ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput' 2>/dev/null
   fi
 }
 
-@test "[gate-wrapped] allows non-listed command (no false positives)" {
-  setup_gate_wrapped_policy
+@test "[wrap] does not match non-listed commands" {
+  setup_wrap_policy
   run _run_guard Bash "pnpm format:write"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
 
-@test "[gate-wrapped] does not block on prefix-of-a-longer-name" {
-  setup_gate_wrapped_policy
+@test "[wrap] does not match on prefix-of-a-longer-name" {
+  setup_wrap_policy
   # pnpm all-check-extended is a different (hypothetical) script
   run _run_guard Bash "pnpm all-check-extended"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
 
-@test "[gate-wrapped] message names the canonical command" {
-  setup_gate_wrapped_policy
-  run _run_guard Bash "pnpm run all-check"
-  [ "$status" -eq 0 ]
-  # The message should cite the *prefix* (canonical), not the agent's
-  # `pnpm run` form, so the agent learns the right shape.
-  echo "$output" | jq -e '.reason | test("pnpm all-check")'
-  ! echo "$output" | jq -e '.reason | test("pnpm run all-check")' 2>/dev/null
-}
-
-@test "[gate-wrapped] interacts cleanly with [rewrite] for 'pnpm -w run'" {
+@test "[wrap] defaults to 'basic' label when no label provided" {
   cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
-[rewrite]
-^pnpm -w run (.+)\$ | pnpm \1 | strip -w flag
-
-[gate-wrapped]
-pnpm all-check
-EOF
-  # Rewrite catches first (before gate-wrapped); message names canonical form.
-  run _run_guard Bash "pnpm -w run all-check"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  echo "$output" | jq -e '.reason | test("pnpm all-check")'
-}
-
-@test "[gate-wrapped] applies after [deny] (deny wins on overlap)" {
-  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
-[deny]
-pnpm all-check | hard deny
-
-[gate-wrapped]
+[wrap]
 pnpm all-check
 EOF
   run _run_guard Bash "pnpm all-check"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.result == "block"'
-  # Deny ran first; gate-wrapped never fired.
-  echo "$output" | jq -e '.reason | test("hard deny")'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm all-check")'
+}
+
+@test "[wrap] sanitizes invalid label to 'basic'" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[wrap]
+pnpm all-check | not-a-real-label
+EOF
+  run _run_guard Bash "pnpm all-check"
+  [ "$status" -eq 0 ]
+  # Invalid label silently falls back to "basic" rather than emitting an
+  # invalid gate-run.sh invocation that would fail downstream.
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm all-check")'
+}
+
+@test "[wrap] interacts cleanly with [rewrite] for 'pnpm -w run' (0.12.3)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[rewrite]
+^pnpm -w run (.+)\$ | pnpm \1 | strip -w flag
+
+[wrap]
+pnpm all-check | final
+EOF
+  # 0.12.3: rewrite normalizes to 'pnpm all-check', wrap auto-rewrites to
+  # gate-run.sh-wrapped form. Single emit, agent's command "just works".
+  run _run_guard Bash "pnpm -w run all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "allow"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
+}
+
+@test "[wrap] composes with [rewrite] for 'pnpm nx X' bypass" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[rewrite]
+^pnpm nx (.+)\$ | pnpm \1 | pnpm nx bypasses gate-wrapped enforcement
+
+[wrap]
+pnpm test-unit | basic
+EOF
+  # The original failure mode that motivated 0.12.3: agent uses `pnpm nx
+  # test-unit api` to bypass gate-wrapped. Rewrite normalizes, wrap fires.
+  run _run_guard Bash "pnpm nx test-unit api"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm test-unit api")'
+}
+
+@test "[wrap] [deny] wins on overlap (deny still hard-blocks)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[deny]
+pnpm all-check | hard deny
+
+[wrap]
+pnpm all-check | final
+EOF
+  run _run_guard Bash "pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("hard deny")'
+  # Wrap rewrite must not have fired.
+  ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput' 2>/dev/null
+}
+
+# --- Backward compat for legacy [gate-wrapped] section ---
+
+@test "[gate-wrapped] (legacy) auto-wraps with default 'basic' label" {
+  setup_legacy_gate_wrapped_policy
+  run _run_guard Bash "pnpm all-check"
+  [ "$status" -eq 0 ]
+  # Legacy section has no label — defaults to "basic".
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "allow"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm all-check")'
+}
+
+@test "[gate-wrapped] (legacy) auto-wraps piped invocation" {
+  setup_legacy_gate_wrapped_policy
+  run _run_guard Bash "pnpm basic-check 2>&1 | tail -30"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
+}
+
+# --- 0.12.3: _block uses modern hook response format ---
+#
+# Catches regression to legacy {"result":"block"} output which Claude Code
+# SILENTLY IGNORES — every block was a no-op before this fix.
+
+@test "_block emits hookSpecificOutput format (0.12.3)" {
+  run _run_guard Bash "rm -rf .ralph/"
+  [ "$status" -eq 0 ]
+  # Must use the new schema, not legacy {"result":"block"}
+  echo "$output" | jq -e '.hookSpecificOutput.hookEventName == "PreToolUse"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason != null'
+  # Legacy fields must be absent
+  ! echo "$output" | jq -e '.result' 2>/dev/null
+  ! echo "$output" | jq -e '.reason' 2>/dev/null
+}
+
+@test "_emit_rewrite emits hookSpecificOutput allow + updatedInput (0.12.3)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[rewrite]
+^npx pnpm (.+)\$ | pnpm \1 | use local pnpm
+EOF
+  run _run_guard Bash "npx pnpm format"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.hookEventName == "PreToolUse"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "allow"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "pnpm format"'
+}
+
+# --- 0.12.3: canonicalization closes evasion loopholes generically ---
+#
+# These exercise the canonicalize pipeline end-to-end via the [wrap]
+# rewrite: every form of "pnpm basic-check" the agent might invent must
+# reduce to the same canonical command and produce the same auto-wrap.
+
+@test "canonicalize: env prefix is stripped" {
+  setup_wrap_policy
+  run _run_guard Bash "CI=1 NODE_ENV=test pnpm basic-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
+}
+
+@test "canonicalize: && separator is stripped (only head command matched)" {
+  setup_wrap_policy
+  run _run_guard Bash "pnpm basic-check && echo done"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
+}
+
+@test "canonicalize: semicolon separator is stripped" {
+  setup_wrap_policy
+  run _run_guard Bash "pnpm basic-check ; echo done"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
+}
+
+@test "canonicalize: append redirect >> is stripped" {
+  setup_wrap_policy
+  run _run_guard Bash "pnpm basic-check >> /tmp/out.log"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
 }

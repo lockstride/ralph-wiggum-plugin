@@ -101,10 +101,9 @@ FILE_THRASH_WINDOW_SECONDS="${RALPH_FILE_THRASH_WINDOW_SECONDS:-300}"
 
 get_health_emoji() {
   local tokens=$1
-  local pct=$((tokens * 100 / ROTATE_THRESHOLD))
-  if [[ $pct -lt 60 ]]; then
+  if [[ $tokens -lt $WARN_THRESHOLD ]]; then
     echo "🟢"
-  elif [[ $pct -lt 80 ]]; then
+  elif [[ $tokens -lt $((ROTATE_THRESHOLD * 95 / 100)) ]]; then
     echo "🟡"
   else
     echo "🔴"
