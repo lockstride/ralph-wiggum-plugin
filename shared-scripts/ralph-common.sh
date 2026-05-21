@@ -537,7 +537,9 @@ _capture_loop_baseline() {
   _ws_hash=$(echo -n "$_ws_real" | shasum -a 256 | cut -d' ' -f1)
   local _hook_state="${XDG_STATE_HOME:-$HOME/.local/state}/ralph/$_ws_hash"
   if [[ -d "$_hook_state" ]]; then
-    rm -f "$_hook_state/last-write-ts" "$_hook_state/last-gate-ts"
+    # last-gate-ts.* is the per-label cache (0.13.1+); the bare 'last-gate-ts'
+    # is the pre-0.13.1 form, kept here so upgrades clean it up cleanly.
+    rm -f "$_hook_state/last-write-ts" "$_hook_state/last-gate-ts" "$_hook_state"/last-gate-ts.*
   fi
   # Clean up stale 0.9.x state files that are no longer written or consumed.
   rm -f "$ralph_dir/skill-suggestion" "$ralph_dir/recovery-hint.md" 2>/dev/null || true

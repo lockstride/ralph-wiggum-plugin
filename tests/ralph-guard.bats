@@ -52,14 +52,14 @@ _run_guard() {
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
-@test "pwd fallback records gate timestamp without RALPH_WORKSPACE set" {
+@test "pwd fallback records per-label gate timestamp without RALPH_WORKSPACE set" {
   unset RALPH_WORKSPACE
   echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
-  rm -f "$STATE_DIR/last-gate-ts"
+  rm -f "$STATE_DIR"/last-gate-ts*
   _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
-  [ -f "$STATE_DIR/last-gate-ts" ]
+  [ -f "$STATE_DIR/last-gate-ts.basic" ]
   local ts
-  ts=$(cat "$STATE_DIR/last-gate-ts")
+  ts=$(cat "$STATE_DIR/last-gate-ts.basic")
   [[ "$ts" =~ ^[0-9]+$ ]]
 }
 
@@ -185,8 +185,8 @@ _run_guard() {
 
 # --- Gate-without-write check ---
 
-@test "blocks gate re-run with no write since last gate" {
-  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts"
+@test "blocks gate re-run with no write since last same-label gate (0.13.1)" {
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.basic"
   echo "0" > "$STATE_DIR/last-write-ts"
   run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
   [ "$status" -eq 0 ]
@@ -194,8 +194,8 @@ _run_guard() {
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("identical output")'
 }
 
-@test "allows gate run after a write" {
-  echo "1" > "$STATE_DIR/last-gate-ts"
+@test "allows gate run after a write (same label)" {
+  echo "1" > "$STATE_DIR/last-gate-ts.basic"
   echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
   run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
   [ "$status" -eq 0 ]
@@ -204,13 +204,36 @@ _run_guard() {
   fi
 }
 
-@test "allows first gate run (no prior gate timestamp)" {
-  rm -f "$STATE_DIR/last-gate-ts"
+@test "allows first gate run (no prior same-label gate timestamp)" {
+  rm -f "$STATE_DIR"/last-gate-ts*
   run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
   [ "$status" -eq 0 ]
   if [ -n "$output" ]; then
     ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
   fi
+}
+
+@test "allows different-label gate after another label ran (0.13.1)" {
+  # Regression: pre-0.13.1, a successful 'basic' blocked a subsequent 'final'
+  # because the gate cache was global, not per-label. [risky] tasks need
+  # 'final' after the standard flow, so this is the load-bearing fix.
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.basic"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  rm -f "$STATE_DIR/last-gate-ts.final"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh final pnpm all-check"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "deny message names the specific label that was cached (0.13.1)" {
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.final"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh final pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e ".hookSpecificOutput.permissionDecisionReason | test(\"Gate 'final'\")"
 }
 
 # --- Write/Edit forbidden-path denial ---

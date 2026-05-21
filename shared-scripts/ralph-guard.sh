@@ -68,7 +68,8 @@ STATE_DIR="$STATE_BASE/$(_workspace_hash)"
 mkdir -p "$STATE_DIR"
 
 LAST_WRITE_TS="$STATE_DIR/last-write-ts"
-LAST_GATE_TS="$STATE_DIR/last-gate-ts"
+# Per-label gate timestamps live at "$STATE_DIR/last-gate-ts.<label>"
+# (different gates run different commands, so the cache must be per-label).
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -595,21 +596,26 @@ _guard_bash() {
   # On legacy use, append a one-shot deprecation note to .ralph/errors.log.
   _enforce_command_policy "$cmd" "$canonical"
 
-  # --- Gate-without-write check ---
+  # --- Gate-without-write check (per-label) ---
+  # Different gates run different commands (basic ≠ final ≠ e2e ≠ lint), so
+  # a successful 'basic' does NOT make a subsequent 'final' redundant — the
+  # cache must be tracked per label, not globally. (Without this, [risky]
+  # tasks that need 'final' after 'basic' get incorrectly blocked.)
   if echo "$cmd" | grep -qE 'gate-run\.sh'; then
+    local label
+    label=$(echo "$cmd" | grep -oE 'gate-run\.sh\s+(basic|final|e2e|lint|custom)' | awk '{print $2}') || label="unknown"
+
+    local last_gate_ts_file="$STATE_DIR/last-gate-ts.$label"
     local last_write last_gate
     last_write=$(_read_ts "$LAST_WRITE_TS")
-    last_gate=$(_read_ts "$LAST_GATE_TS")
+    last_gate=$(_read_ts "$last_gate_ts_file")
 
     if [[ "$last_gate" -gt 0 ]] && [[ "$last_gate" -ge "$last_write" ]]; then
-      # Extract the label from the gate-run.sh invocation for a better message
-      local label
-      label=$(echo "$cmd" | grep -oE 'gate-run\.sh\s+(basic|final|e2e|lint|custom)' | awk '{print $2}') || label="unknown"
-      _block "Gate already ran since last code write — output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: edit code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose."
+      _block "Gate '${label}' already ran since last code write — output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: edit code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose. (Other gate labels can still run — this cache is per-label.)"
     fi
 
-    # Record the gate invocation timestamp
-    _write_ts "$LAST_GATE_TS"
+    # Record the per-label gate invocation timestamp
+    _write_ts "$last_gate_ts_file"
   fi
 }
 
