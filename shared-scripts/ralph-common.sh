@@ -679,6 +679,68 @@ _check_orphan_leak() {
 # lives at <workspace>/.ralph-postmortems/<ISO-timestamp>-<reason>.tar.gz and
 # contains the most important .ralph/ state files plus a snapshot of recent
 # git activity. Host projects should gitignore .ralph-postmortems/.
+# 0.12.4: Auto-enrich handoff.md with mechanically-derivable state.
+#
+# Motivation: in practice, the agent rarely writes a "Working set" section
+# before yielding — ROTATE/TURN_END force-kills don't give it a chance,
+# and even on graceful yield it's easy to forget. The next session then
+# boots blind, with only the bare TURN_END template (failing gate name)
+# or a stale handoff from many loops ago.
+#
+# This appends an "## Auto-enriched state" section with three derivable
+# facts: last commit, last task marked [x], next unchecked task. These
+# are mechanically extracted from git + tasks.md, so the next session
+# always has minimal carry-over context even with zero agent cooperation.
+#
+# Idempotent: if the section already exists, it's replaced (we don't
+# pile up duplicate sections across loops).
+_auto_enrich_handoff() {
+  local workspace="$1"
+  local handoff="$workspace/.ralph/handoff.md"
+  [[ -f "$handoff" ]] || touch "$handoff"
+
+  local last_commit=""
+  if [[ -d "$workspace/.git" ]] || (cd "$workspace" 2>/dev/null && git rev-parse --git-dir >/dev/null 2>&1); then
+    last_commit=$(cd "$workspace" && git log -1 --format='%h %s' 2>/dev/null || true)
+  fi
+
+  local task_file last_done="" next_unchecked=""
+  task_file=$(_resolve_task_file "$workspace")
+  if [[ -n "$task_file" ]] && [[ -f "$task_file" ]]; then
+    last_done=$(grep -E '^- \[x\] ' "$task_file" 2>/dev/null | tail -1 | sed -E 's/^- \[x\] //' | cut -c1-100 || true)
+    next_unchecked=$(grep -E '^- \[ \] ' "$task_file" 2>/dev/null | head -1 | sed -E 's/^- \[ \] //' | cut -c1-100 || true)
+  fi
+
+  # No useful state — nothing to append.
+  if [[ -z "$last_commit" ]] && [[ -z "$last_done" ]] && [[ -z "$next_unchecked" ]]; then
+    return 0
+  fi
+
+  # Strip any existing "## Auto-enriched state" section so we don't pile up.
+  if grep -q '^## Auto-enriched state' "$handoff" 2>/dev/null; then
+    local tmp
+    tmp=$(mktemp) || return 0
+    awk '
+      /^## Auto-enriched state[[:space:]]*$/ { in_section=1; next }
+      in_section && /^## / { in_section=0 }
+      !in_section { print }
+    ' "$handoff" >"$tmp" && mv "$tmp" "$handoff"
+  fi
+
+  # Append the freshly-computed section. The trailing `:` ensures the block
+  # returns 0 even when one or more of the conditional echoes are skipped
+  # (otherwise `[[ -n "" ]] && echo` evaluates false and `set -e` aborts).
+  {
+    echo ""
+    echo "## Auto-enriched state"
+    echo ""
+    [[ -n "$last_commit" ]] && echo "**Last commit**: \`$last_commit\`"
+    [[ -n "$last_done" ]] && echo "**Last task done**: $last_done"
+    [[ -n "$next_unchecked" ]] && echo "**Next unchecked**: $next_unchecked"
+    :
+  } >>"$handoff"
+}
+
 _write_postmortem() {
   local workspace="$1"
   local reason="${2:-unknown}"
@@ -1126,6 +1188,10 @@ run_loop() {
         [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "🔄 Context rotation triggered — stopping agent..." >&2
         kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+        # 0.12.4: append mechanical state to handoff.md so the next session
+        # has carry-over context even when the agent didn't write a Working set
+        # before being force-killed.
+        _auto_enrich_handoff "$workspace" 2>/dev/null || true
         signal="ROTATE"
         break
         ;;
@@ -1647,6 +1713,11 @@ run_ralph_loop() {
           # carried in the inlined handoff block (stream-parser writes the
           # ## Last gate state section from gate-run.sh's summary file).
         fi
+        # 0.12.4: append mechanical state (last commit, last [x], next unchecked)
+        # so the next session has carry-over context. The template overwrote
+        # any agent-written sections, so this is the only carry-over the
+        # next session will see.
+        _auto_enrich_handoff "$workspace" 2>/dev/null || true
         log_progress "$workspace" "**Loop $loop_label ended** — 🛑 TURN_END"
         echo "🛑 Turn ended — rotating to fresh context..."
         stall_count=0

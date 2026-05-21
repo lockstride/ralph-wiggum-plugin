@@ -535,3 +535,51 @@ PROMPT
   # hash component is empty in the stored value), so the STALE marker fires.
   grep -q "PROMPT ⚠️ STALE: adaptation guide changed" "$MOCK_WORKSPACE/.ralph/activity.log"
 }
+
+# =============================================================================
+# _ensure_breadcrumb_checks — validator/injector (0.12.4)
+# =============================================================================
+# Closes the regression observed in 0.12.3 where the Sonnet generator
+# paraphrased away the .ralph/context-warning-active check, leaving the
+# agent unable to yield gracefully on context warnings.
+
+@test "_ensure_breadcrumb_checks: passes through when both breadcrumbs present (0.12.4)" {
+  local input="Do work then check .ralph/stop-requested and .ralph/context-warning-active."
+  local output
+  output=$(_ensure_breadcrumb_checks "$input")
+  [ "$output" = "$input" ]
+}
+
+@test "_ensure_breadcrumb_checks: injects addendum when stop-requested missing (0.12.4)" {
+  local input="Do work then check .ralph/context-warning-active."
+  local output
+  output=$(_ensure_breadcrumb_checks "$input")
+  echo "$output" | grep -q "auto-injected safety addendum"
+  echo "$output" | grep -q '`.ralph/stop-requested`'
+}
+
+@test "_ensure_breadcrumb_checks: injects addendum when context-warning-active missing (0.12.4)" {
+  local input="Do work then check .ralph/stop-requested."
+  local output
+  output=$(_ensure_breadcrumb_checks "$input")
+  echo "$output" | grep -q "auto-injected safety addendum"
+  echo "$output" | grep -q '`.ralph/context-warning-active`'
+}
+
+@test "_ensure_breadcrumb_checks: injects addendum when both missing (0.12.4)" {
+  local input="Generic prompt with no breadcrumb references at all."
+  local output
+  output=$(_ensure_breadcrumb_checks "$input")
+  echo "$output" | grep -q "auto-injected safety addendum"
+  echo "$output" | grep -q '`.ralph/stop-requested`'
+  echo "$output" | grep -q '`.ralph/context-warning-active`'
+}
+
+@test "_ensure_breadcrumb_checks: preserves original text when injecting (0.12.4)" {
+  local input="UNIQUE_SENTINEL_TEXT_12345 and nothing else."
+  local output
+  output=$(_ensure_breadcrumb_checks "$input")
+  echo "$output" | grep -q "UNIQUE_SENTINEL_TEXT_12345"
+  # And the addendum is also present.
+  echo "$output" | grep -q "auto-injected safety addendum"
+}

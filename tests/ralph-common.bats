@@ -1009,6 +1009,131 @@ EOF
 }
 
 # =============================================================================
+# agent_build_cmd — plugin-dir self-registration (0.12.4)
+# =============================================================================
+# Critical bug fix: prior to 0.12.4, agent_build_cmd launched `claude -p`
+# without `--plugin-dir` for this plugin, so our PreToolUse hook never
+# registered and the entire guard/wrap/deny machinery was dead code in
+# production. These tests pin the regression closed.
+
+@test "agent_build_cmd adds --plugin-dir for ralph-wiggum-plugin (0.12.4)" {
+  local cmd
+  cmd=$(agent_build_cmd claude "sonnet" "hello")
+  # The plugin root must appear as a --plugin-dir arg so `claude -p`
+  # loads our hooks.json. Without this, [wrap]/[deny]/[rewrite]/[protect]
+  # are all silently no-ops.
+  echo "$cmd" | grep -q -- "--plugin-dir '[^']*ralph-wiggum-plugin[^']*'"
+}
+
+@test "agent_build_cmd's --plugin-dir appears before --resume (0.12.4)" {
+  local cmd
+  cmd=$(agent_build_cmd claude "sonnet" "hello" "session-abc")
+  # Argument ordering: --plugin-dir must come before --resume so claude
+  # parses them in the expected order (matches the in-code order).
+  local plugin_pos resume_pos
+  plugin_pos=$(echo "$cmd" | grep -bo -- "--plugin-dir" | head -1 | cut -d: -f1)
+  resume_pos=$(echo "$cmd" | grep -bo -- "--resume" | head -1 | cut -d: -f1)
+  [ "$plugin_pos" -lt "$resume_pos" ]
+}
+
+@test "agent_build_cmd's plugin-dir still works with RALPH_EXTRA_PLUGIN_DIRS (0.12.4)" {
+  local cmd
+  RALPH_EXTRA_PLUGIN_DIRS="/tmp/extra1:/tmp/extra2" \
+    cmd=$(agent_build_cmd claude "sonnet" "hello")
+  # All three plugin-dirs must be present: ours + the two extras.
+  local count
+  count=$(echo "$cmd" | grep -o -- "--plugin-dir" | wc -l | tr -d ' ')
+  [ "$count" = "3" ]
+}
+
+# =============================================================================
+# _auto_enrich_handoff — mechanical state appending (0.12.4)
+# =============================================================================
+# Closes the gap where the agent gets force-killed before writing its
+# Working set, leaving the next session blind. We extract last commit,
+# last [x] task, and next unchecked task from git+tasks.md so even on
+# force-kill the handoff has carry-over context.
+
+@test "_auto_enrich_handoff: appends last commit, last done, next unchecked (0.12.4)" {
+  create_mock_spec "test-spec"
+  # Mark one task done, leave another unchecked.
+  cat > "$MOCK_SPEC_DIR/tasks.md" <<'TASKS'
+# Tasks
+- [x] T001 First task done
+- [ ] T002 Second task pending
+TASKS
+  (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "feat(scope): T001 first task complete")
+  echo "$MOCK_SPEC_DIR/tasks.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+  # Pre-existing minimal handoff.
+  echo "## Existing content" > "$MOCK_WORKSPACE/.ralph/handoff.md"
+
+  _auto_enrich_handoff "$MOCK_WORKSPACE"
+
+  grep -q "## Auto-enriched state" "$MOCK_WORKSPACE/.ralph/handoff.md"
+  grep -qE 'Last commit.*T001 first task complete' "$MOCK_WORKSPACE/.ralph/handoff.md"
+  grep -qE 'Last task done.*T001' "$MOCK_WORKSPACE/.ralph/handoff.md"
+  grep -qE 'Next unchecked.*T002' "$MOCK_WORKSPACE/.ralph/handoff.md"
+  # Existing content must be preserved.
+  grep -q "## Existing content" "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+@test "_auto_enrich_handoff: idempotent — replaces existing section (0.12.4)" {
+  create_mock_spec "test-spec"
+  cat > "$MOCK_SPEC_DIR/tasks.md" <<'TASKS'
+- [x] T010 Old finished task
+- [ ] T011 Next
+TASKS
+  (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "feat: T010 done")
+  echo "$MOCK_SPEC_DIR/tasks.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+  echo "## Existing" > "$MOCK_WORKSPACE/.ralph/handoff.md"
+
+  # First enrich.
+  _auto_enrich_handoff "$MOCK_WORKSPACE"
+  # Now mark T011 done, add T012 unchecked.
+  cat > "$MOCK_SPEC_DIR/tasks.md" <<'TASKS'
+- [x] T010 Old finished task
+- [x] T011 Now done too
+- [ ] T012 Newest pending
+TASKS
+  (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "feat: T011 done")
+  # Second enrich — must REPLACE, not duplicate.
+  _auto_enrich_handoff "$MOCK_WORKSPACE"
+
+  local section_count
+  section_count=$(grep -c "^## Auto-enriched state" "$MOCK_WORKSPACE/.ralph/handoff.md")
+  [ "$section_count" = "1" ]
+  grep -qE 'Last task done.*T011' "$MOCK_WORKSPACE/.ralph/handoff.md"
+  grep -qE 'Next unchecked.*T012' "$MOCK_WORKSPACE/.ralph/handoff.md"
+  # T010 must NOT appear in the freshly-replaced section.
+  ! grep -qE 'Last task done.*T010' "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+@test "_auto_enrich_handoff: no-op when no commits and no tasks (0.12.4)" {
+  # Fresh workspace: only the init commit, no task file resolvable.
+  echo "## Pristine" > "$MOCK_WORKSPACE/.ralph/handoff.md"
+  _auto_enrich_handoff "$MOCK_WORKSPACE"
+  # The init commit IS a commit, so the section may appear with just Last commit.
+  # We just verify the function doesn't error or destroy existing content.
+  grep -q "## Pristine" "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+@test "_auto_enrich_handoff: creates handoff.md if absent (0.12.4)" {
+  create_mock_spec "test-spec"
+  cat > "$MOCK_SPEC_DIR/tasks.md" <<'TASKS'
+- [x] T020 Done
+- [ ] T021 Pending
+TASKS
+  (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "feat: T020 done")
+  echo "$MOCK_SPEC_DIR/tasks.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+  rm -f "$MOCK_WORKSPACE/.ralph/handoff.md"
+
+  _auto_enrich_handoff "$MOCK_WORKSPACE"
+
+  [ -f "$MOCK_WORKSPACE/.ralph/handoff.md" ]
+  grep -q "## Auto-enriched state" "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+# =============================================================================
 # rotate/warn thresholds — 0.12.2 bump
 # =============================================================================
 

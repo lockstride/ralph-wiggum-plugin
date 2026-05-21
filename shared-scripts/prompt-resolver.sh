@@ -216,6 +216,48 @@ resolve_prompt_file() {
   _write_effective_prompt "$workspace" "$(cat "$path")" "true"
 }
 
+# 0.12.4: Belt-and-suspenders against generator regressions.
+#
+# The Sonnet "low effort" generator empirically paraphrases away the two
+# breadcrumb checks the loop relies on for graceful yields (observed in
+# 0.12.3 — context-warning-active was silently dropped from the per-task
+# flow, causing the agent to blow past every soft warning and forcing
+# every rotation to be a hard force-kill at 100% budget).
+#
+# If either canonical breadcrumb is missing from the generated prompt,
+# append a forced addendum so the agent always has the instruction.
+# Net cost: 12 extra lines if injected; no-op if the generator did its
+# job. The addendum is appended verbatim — no LLM in this path.
+#
+# Args: $1 — generated prompt text (multi-line)
+# Outputs: original text if both breadcrumbs present, else original + addendum
+_ensure_breadcrumb_checks() {
+  local text="$1"
+  local has_stop=0 has_warn=0
+  echo "$text" | grep -q '\.ralph/stop-requested' && has_stop=1
+  echo "$text" | grep -q '\.ralph/context-warning-active' && has_warn=1
+  if [[ $has_stop -eq 1 ]] && [[ $has_warn -eq 1 ]]; then
+    printf '%s' "$text"
+    return 0
+  fi
+  # shellcheck disable=SC2016  # backticks inside the addendum are intentional markdown, not expansion
+  printf '%s\n\n%s' "$text" '## After every commit (auto-injected safety addendum — 0.12.4)
+
+The generator-paraphrased flow above is missing one or both breadcrumb
+checks. After EVERY commit, before reading the next task, check these
+two files in order. If EITHER exists, write `.ralph/handoff.md` and
+yield — STOP the turn. Do NOT start another task.
+
+1. `.ralph/stop-requested` — operator asked the loop to wind down.
+2. `.ralph/context-warning-active` — context budget is in the warning
+   band; the loop will force-rotate at the hard limit shortly. Yielding
+   now lets the next agent start with a fresh budget instead of getting
+   killed mid-task.
+
+If neither file exists, your next tool call is the read of the next
+unchecked task. No summary, no turn-end.'
+}
+
 # Generate a loop-adapted prompt from the speckit-implement skill using the
 # adaptation guide. Writes the result + hash to the spec directory
 # and commits both files.
@@ -273,6 +315,14 @@ section structure, and level of detail.
 Output ONLY the adapted prompt content (markdown). Do not include any preamble,
 explanation, or commentary. Keep the output under 50 lines. Preserve all
 {{PLACEHOLDER}} variables exactly as written — they will be substituted later.
+
+CRITICAL — preserve VERBATIM (do not paraphrase, summarize, or omit):
+- The instruction to check \`.ralph/stop-requested\` after every commit.
+- The instruction to check \`.ralph/context-warning-active\` after every commit.
+- The "if either file exists, write handoff and yield, DO NOT start another task" guidance.
+
+These are not stylistic — the agent will not yield gracefully without them,
+and the loop will spend an entire context budget on each force-rotate.
 GENPROMPT
   )
 
@@ -313,6 +363,15 @@ GENPROMPT
   # protocols. Warn if the generated prompt drifts back over 75 lines.
   if [[ $line_count -gt 75 ]]; then
     echo "  ⚠️  Generated prompt is $line_count lines (target: ≤50)" >&2
+  fi
+
+  # 0.12.4: validate/inject breadcrumb checks (see _ensure_breadcrumb_checks).
+  if ! echo "$generated" | grep -q '\.ralph/stop-requested' ||
+    ! echo "$generated" | grep -q '\.ralph/context-warning-active'; then
+    _pr_log "$workspace" "PROMPT ⚠️ generator dropped breadcrumb checks — injecting addendum"
+    echo "  ⚠️  Generator dropped breadcrumb checks — injecting safety addendum" >&2
+    generated=$(_ensure_breadcrumb_checks "$generated")
+    line_count=$(echo "$generated" | wc -l | tr -d ' ')
   fi
 
   # Write the generated prompt and hash

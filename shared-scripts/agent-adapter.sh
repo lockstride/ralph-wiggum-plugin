@@ -27,6 +27,13 @@
 
 set -euo pipefail
 
+# Plugin root — used to register this plugin's PreToolUse / Stop hooks
+# with the spawned `claude -p` subprocess. Without `--plugin-dir` for
+# our own root, `claude -p` ignores the user's enabled-plugins config
+# and our hooks never load — every [wrap], [rewrite], [deny], [protect]
+# rule silently becomes a no-op. (0.12.4 fix.)
+RALPH_PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || RALPH_PLUGIN_ROOT=""
+
 # Normalize CLI name (accept a few common spellings)
 agent_normalize_cli_name() {
   local cli="$1"
@@ -106,6 +113,17 @@ agent_build_cmd() {
       # with an invalid credential, causing 401. Unset both so the CLI falls
       # back to the logged-in OAuth session.
       local cmd="unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL; RALPH_AGENT_GUARD=1 claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model '$esc_model'"
+      # 0.12.4: register THIS plugin so `claude -p` actually loads our
+      # PreToolUse hook (ralph-guard.sh) and Stop hook (handoff-check.sh).
+      # Without this, every guard / wrap / deny / protect rule is dead
+      # code in production — `claude -p` only honors plugins it's
+      # explicitly told about, unlike interactive `claude` which reads
+      # the user's enabled-plugins config.
+      if [[ -n "$RALPH_PLUGIN_ROOT" ]]; then
+        local esc_plugin_root
+        esc_plugin_root=$(printf '%s' "$RALPH_PLUGIN_ROOT" | sed "$sq_esc")
+        cmd="$cmd --plugin-dir '$esc_plugin_root'"
+      fi
       # 0.6.0: optional extra plugin-dirs for browser-flow / UI debugging.
       # RALPH_EXTRA_PLUGIN_DIRS is a colon-separated list (RALPH_SETUP detects
       # Playwright at startup and populates this; users may override). Empty

@@ -511,3 +511,70 @@ HOFF
   [ ! -f "$MOCK_WORKSPACE/.ralph/handoff.md" ]
 }
 
+# =============================================================================
+# Gate-label extraction — canonical-only regex (0.12.4)
+# =============================================================================
+# Bug: the prior regex `gate-run\.sh[[:space:]]+[A-Za-z0-9_-]+` greedily
+# captured `2` from `gate-run.sh 2>&1 | tail -40` and wrote `label: 2`
+# into handoff.md. Fix: anchor to canonical labels only.
+
+@test "gate-label extraction ignores '2>&1' as a label (0.12.4)" {
+  cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<'HOFF'
+# Loop Handoff
+
+## Last gate state
+
+(unchanged sentinel)
+
+## Working set
+
+Active task: T099
+HOFF
+  local events=""
+  # Malformed invocation: agent typed `bash gate-run.sh 2>&1 | tail` —
+  # there's no real label, just an stderr redirect. The handoff section
+  # MUST be left alone.
+  events+=$(tool_result_json "Shell" 50 5 0 "" "bash /plugin/shared-scripts/gate-run.sh 2>&1 | tail -40")
+  run_parser "$events" >/dev/null
+
+  # The unchanged sentinel must still be there — no false rewrite.
+  grep -q "unchanged sentinel" "$MOCK_WORKSPACE/.ralph/handoff.md"
+  # And we must NOT have written `label: 2`.
+  ! grep -q "label: 2" "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+@test "gate-label extraction ignores non-canonical labels (0.12.4)" {
+  cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<'HOFF'
+# Loop Handoff
+
+## Last gate state
+
+(unchanged sentinel)
+HOFF
+  local events=""
+  # Agent typed `gate-run.sh all` (typo — `all` is not a canonical
+  # label). Should be ignored, not persisted as `label: all`.
+  events+=$(tool_result_json "Shell" 50 5 1 "" "bash /plugin/shared-scripts/gate-run.sh all pnpm all-check")
+  run_parser "$events" >/dev/null
+
+  grep -q "unchanged sentinel" "$MOCK_WORKSPACE/.ralph/handoff.md"
+  ! grep -q "label: all" "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+@test "gate-label extraction accepts each canonical label (0.12.4)" {
+  for label in basic final e2e lint custom; do
+    cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<HOFF
+# Loop Handoff
+
+## Last gate state
+
+(none yet)
+HOFF
+    local events=""
+    events+=$(tool_result_json "Shell" 50 5 0 "" "bash /plugin/shared-scripts/gate-run.sh $label pnpm test")
+    run_parser "$events" >/dev/null
+    grep -q "label: $label" "$MOCK_WORKSPACE/.ralph/handoff.md" \
+      || { echo "Expected 'label: $label' in handoff but didn't find it"; return 1; }
+  done
+}
+

@@ -348,24 +348,15 @@ _apply_protect() {
 # emits it via _emit_rewrite after all checks pass.
 _WRAP_REWRITE=""
 
-_apply_wrap() {
-  # $1 = original command (raw, for gate-run.sh detection)
-  # $2 = canonical command (env/pipe/pnpm-normalized) for matching AND wrapping
-  # $3 = wrap file
-  local cmd="$1" canonical="$2" wrfile="$3"
-  _WRAP_REWRITE=""
-  [[ -s "$wrfile" ]] || return 0
-
-  # Already wrapped — nothing to do. The agent's deliberate invocation of
-  # gate-run.sh is the contract being satisfied.
-  if echo "$cmd" | grep -qE 'gate-run\.sh'; then
-    return 0
-  fi
-
-  # If we can't resolve PLUGIN_ROOT, fall back to a relative path. This
-  # would only happen if BASH_SOURCE resolution failed during sourcing.
+# 0.12.4: Try to match a single segment of the canonical form against the
+# given wrap rules. Returns 0 with _WRAP_REWRITE set on match, or 1 on
+# no match. Extracted from _apply_wrap so it can be reused by the
+# compound-chain fallback below.
+_try_match_wrap_segment() {
+  # $1 = canonical segment to match (already env/pipe/pnpm-normalized)
+  # $2 = wrap file
+  local segment="$1" wrfile="$2"
   local gate_run_path="${PLUGIN_ROOT:-..}/shared-scripts/gate-run.sh"
-
   local rule prefix label
   while IFS= read -r rule || [[ -n "$rule" ]]; do
     [[ -z "$rule" ]] && continue
@@ -383,11 +374,57 @@ _apply_wrap() {
       basic | final | e2e | lint | custom) ;;
       *) label="basic" ;;
     esac
-    if [[ "$canonical" == "$prefix" || "$canonical" == "$prefix "* ]]; then
-      _WRAP_REWRITE="bash $gate_run_path $label $canonical"
+    if [[ "$segment" == "$prefix" || "$segment" == "$prefix "* ]]; then
+      _WRAP_REWRITE="bash $gate_run_path $label $segment"
       return 0
     fi
   done <"$wrfile"
+  return 1
+}
+
+_apply_wrap() {
+  # $1 = original command (raw, for gate-run.sh detection + chain splitting)
+  # $2 = canonical command (env/pipe/pnpm-normalized) for matching AND wrapping
+  # $3 = wrap file
+  local cmd="$1" canonical="$2" wrfile="$3"
+  _WRAP_REWRITE=""
+  [[ -s "$wrfile" ]] || return 0
+
+  # Already wrapped — nothing to do. The agent's deliberate invocation of
+  # gate-run.sh is the contract being satisfied.
+  if echo "$cmd" | grep -qE 'gate-run\.sh'; then
+    return 0
+  fi
+
+  # Step 1: try the simple canonical form (head segment of any chain).
+  if _try_match_wrap_segment "$canonical" "$wrfile"; then
+    return 0
+  fi
+
+  # Step 2 (0.12.4): if the original command is a compound chain
+  # (`pnpm format:write && pnpm lint:check && pnpm test-coverage`), the
+  # canonical form only captures the FIRST segment — later segments that
+  # might match a [wrap] rule are invisible to the simple match above.
+  # Split on `&&`/`||`/`;`, canonicalize each segment independently, and
+  # try matching. On match, the WHOLE chain is replaced by the gate-wrap
+  # of just that segment: the format:write/lint:check prefix is dropped
+  # because basic-check/all-check already runs those steps internally.
+  # This closes the most common bypass — chained "warm-up" commands
+  # leading to a gated target.
+  if echo "$cmd" | grep -qE '(&&|\|\||;)'; then
+    local IFS=$'\n'
+    local segment seg_canonical
+    # shellcheck disable=SC2046  # intentional word splitting on newlines
+    for segment in $(printf '%s' "$cmd" | sed -E 's/[[:space:]]*(&&|\|\||;)[[:space:]]*/\n/g'); do
+      segment=$(printf '%s' "$segment" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+      [[ -z "$segment" ]] && continue
+      seg_canonical=$(_canonicalize "$segment")
+      [[ -z "$seg_canonical" ]] && continue
+      if _try_match_wrap_segment "$seg_canonical" "$wrfile"; then
+        return 0
+      fi
+    done
+  fi
   return 0
 }
 
@@ -448,6 +485,13 @@ _enforce_command_policy() {
   [[ -n "$rwfile" ]] && _apply_rewrites "$canonical" "$rwfile"
   if [[ -n "$_REWRITE_CANONICAL" ]]; then
     canonical="$_REWRITE_CANONICAL"
+    # 0.12.4: re-normalize pnpm wrappers after rewrite. A rule like
+    # `^pnpm nx (.+)$ | pnpm \1` turns `pnpm nx run api:test-coverage`
+    # into `pnpm run api:test-coverage` — without a second pnpm-normalize
+    # pass, that wouldn't match `pnpm api:test-coverage` in [wrap] and
+    # would slip through. Re-running normalize closes the loop.
+    canonical=$(_normalize_pnpm "$canonical")
+    _REWRITE_CANONICAL="$canonical"
   fi
   [[ -n "$dnfile" ]] && _apply_deny "$canonical" "$dnfile"
   [[ -n "$wrfile" ]] && _apply_wrap "$cmd" "$canonical" "$wrfile"

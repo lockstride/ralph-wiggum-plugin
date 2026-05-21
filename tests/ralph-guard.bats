@@ -737,3 +737,90 @@ EOF
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
 }
+
+# =============================================================================
+# 0.12.4: compound-chain wrap matching
+# =============================================================================
+# Bypass closed: an && / ; / || chain where a non-wrapped warm-up command
+# precedes a wrapped target. Previously the head was matched and the wrap
+# target was invisible. Now we split, canonicalize each segment, and rewrap
+# to gate-run.sh on the wrap-target segment alone (dropping the prefix).
+
+@test "compound chain: pnpm format:write && pnpm test-coverage rewraps to test-coverage (0.12.4)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[wrap]
+pnpm test-coverage | basic
+EOF
+  run _run_guard Bash "pnpm format:write && pnpm lint:check && pnpm test-coverage 2>&1 | tail -20"
+  [ "$status" -eq 0 ]
+  # The whole chain should be replaced by a clean gate-wrap of just the wrap-target segment.
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm test-coverage")'
+  # The format:write/lint:check prefix should NOT appear in the rewritten command.
+  ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("format:write")'
+}
+
+@test "compound chain: cd <dir> && pnpm all-check rewraps to all-check (0.12.4)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[wrap]
+pnpm all-check | final
+EOF
+  run _run_guard Bash "cd /tmp/somewhere && pnpm all-check 2>&1 | tail -20"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
+}
+
+@test "compound chain: semicolon-separated chain still detects wrap target (0.12.4)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[wrap]
+pnpm test-unit | basic
+EOF
+  run _run_guard Bash "pnpm format:write ; pnpm test-unit"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm test-unit")'
+}
+
+@test "compound chain: chain without any wrap target falls through (0.12.4)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[wrap]
+pnpm test-unit | basic
+EOF
+  # No segment matches [wrap] — should just allow without rewrite.
+  run _run_guard Bash "pnpm format:write && pnpm lint:check"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput' 2>/dev/null
+}
+
+# =============================================================================
+# 0.12.4: pnpm exec nx → wrap target via post-rewrite normalization
+# =============================================================================
+# Bypass closed: `pnpm exec nx run api:test-coverage` previously canonicalized
+# to `pnpm nx run api:test-coverage`, then [rewrite] produced
+# `pnpm run api:test-coverage` — but that wasn't re-normalized to
+# `pnpm api:test-coverage`, so it slipped past [wrap]. The fix adds a
+# second _normalize_pnpm pass after _apply_rewrites.
+
+@test "pnpm exec nx run X normalizes to pnpm X for wrap matching (0.12.4)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[rewrite]
+^pnpm nx (.+)$ | pnpm \1 | nx bypass
+
+[wrap]
+pnpm api:test-coverage | basic
+EOF
+  run _run_guard Bash "pnpm exec nx run api:test-coverage 2>&1 | tail -10"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm api:test-coverage")'
+}
+
+@test "pnpm exec nx run X with target args still matches wrap (0.12.4)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[rewrite]
+^pnpm nx (.+)$ | pnpm \1 | nx bypass
+
+[wrap]
+pnpm api:test-coverage | basic
+EOF
+  run _run_guard Bash "pnpm exec nx run api:test-coverage --testPathPattern='foo'"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm api:test-coverage")'
+}

@@ -546,8 +546,15 @@ process_line() {
               fi
             fi
             # Extract label from the gate-run.sh invocation: `bash …/gate-run.sh <label> …`
+            # 0.12.4: restrict to canonical labels. The previous regex
+            # `[A-Za-z0-9_-]+` would happily eat the `2` from
+            # `gate-run.sh 2>&1 | …` and persist `label: 2` into handoff.md.
+            # Anchoring to the canonical set means a malformed invocation
+            # without a real label simply skips the handoff update.
+            # `|| true` suppresses pipefail's propagation of grep's exit 1
+            # when there's no canonical-label match (the common no-op case).
             local _gate_label
-            _gate_label=$(echo "$cmd" | grep -oE 'gate-run\.sh[[:space:]]+[A-Za-z0-9_-]+' | awk '{print $2}' | head -1)
+            _gate_label=$(echo "$cmd" | grep -oE 'gate-run\.sh[[:space:]]+(basic|final|e2e|lint|custom)\b' 2>/dev/null | awk '{print $2}' | head -1 || true)
             if [[ -n "$_gate_label" ]]; then
               update_handoff_gate_state "$_gate_label" "$exit_code" 2>/dev/null || true
             fi
