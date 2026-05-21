@@ -605,7 +605,7 @@ _guard_bash() {
       # Extract the label from the gate-run.sh invocation for a better message
       local label
       label=$(echo "$cmd" | grep -oE 'gate-run\.sh\s+(basic|final|e2e|lint|custom)' | awk '{print $2}') || label="unknown"
-      _block "Gate would produce identical output — no code writes since last gate run. Read .ralph/gates/${label}-latest.log instead, diagnose the failure, make a fix, then retry."
+      _block "Gate already ran since last code write — output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: edit code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose."
     fi
 
     # Record the gate invocation timestamp
