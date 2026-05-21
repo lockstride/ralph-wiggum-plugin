@@ -23,35 +23,26 @@ teardown() {
 # parse_args
 # -----------------------------------------------------------------------------
 
-@test "parse_args: --prompt sets mode = prompt" {
-  GROUND_TRUTH_MODE=""
-  GROUND_TRUTH_VALUE=""
+@test "parse_args: ground-truth modes (--prompt / --prompt-file / --spec)" {
+  # Single test exercising all three mode flags + the optional name on
+  # --spec. Previously this was 4 separate tests.
+  GROUND_TRUTH_MODE=""; GROUND_TRUTH_VALUE=""
   parse_args --prompt
   [ "$GROUND_TRUTH_MODE" = "prompt" ]
   [ -z "$GROUND_TRUTH_VALUE" ]
-}
 
-@test "parse_args: --prompt-file captures path" {
-  GROUND_TRUTH_MODE=""
-  GROUND_TRUTH_VALUE=""
+  GROUND_TRUTH_MODE=""; GROUND_TRUTH_VALUE=""
   parse_args --prompt-file some/path.md
   [ "$GROUND_TRUTH_MODE" = "file" ]
   [ "$GROUND_TRUTH_VALUE" = "some/path.md" ]
-}
 
-@test "parse_args: --spec without name sets empty value" {
-  GROUND_TRUTH_MODE=""
-  GROUND_TRUTH_VALUE=""
+  GROUND_TRUTH_MODE=""; GROUND_TRUTH_VALUE=""
   parse_args --spec
   [ "$GROUND_TRUTH_MODE" = "spec" ]
   [ -z "$GROUND_TRUTH_VALUE" ]
-}
 
-@test "parse_args: --spec name captures name" {
-  GROUND_TRUTH_MODE=""
-  GROUND_TRUTH_VALUE=""
+  GROUND_TRUTH_MODE=""; GROUND_TRUTH_VALUE=""
   parse_args --spec my-feature
-  [ "$GROUND_TRUTH_MODE" = "spec" ]
   [ "$GROUND_TRUTH_VALUE" = "my-feature" ]
 }
 
@@ -61,7 +52,9 @@ teardown() {
   [ "$FRESH" = "true" ]
 }
 
-@test "parse_args: -n, --loops, and --iterations all capture the eval loop cap (0.6.3 alias)" {
+@test "parse_args: -n and --loops capture the eval loop cap" {
+  # 0.12.5: dropped the deprecated `--iterations` alias after verifying
+  # zero usage in consuming projects.
   EVAL_ITER_FROM_FLAG=""
   parse_args -n 8
   [ "$EVAL_ITER_FROM_FLAG" = "8" ]
@@ -69,10 +62,6 @@ teardown() {
   EVAL_ITER_FROM_FLAG=""
   parse_args --loops 10
   [ "$EVAL_ITER_FROM_FLAG" = "10" ]
-
-  EVAL_ITER_FROM_FLAG=""
-  parse_args --iterations 12  # deprecated alias, still honored
-  [ "$EVAL_ITER_FROM_FLAG" = "12" ]
 }
 
 # -----------------------------------------------------------------------------

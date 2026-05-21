@@ -19,7 +19,6 @@
 #   --cli <claude|cursor-agent>   Agent CLI (default: claude)
 #   -m, --model <id>               Model name (default: per-CLI default)
 #   -n, --loops N                  Max loops (safety cap; default: 10).
-#                                  --iterations is the deprecated alias.
 #   --prompt | --prompt-md         Use PROMPT.md at workspace root
 #   --prompt-file <path>           Use custom prompt file
 #   --spec [name]                  Use Spec Kit spec dir (default: most recent)
@@ -63,8 +62,7 @@ while [[ $# -gt 0 ]]; do
       MODEL="$2"
       shift 2
       ;;
-    -n | --loops | --iterations)
-      # 0.6.3: --iterations kept as a deprecated alias for --loops.
+    -n | --loops)
       MAX_LOOPS="$2"
       shift 2
       ;;

@@ -57,10 +57,7 @@ while [[ $# -gt 0 ]]; do
       MODEL_FROM_FLAG="$2"
       shift 2
       ;;
-    -n | --loops | --iterations)
-      # 0.6.3: --iterations is a deprecated alias for --loops. Same
-      # semantics (max-loops cap) but new spelling matches the rest of
-      # the plugin's "loop" terminology.
+    -n | --loops)
       LOOP_FROM_FLAG="$2"
       shift 2
       ;;
@@ -94,8 +91,7 @@ while [[ $# -gt 0 ]]; do
       CHAIN_EVALUATE=true
       shift
       ;;
-    --eval-loops | --eval-iterations)
-      # 0.6.3: --eval-iterations is a deprecated alias for --eval-loops.
+    --eval-loops)
       EVAL_LOOP_FROM_FLAG="$2"
       shift 2
       ;;
@@ -116,7 +112,6 @@ Options:
   -n, --loops N                Max loops cap (safety net; default 10).
                                One loop typically completes a whole
                                spec — this is the upper bound on respawns.
-                               (--iterations is the deprecated alias.)
   --prompt, --prompt-md        Use PROMPT.md
   --prompt-file <path>         Use custom prompt file
   --spec [name]                Use Spec Kit spec (default: newest)
@@ -126,7 +121,6 @@ Options:
                                (equivalent env var: RALPH_CHAIN_EVALUATE=1)
   --eval-loops N               Cap for the eval loop when chained (default 10).
                                Env: RALPH_EVAL_MAX_LOOPS.
-                               (--eval-iterations is the deprecated alias.)
   -v, --version                Show version
   -h, --help                   Show this help
 
@@ -522,6 +516,22 @@ main() {
   # cleanly (all tasks [x], gate green). Failed/exhausted/gutter runs skip
   # the eval pass — running acceptance tests against known-broken state
   # produces noise, not signal.
+  #
+  # 0.12.5: also skip when the loop exited because the user touched
+  # `.ralph/stop-requested`. The honor-handler sets `.ralph/.loop-stopped-by-user`
+  # as a breadcrumb because the bare rc=0 from run_ralph_loop is otherwise
+  # indistinguishable from a clean ALL_TASKS_DONE completion. Operator
+  # intent for stop-requested is "halt for intervention", not "ready for
+  # verification" — running eval against the user's halt is exactly the
+  # surprise this guard prevents.
+  if [[ -f "$WORKSPACE/.ralph/.loop-stopped-by-user" ]]; then
+    rm -f "$WORKSPACE/.ralph/.loop-stopped-by-user" 2>/dev/null || true
+    echo ""
+    echo "🛑 User-initiated stop — skipping acceptance evaluation chain."
+    echo "   (Loop completed normally; eval would run automatically if you'd"
+    echo "    let it reach <promise>ALL_TASKS_DONE</promise>.)"
+    exit "$main_rc"
+  fi
   if [[ "$main_rc" -eq 0 ]] && [[ "$CHAIN_EVALUATE" == "true" ]]; then
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"

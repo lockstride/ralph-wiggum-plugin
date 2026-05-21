@@ -12,6 +12,61 @@ A healthy ralph **loop** runs as one continuous agent process — it commits as 
 
 The Claude Code plugin wrapping (slash commands, plugin manifest, and specialist skills) is a Claude Code-only enrichment. **For Claude Code users, install as a plugin** — it unlocks the acceptance-evaluation skills (`running-acceptance-evaluation`, `verifying-acceptance-criteria`, `addressing-acceptance-gaps`) and the guard hook that enforces gate discipline. Standalone-script users still get the full loop infrastructure but without those extras.
 
+## Feature set
+
+The plugin's intended behaviors, with where each is implemented. Use this as
+the inventory when reviewing the loop's reliability end-to-end.
+
+### Graceful context management & restarts
+- Stream parser fires `WARN` at 87.5% of the token threshold (`stream-parser.sh:emit_warn_or_rotate`) and touches `.ralph/context-warning-active`.
+- The framing prompt instructs the agent to check `context-warning-active` and `stop-requested` after every commit and yield with a handoff write if either is present.
+- Loop detects 🤝 `GRACEFUL YIELD` when handoff.md was written this iteration (`_detect_graceful_yield` in `ralph-common.sh`) — distinguishes a good yield from a force-killed `ROTATE` / `TURN_END`.
+- At 100% (`ROTATE_THRESHOLD`), the loop force-kills the agent. The next session reads the inlined handoff block from `build_prompt`.
+
+### Stop-signal adherence
+- Touch `.ralph/stop-requested` to ask the loop to halt. Agent honors at the next post-commit breadcrumb check.
+- The loop's driver-side check (`run_ralph_loop`) honors `stop-requested` if the agent didn't yield voluntarily — distinguishing graceful from forced via the same `_detect_graceful_yield` helper.
+- `stop-requested` honored → loop writes `.ralph/.loop-stopped-by-user` → `--evaluate` chain is **skipped** (operator intent is "halt", not "ready for verification").
+
+### Script call filters & transparent rewrites
+- `PreToolUse` hook (`ralph-guard.sh`) registered via `hooks/hooks.json` (record-keyed-by-event-name schema; the wrong-schema 0.12.4 bug is fixed in 0.12.5).
+- `.ralph/command-policy` has four sections, evaluated in order: `[rewrite] → [deny] → [wrap] → [protect]`.
+  - `[rewrite]` — project-specific regex transforms (e.g. `pnpm nx X → pnpm X`). Transparent via `updatedInput`.
+  - `[deny]` — hard block with `permissionDecision: deny` (e.g. containerized E2E).
+  - `[wrap]` — auto-routes `pnpm <script>` through `gate-run.sh <label> <cmd>` transparently. Labels: `basic | final | e2e | lint | custom`.
+  - `[protect]` — bare invocation OK; pipe/redirect denied.
+- Canonicalization (`_canonicalize` in `ralph-guard.sh`): env-prefix stripped, pipes/redirects stripped, `pnpm run X` / `pnpm exec X` normalized to `pnpm X`. Compound chains (`pnpm A && pnpm B`) split — if any segment matches `[wrap]`, the whole chain is rewrapped on just that segment.
+- Activity-log emoji: 🔀 `GUARD REWRITE` on transparent rewrites, ⛔ `GUARD DENY` on hard blocks.
+
+### Multi-consecutive gate checks without interleaving writes/edits
+- `ralph-guard.sh`'s gate-without-write check blocks re-running a gate when no Write/Edit happened since the last gate (`LAST_WRITE_TS` vs `LAST_GATE_TS` in `$XDG_STATE_HOME/ralph/<workspace-hash>/`).
+- Prevents the "run gate → read output → re-run gate for more output" anti-pattern that wastes minutes per loop.
+
+### Gate-level adherence (basic vs final)
+- Framing's `## Gate Selection` block: `pnpm basic-check` default after each task; `pnpm all-check` only on `[risky]` tasks or at end-of-loop.
+- `gate-run.sh` enforces 5 canonical labels and writes `<label>-latest.{log,exit,cmd,summary}` per label.
+- Completion guard `_complete_allowed` refuses `<promise>ALL_TASKS_DONE</promise>` when:
+  - the most recent gate exit is non-zero, OR
+  - `final-latest.cmd` doesn't match `.ralph/final-check-command` (default `pnpm all-check`) — closes the cheap-command-relabeled-as-final spoof.
+
+### Smooth handoff between loops
+- `.ralph/handoff.md` has three managed sections:
+  - `## Working set` — written by the agent before yielding (current task, files in flight, next planned step). The framing reminds it; the Stop hook (`handoff-check.sh`) emits a soft warning if it's stale.
+  - `## Last gate state` — rewritten by `stream-parser.sh` after every gate-end.
+  - `## Auto-enriched state` — appended by the loop on `ROTATE` / `TURN_END` (last commit SHA + subject, last `[x]` task, next unchecked task). Mechanical carry-over even when the agent was force-killed.
+- The next loop inlines the whole file via `build_prompt`'s `## Handoff from previous loop` block.
+
+### Effective and reliable eval loop
+- `--evaluate` chains an acceptance-evaluation loop after the main loop emits `ALL_TASKS_DONE`.
+- `ralph-evaluate.sh` orchestrates two roles in alternation: `running-acceptance-evaluation` skill (orchestrator), which delegates to `verifying-acceptance-criteria` (VERIFIER role) or `addressing-acceptance-gaps` (REWORK role) via the `Task` tool.
+- Drives `.ralph/acceptance-report.md` — checkbox state advances the loop. Verifier runs `final` gate independently; rework loops fix logged gaps.
+
+### Proper dynamic prompt generation
+- `prompt-resolver.sh` reads the project's `speckit-implement` skill, applies the adaptation guide, and invokes `claude -p --model sonnet --effort low` to produce a loop-adapted body.
+- Composite hash cache (`<sha(speckit)>:<sha(guide)>`) regenerates on either input change.
+- Safety addendum (`_ensure_breadcrumb_checks`) auto-injects the breadcrumb-check paragraph if the generator paraphrased it away.
+- Framing (`build_prompt`) owns Stop conditions, the after-commit flow, and the handoff contract — the body is purely task-execution mechanics.
+
 ## ⚠️ Blast radius
 
 Ralph runs the agent **with all tool approvals pre-granted** — `--dangerously-skip-permissions` for `claude`, `--force` for `cursor-agent`. This is intentional: the loop runs unattended and cannot pause for permission prompts.
@@ -106,11 +161,11 @@ ralph --cli claude --spec 20260131-example-feature --branch feature/example --pr
 |---|---|---|
 | `--cli <claude\|cursor-agent>` | Which agent CLI to drive | interactive picker (pre-selects `claude`) |
 | `-m, --model <id>` | Model name | interactive picker (pre-selects `opus` for Claude, `composer-2` for Cursor) |
-| `-n, --loops N` | Max loops (safety cap; `--iterations` is the deprecated alias) | interactive picker (pre-fills `20`) |
+| `-n, --loops N` | Max loops (safety cap) | interactive picker (pre-fills `20`) |
 | `--branch <name>` | Work on a named branch | current branch |
 | `--pr` | Open a PR when complete; requires `--branch` | off |
 | `--evaluate` | Chain acceptance evaluation loop after main loop completes (env: `RALPH_CHAIN_EVALUATE=1`) | off |
-| `--eval-loops N` | Cap for the chained eval loop (`--eval-iterations` is the deprecated alias; env: `RALPH_EVAL_MAX_LOOPS`) | 10 |
+| `--eval-loops N` | Cap for the chained eval loop (env: `RALPH_EVAL_MAX_LOOPS`) | 10 |
 | `-v, --version` | Print version and exit | — |
 | `-h, --help` | Show help | — |
 
@@ -161,21 +216,23 @@ A skeleton is seeded automatically by `init_ralph_dir` on first run.
 
 ### Command policy
 
-`.ralph/command-policy` consolidates the rewrite / deny / gate-wrapped / protect rules into one file. Four sections, scanned in order: `[rewrite]` → `[deny]` → `[gate-wrapped]` → `[protect]`.
+`.ralph/command-policy` consolidates the rewrite / deny / wrap / protect rules into one file. Four sections, scanned in order: `[rewrite]` → `[deny]` → `[wrap]` → `[protect]`.
 
 ```
 [rewrite]
 # regex | replacement | reason  (backrefs \1, \2, … supported in replacement)
 ^pnpm -w run (.+)$ | pnpm \1 | this repo's package.json has no -w workspace flag
+^pnpm nx (.+)$     | pnpm \1 | pnpm nx bypasses [wrap] enforcement; use root pnpm scripts
 
 [deny]
 # command-prefix | reason
 pnpm test-e2e | containerized E2E is too expensive — use pnpm test-e2e:local
 
-[gate-wrapped]
-# MUST be invoked through gate-run.sh so the loop captures tracking artifacts
-pnpm all-check
-pnpm basic-check
+[wrap]
+# command-prefix | label   (label: basic | final | e2e | lint | custom)
+pnpm all-check     | final
+pnpm basic-check   | basic
+pnpm test-e2e:local| e2e
 
 [protect]
 # bare OK, pipe/redirect denied
@@ -184,23 +241,23 @@ pnpm format:write
 
 Section semantics:
 
-- **`[rewrite]`** — regex match; blocks and tells the agent the canonical form via substitution. Use to retrain the agent on incorrect command shapes.
-- **`[deny]`** — literal prefix match; blocks outright. Use for commands the agent should never run.
-- **`[gate-wrapped]`** — listed command MUST be invoked through `gate-run.sh`, else blocked. The matcher strips env-var prefixes AND normalizes `pnpm run X` / `pnpm exec X` to `pnpm X` before prefix matching, so the agent can't slip past with `CI=true pnpm run all-check` or similar. Bare, piped, redirected, env-prefixed, and run/exec-prefixed forms are all caught. Use for the gates whose tracking the loop depends on (final / basic / test gates).
-- **`[protect]`** — bare invocation OK; only pipe / redirect of the command is denied. Use for commands you want to allow bare but not let the agent dump into a sidecar log. Prefer `[gate-wrapped]` when you also want the loop's tracking artifacts.
+- **`[rewrite]`** — regex match; transparently rewrites the agent's command via the hook's `updatedInput` mechanism (no block, no retry puzzle). Use for incorrect command shapes the agent reaches for.
+- **`[deny]`** — literal prefix match; blocks outright with `permissionDecision: deny`. Use for commands the agent should never run (containerized E2E, destructive ops).
+- **`[wrap]`** — listed command is **transparently auto-rewritten** to its `gate-run.sh <label> <cmd>` form via `updatedInput`, so the loop captures tracking artifacts (latest.log / .exit / .cmd / .summary) without the agent having to remember the wrapper. The matcher strips env-var prefixes AND normalizes `pnpm run X` / `pnpm exec X` to `pnpm X` before matching. Compound chains (`pnpm format:write && pnpm test-coverage`) split — if any segment matches, the chain is rewrapped on just that segment.
+- **`[protect]`** — bare invocation OK; only pipe / redirect of the command is denied. Use for commands you want to allow bare but not let the agent dump into a sidecar log.
 
-The legacy `.ralph/denied-commands` + `.ralph/protected-scripts` are still read as a fallback when `command-policy` is absent (with a one-time deprecation notice in `.ralph/errors.log`); they only get `[deny]` + `[protect]` semantics — `[rewrite]` and `[gate-wrapped]` require the unified file. Migrate when convenient — the template at [`shared-references/templates/command-policy.md`](shared-references/templates/command-policy.md) is a starting point.
+Activity-log feedback: 🔀 `GUARD REWRITE` is logged when `[rewrite]` or `[wrap]` fires; ⛔ `GUARD DENY` when `[deny]` or a state-tampering check fires. Pre-0.12.5 plugins still ship a legacy `[gate-wrapped]` section name as a backward-compat alias for `[wrap]` (default label `basic`). The legacy `.ralph/denied-commands` + `.ralph/protected-scripts` are still read as a fallback when `command-policy` is absent (with a one-time deprecation notice in `.ralph/errors.log`); they only get `[deny]` + `[protect]` semantics. Migrate when convenient — the template at [`shared-references/templates/command-policy.md`](shared-references/templates/command-policy.md) is a starting point.
 
 ### Guard hook
 
-When installed as a Claude Code plugin, Ralph registers a `PreToolUse` hook (`ralph-guard.sh`) that intercepts Bash and Write tool calls to enforce discipline:
+When installed as a Claude Code plugin, Ralph registers a `PreToolUse` hook (`ralph-guard.sh`) that intercepts Bash and Write/Edit tool calls to enforce discipline:
 
-- **Direct test-tool denial** — blocks `vitest`, `jest`, `cypress`, `tsc --noEmit` and their `npx`/`pnpm`/`pnpm exec` variants unless wrapped in `gate-run.sh`.
-- **Command-policy enforcement** — rewrite/deny/protect from `.ralph/command-policy` (see above).
-- **Gate-without-write detection** — blocks re-running a gate when no file has been written since the last gate, preventing pointless reruns.
+- **Transparent rewrites** — `[rewrite]` regex transforms and `[wrap]` auto-routing through `gate-run.sh` happen via `updatedInput` (no block, no agent retry). Logged to `activity.log` as 🔀 `GUARD REWRITE`.
+- **Hard denies** — state tampering (`rm -rf .ralph/`), direct test-tool invocations (`vitest`/`jest`/`cypress`/`tsc --noEmit` and their `pnpm exec` variants), `[deny]` rules. Logged as ⛔ `GUARD DENY`.
+- **Gate-without-write detection** — blocks re-running a gate when no file has been written since the last gate.
 - **State-file protection** — prevents the agent from tampering with `.ralph/gates/`, `.ralph/activity.log`, and other loop-owned state.
 
-A `Stop` hook (`handoff-check.sh`) emits a soft reminder when the `## Working set` section of `handoff.md` wasn't updated during the loop. Advisory only — does not block the agent from yielding.
+A `Stop` hook (`handoff-check.sh`) emits a soft reminder (`systemMessage` payload) when the `## Working set` section of `handoff.md` wasn't updated during the loop. Advisory only — does not block the agent from yielding.
 
 ### Rotation signals
 
@@ -208,12 +265,16 @@ The stream parser emits signals that the main loop uses to decide when to rotate
 
 | Signal | Trigger | Effect |
 |---|---|---|
-| `ROTATE` | Token usage exceeds threshold | Hard rotation — context window is full |
+| `ROTATE` | Token usage ≥ `ROTATE_THRESHOLD` | Hard rotation — agent killed mid-task |
+| `WARN` | Tokens ≥ `WARN_THRESHOLD` (87.5%) | Touches `.ralph/context-warning-active`; agent is supposed to yield at next post-commit check |
 | `TURN_END` | 5 consecutive gate failures (configurable via `RALPH_GATE_FAIL_STREAK_THRESHOLD`) | Rotation; next loop reads the freshly-written handoff block |
-| `WARN` | Approaching token threshold | Agent told to wrap up |
-| `GUTTER` | Stuck pattern (repeated failures, file thrashing) or agent self-signal | Rotation with diagnostic context |
-| `COMPLETE` | Agent emits `<promise>ALL_TASKS_DONE</promise>` | Loop exits successfully |
-| `DEFER` | Rate limit or transient API error | Backoff and retry |
+| `GUTTER` | Stuck pattern (repeated failures, file thrashing) or agent self-signal `<ralph>GUTTER</ralph>` | Rotation with diagnostic post-mortem |
+| `COMPLETE` | Agent emits `<promise>ALL_TASKS_DONE</promise>` | Loop exits successfully; chains `--evaluate` if set |
+| `DEFER` | Rate limit or transient API error | Backoff and retry (does not increment respawn count) |
+| `RECOVER` | Successful `git commit` after a gate failure | Resets the gate-fail streak counter |
+| `HEARTBEAT` | Any tool activity | Resets the main loop's read-timeout — internal, not user-visible |
+
+Loop-end activity-log labels: 🤝 `GRACEFUL YIELD` (agent honored a breadcrumb and wrote handoff), 🔄 `ROTATE` (context cliff), 🛑 `TURN_END` (gate-fail streak), 🛌 `NATURAL END` (agent bailed politely without yielding).
 
 ## Spec Kit mode
 
@@ -253,8 +314,8 @@ For mode mechanics, artifacts, and limitations, see [docs/development.md → Acc
 | `RALPH_FINAL_GATE_TIMEOUT` | `1200` | Final gate timeout |
 | `RALPH_GATE_KILL_GRACE` | `10` | Seconds between SIGTERM and SIGKILL on timeout |
 | `RALPH_GATE_KEEP` | `5` | Number of timestamped gate logs to retain per label |
-| `RALPH_GATE_LOCK_WAIT` | `300` | Seconds to wait for a gate lock before giving up |
-| `RALPH_GATE_STALE_LOCK_SEC` | `600` | Steal locks older than this (seconds) |
+| `RALPH_GATE_LOCK_WAIT` | `60` | Seconds to wait for a gate lock before giving up. PID-aware steal kicks in immediately when the holder is dead. |
+| `RALPH_GATE_STALE_LOCK_SEC` | `2700` | Time-based fallback: steal locks older than this (45 min) when no PID file exists (pre-0.12.5 leftover locks). |
 | `RALPH_GATE_FAIL_STREAK_THRESHOLD` | `5` | Consecutive gate failures before TURN_END |
 | `RALPH_MAX_LOOPS` | `10` | Safety cap on agent respawns |
 | `RALPH_EVAL_MAX_LOOPS` | `10` | Safety cap on eval loop iterations |

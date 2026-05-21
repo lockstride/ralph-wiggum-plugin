@@ -27,13 +27,13 @@ Fixed set. Pick the closest match; use `custom` for anything that doesn't fit.
 
 | Label    | Typical use                                                        | Default timeout |
 | -------- | ------------------------------------------------------------------ | --------------- |
-| `basic`  | Fast pre-commit gate (format, lint, unit tests)                    | 300 s           |
-| `final`  | Full verification (basic + integration + E2E)                      | 900 s           |
-| `e2e`    | Targeted E2E, browser, or container suites                         | 300 s           |
-| `lint`   | Lint-only or type-check-only runs                                  | 300 s           |
-| `custom` | Anything outside the four above                                    | 300 s           |
+| `basic`  | Fast pre-commit gate (format, lint, unit tests)                    | 1200 s          |
+| `final`  | Full verification (basic + integration + E2E)                      | 1200 s          |
+| `e2e`    | Targeted E2E, browser, or container suites                         | 1200 s          |
+| `lint`   | Lint-only or type-check-only runs                                  | 1200 s          |
+| `custom` | Anything outside the four above                                    | 1200 s          |
 
-Each label gets its own artifact namespace — so `basic` and `final` don't overwrite each other's `-latest.log` or `-latest.exit`.
+Each label gets its own artifact namespace — so `basic` and `final` don't overwrite each other's `-latest.log` / `-latest.exit` / `-latest.cmd` / `-latest.summary`. The `-latest.cmd` file is what the completion guard `_complete_allowed` uses to refuse `<promise>ALL_TASKS_DONE</promise>` when the final-gate command was spoofed (e.g. `gate-run.sh final pnpm basic-check`).
 
 ### Exit codes
 
@@ -76,16 +76,19 @@ Configurable via `RALPH_GATE_TAIL` (default 60) and `RALPH_GATE_FAIL_HEAD` (defa
 
 ## Environment variables
 
-| Variable                   | Default              | Meaning                                                                          |
-| -------------------------- | -------------------- | -------------------------------------------------------------------------------- |
-| `RALPH_WORKSPACE`          | `$PWD`               | Workspace root. Logs land under `$RALPH_WORKSPACE/.ralph/gates/`.                |
-| `RALPH_GATES_DIR`          | `$WS/.ralph/gates`   | Full override for the log directory.                                             |
-| `RALPH_GATE_KEEP`          | `10`                 | How many timestamped logs to keep per label. 0 keeps everything (be careful).    |
-| `RALPH_GATE_TAIL`          | `60`                 | Lines of tail included in the summary.                                           |
-| `RALPH_GATE_FAIL_HEAD`     | `80`                 | Failure-match lines in the summary.                                              |
-| `RALPH_GATE_TIMEOUT`       | *(unset)*            | Blanket timeout override (seconds). Wins over the per-label vars below.          |
-| `RALPH_FINAL_GATE_TIMEOUT` | `900`                | Timeout when `label=final`.                                                      |
-| `RALPH_BASIC_GATE_TIMEOUT` | `600`                | Timeout for every other label.                                                   |
+| Variable                       | Default              | Meaning                                                                          |
+| ------------------------------ | -------------------- | -------------------------------------------------------------------------------- |
+| `RALPH_WORKSPACE`              | `$PWD`               | Workspace root. Logs land under `$RALPH_WORKSPACE/.ralph/gates/`.                |
+| `RALPH_GATES_DIR`              | `$WS/.ralph/gates`   | Full override for the log directory.                                             |
+| `RALPH_GATE_KEEP`              | `10`                 | How many timestamped logs to keep per label. 0 keeps everything (be careful).    |
+| `RALPH_GATE_TAIL`              | `60`                 | Lines of tail included in the summary.                                           |
+| `RALPH_GATE_FAIL_HEAD`         | `80`                 | Failure-match lines in the summary.                                              |
+| `RALPH_GATE_TIMEOUT`           | *(unset)*            | Blanket timeout override (seconds). Wins over the per-label vars below.          |
+| `RALPH_FINAL_GATE_TIMEOUT`     | `1200`               | Timeout when `label=final`.                                                      |
+| `RALPH_BASIC_GATE_TIMEOUT`     | `1200`               | Timeout for every other label.                                                   |
+| `RALPH_GATE_KILL_GRACE`        | `10`                 | Seconds between SIGTERM and SIGKILL on timeout. Subtree-kill so no orphaned grandchildren. |
+| `RALPH_GATE_LOCK_WAIT`         | `60`                 | Seconds to wait for the per-label lock before giving up (exit 64).               |
+| `RALPH_GATE_STALE_LOCK_SEC`    | `2700`               | Time-based stale-lock fallback (45 min). PID-aware steal (0.12.5+) kicks in immediately when the holder pid is dead — only locks without a `pid` file fall through to this timer. |
 
 The timeout mechanism prefers GNU `timeout`, falls back to `gtimeout` (macOS via `brew install coreutils`), and degrades to no timeout if neither is installed. The degraded case is explicit — the wrapper does not pretend to enforce a limit it can't.
 
@@ -128,20 +131,22 @@ A `RALPH_GATE_FAIL_REGEX` env hook may land in a future release if demand justif
 
 This is the discipline that makes the wrapper pay off. Skipping it is why agents end up running the same gate three or four times.
 
-### 1. Run every gate via the wrapper — no exceptions, no piping.
+### 1. Use the project's pnpm scripts — the hook handles wrapping.
 
 ```bash
-# ✅ Good
-bash .claude/ralph-scripts/gate-run.sh basic pnpm basic-check
-bash .claude/ralph-scripts/gate-run.sh final pnpm all-check
+# ✅ Good — the [wrap] hook (0.12.3+) routes these through gate-run.sh
+pnpm basic-check
+pnpm all-check
 
-# ❌ Bad — breaks exit code, forces re-runs
+# ❌ Bad — breaks exit code, defeats the hook's bounded summary
 pnpm basic-check | tail -50
 pnpm all-check 2>&1 | grep -i fail
 pnpm test > /tmp/out
 ```
 
-The wrapper already prints a bounded summary and persists the full log. Piping removes both benefits and hides the exit code.
+When `.ralph/command-policy` has a `[wrap]` entry for the script, the PreToolUse hook transparently rewrites the agent's invocation to `bash gate-run.sh <label> <cmd>`. You don't need to type the wrapped form yourself — the hook does it for you and the rewrite is logged to activity.log as `🔀 GUARD REWRITE`. The agent can also invoke the wrapper directly if it prefers; both paths produce the same artifacts.
+
+Piping is still wrong because the wrapper's whole point is the bounded summary + persisted log. The hook strips the pipe before wrapping, but if you typed your own wrapped invocation with a pipe (`bash gate-run.sh basic pnpm test | head`) you'd defeat the point and lose the real exit code.
 
 ### 2. When a gate fails — do NOT re-run it.
 
@@ -202,5 +207,5 @@ The wrapper is written for **bash 3.2** (the default on macOS) — no `mapfile`,
 
 - `gate-run.sh --help` — the same surface in a condensed form, always in sync with the shipping script.
 - `shared-scripts/gate-run.sh` — the implementation. Header doc-comment is the source of truth for env vars and exit codes.
-- `shared-references/templates/speckit-prompt.md` §"Gate invocation contract" — the Spec Kit-specific version of the agent protocol.
-- `tests/gate-run.bats` — behavioral tests (exit codes, timeouts, log retention, breadcrumbs).
+- `shared-scripts/ralph-guard.sh` — the PreToolUse hook that wraps raw `pnpm <script>` invocations through this wrapper when `[wrap]` is in `.ralph/command-policy`.
+- `tests/gate-run.bats` — behavioral tests (exit codes, timeouts, log retention, PID-aware lock steal, breadcrumbs).

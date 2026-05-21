@@ -214,12 +214,30 @@ _lock_waited=0
 while [[ $_lock_waited -lt $_lock_wait ]]; do
   if mkdir "$_lock_dir" 2>/dev/null; then
     _lock_acquired=1
+    # 0.12.5: record our PID inside the lock dir so contenders can detect
+    # a dead-holder lock immediately instead of waiting for the 45-min
+    # time-based threshold. tmux-killed sessions leave their lock for the
+    # next loop, and `kill -0 <dead-pid>` returns false instantly.
+    echo $$ >"$_lock_dir/pid" 2>/dev/null || true
     break
   fi
-  # Stale-lock heuristic: if the lock dir is older than the largest
-  # plausible gate timeout (RALPH_GATE_STALE_LOCK_SEC, default 2700s = 45
-  # min, well above the 1200s gate cap), the prior holder almost certainly
-  # died without cleanup. Steal the lock rather than block.
+  # 0.12.5: PID-aware stale-lock steal. If the lock dir has a `pid` file
+  # whose process is no longer alive, the holder is dead and we can
+  # reclaim immediately. This catches the common case where a tmux
+  # `kill-session` (or other parent-killer) leaves the lock orphaned.
+  if [[ -f "$_lock_dir/pid" ]]; then
+    _holder_pid=$(cat "$_lock_dir/pid" 2>/dev/null || echo "")
+    if [[ -n "$_holder_pid" ]] && ! kill -0 "$_holder_pid" 2>/dev/null; then
+      _log_activity "🧪 GATE LOCK STOLEN label=$label — holder pid=$_holder_pid is dead"
+      rm -rf "$_lock_dir"
+      continue
+    fi
+  fi
+  # Fallback time-based heuristic: if the lock dir is older than the
+  # largest plausible gate timeout (RALPH_GATE_STALE_LOCK_SEC, default
+  # 2700s = 45 min, well above the 1200s gate cap), the prior holder
+  # almost certainly died without cleanup. Steal the lock rather than
+  # block. Covers pre-0.12.5 locks that have no pid file.
   _stale_after="${RALPH_GATE_STALE_LOCK_SEC:-2700}"
   _lock_age=$(($(date +%s) - $(stat -f '%m' "$_lock_dir" 2>/dev/null || stat -c '%Y' "$_lock_dir" 2>/dev/null || echo 0)))
   if [[ $_lock_age -gt $_stale_after ]]; then
@@ -236,7 +254,7 @@ if [[ $_lock_acquired -eq 0 ]]; then
   _log_activity "🧪 GATE BLOCKED label=$label — could not acquire lock after ${_lock_wait}s"
   exit 64
 fi
-trap 'rmdir "$_lock_dir" 2>/dev/null || true' EXIT
+trap 'rm -rf "$_lock_dir" 2>/dev/null || true' EXIT
 
 _log_activity "🧪 GATE start label=$label cmd=$(printf '%q ' "$@")"
 

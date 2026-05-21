@@ -38,9 +38,11 @@ and unattended execution. Stable across versions of speckit-implement.
 6. **Keep the execution outline.** Context loading, task parsing,
    phase-by-phase execution, completion validation. These are the
    core logic.
-7. **Add loop handoff.** Read `.ralph/handoff.md` at start (if fresher
-   than the latest commit). Write it at loop end (< 30 lines,
-   navigation-only).
+7. **DO NOT emit a `## Loop handoff` section.** The framing prompt
+   (build_prompt in ralph-common.sh) already specifies the handoff
+   contract — line count, section structure, what gets written when.
+   A duplicate section here drifts in wording and creates confusion
+   when the agent has to pick between two versions.
 8. **Hardcode the basic gate inline.** The per-task flow should say
    `Run \`{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}\``. Reserve
    `final` for the completion gate only (step 3). Keep failure-
@@ -54,23 +56,26 @@ and unattended execution. Stable across versions of speckit-implement.
     agent-identifying footers.
 11. **Add completion signal.** `<promise>ALL_TASKS_DONE</promise>`
     when all `[x]` AND final gate passes.
-12. **Add the flow expectation.** After every commit, immediately
-    read the next task. Models naturally end turns at "polite
-    stopping points" (post-commit) — that's wrong here because there's
-    no human to receive the polite handoff and the cold-start tax of
-    a fresh agent process is 10–30k tokens. Frame this as the
-    default expectation, not as a procedural rule with edge cases.
-13. **Preserve `{{PLACEHOLDER}}` variables**: `{{TASK_FILE}}`,
+12. **DO NOT enumerate the after-commit flow.** The framing prompt
+    contains a `## After every commit` block with the three-bullet
+    breadcrumb check (stop-requested → context-warning-active → next
+    task). Referring to that block is fine ("see the framing's
+    `## After every commit`"); restating it isn't — paraphrasing
+    drops critical breadcrumb names.
+13. **DO NOT emit a `## Stop conditions` section.** The framing owns
+    the canonical four. A body-level version drifts and weakens.
+14. **Preserve `{{PLACEHOLDER}}` variables**: `{{TASK_FILE}}`,
     `{{PLAN_FILE}}`, `{{SPEC_FILE}}`, `{{CONSTITUTION_PATH}}`,
     `{{GATE_RUN}}`, `{{BASIC_CHECK_COMMAND}}`,
     `{{FINAL_CHECK_COMMAND}}` — the loop substitutes them.
-14. **Reference `{{ACTIVITY_TAIL}}`.** A `Recent activity` section
+15. **Reference `{{ACTIVITY_TAIL}}`.** A `Recent activity` section
     in the prompt body shows the last ~50 events from
     `.ralph/activity.log`. The loop populates this on each loop.
     Surface it so the agent can spot meta-patterns (same gate failing
     3×, same file thrashed) it would otherwise miss.
-15. **Total output should stay under 50 lines.** Trust the model.
-    The skills carry the weight.
+16. **Total output should stay under 40 lines.** With Stop / Handoff /
+    After-commit moved to the framing, the body is purely task-execution
+    flow and can shrink. Trust the framing for everything else.
 
 ---
 
@@ -82,7 +87,11 @@ The skill is ~10 high-level steps with extensive prose. Strip per
 rules 1–4 above. Keep the core execution outline. Add the loop
 wrappers.
 
-### Output: Loop-adapted prompt (~40 lines)
+### Output: Loop-adapted prompt (~30 lines)
+
+The body is just task-execution flow. Stop conditions, the after-commit
+breadcrumb check, and the handoff contract live in the framing prompt
+that wraps this body — see `build_prompt()` in `ralph-common.sh`.
 
 ```markdown
 # Spec Kit Implementation (Loop-Adapted)
@@ -93,29 +102,22 @@ A healthy loop completes the whole spec in ONE agent process —
 commit, immediately read the next task, keep going. The loop handles
 context rotation and rate limits; you handle the work.
 
+> The framing already covers stop conditions, the after-commit
+> breadcrumb check, and the handoff contract. This body only describes
+> task-execution flow.
+
 ## Paths
-- **Tasks**: `{{TASK_FILE}}`
-- **Plan**: `{{PLAN_FILE}}`
-- **Spec**: `{{SPEC_FILE}}`
+- **Tasks**: `{{TASK_FILE}}` | **Plan**: `{{PLAN_FILE}}` | **Spec**: `{{SPEC_FILE}}`
 - **Constitution**: `{{CONSTITUTION_PATH}}`
-- **Gate runner**: `{{GATE_RUN}}`
 - **Basic gate**: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`
 - **Final gate**: `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
 
 ## Recent activity
 {{ACTIVITY_TAIL}}
 
-If the snapshot above shows you've been running the same gate or
-editing the same file repeatedly without progress, investigate the
-root cause before retrying — read the gate log, check screenshots,
-use `curl` against endpoints directly.
-
-## Loop handoff
-- **At start**: If `.ralph/handoff.md` exists and is fresher than
-  the latest commit, read it first.
-- **At end** (only when actually ending the turn — not after every
-  commit): write `.ralph/handoff.md` (< 30 lines: last completed,
-  next task, files-to-read, max-5 architectural facts).
+If the snapshot shows the same gate failing or the same file edited
+repeatedly without progress, investigate the root cause before
+retrying — read the gate log, check screenshots, use `curl` directly.
 
 ## Per-task flow
 1. Read `{{TASK_FILE}}` and `{{PLAN_FILE}}`. Read data-model.md /
@@ -126,28 +128,21 @@ use `curl` against endpoints directly.
    - Run `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`.
    - Mark `[x]` in `{{TASK_FILE}}` only after the gate exits 0.
    - Commit: `git add <exact paths> && git commit -m "<type>(<scope>): <description> (T###)"`.
-   - Check `.ralph/stop-requested`. If absent, your next tool call
-     is the read of the next unchecked task. No summary. No turn-end.
-3. When all tasks are `[x]` AND the final gate passes, emit
-   `<promise>ALL_TASKS_DONE</promise>`.
+   - (Framing's `## After every commit` block governs what's next.)
+3. When all `[x]` AND `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
+   exits 0, emit `<promise>ALL_TASKS_DONE</promise>`.
 
 If a gate fails, read `.ralph/gates/basic-latest.log` (or the
 relevant label's log). Screenshots at `cypress/screenshots/` and
 direct `curl` against endpoints are cheaper evidence than re-running.
 After a genuine fix, if the gate still fails for the same reason,
-emit `<ralph>GUTTER</ralph>` — the loop will rotate to a fresh agent.
-
-## Stop conditions (the only four)
-`<promise>ALL_TASKS_DONE</promise>`, rotation `WARN` from the loop,
-`.ralph/stop-requested` exists, or `<ralph>GUTTER</ralph>` for
-genuinely stuck. A successful commit is NOT a stop condition.
+emit `<ralph>GUTTER</ralph>`.
 
 ## Constitution
 Ground every decision in `{{CONSTITUTION_PATH}}`. If a task would
 violate it, mark blocked and emit `<ralph>GUTTER</ralph>`.
 
-Begin by reading `.ralph/handoff.md` if it exists, then continue
-from the first unchecked task.
+Begin from the first unchecked task in `{{TASK_FILE}}`.
 ```
 
 ---
@@ -161,7 +156,9 @@ reference. The output is written to `<spec_dir>/ralph-prompt.md` and
 cached until `speckit-implement` or this guide changes (composite
 hash; see `prompt-resolver.sh`).
 
-Generated prompts that exceed 50 lines should be re-tightened — the
+Generated prompts that exceed 40 lines should be re-tightened — the
 goal is to give the agent room to reason, not to enumerate every
-protocol. When in doubt, push detail into a skill rather than into
-the framing prompt.
+protocol. The framing in `build_prompt()` wraps this body with stop
+conditions, the after-commit flow, and the handoff contract, so the
+body itself should be purely task-execution mechanics. When in doubt,
+push detail into a skill rather than into the framing prompt.

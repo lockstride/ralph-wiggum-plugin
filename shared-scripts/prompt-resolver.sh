@@ -357,12 +357,13 @@ GENPROMPT
     echo "  ❌ Generated prompt too short ($line_count lines)" >&2
     return 1
   fi
-  # 0.6.0 trimmed the target from 120 → 50 lines. Specialist behavior moved to
-  # plugin skills (acceptance evaluation)
-  # so the framing prompt no longer needs to inline gate-discipline / diagnosis
-  # protocols. Warn if the generated prompt drifts back over 75 lines.
-  if [[ $line_count -gt 75 ]]; then
-    echo "  ⚠️  Generated prompt is $line_count lines (target: ≤50)" >&2
+  # 0.12.5: target is ≤40 lines (adaptation guide rule 16). The body is
+  # purely task-execution flow now — stop conditions, after-commit checks,
+  # and the handoff contract live in build_prompt's framing. Warn at 50
+  # lines (10-line slack over the target) so genuine drift gets flagged
+  # without nagging on small overruns.
+  if [[ $line_count -gt 50 ]]; then
+    echo "  ⚠️  Generated prompt is $line_count lines (target: ≤40)" >&2
   fi
 
   # 0.12.4: validate/inject breadcrumb checks (see _ensure_breadcrumb_checks).

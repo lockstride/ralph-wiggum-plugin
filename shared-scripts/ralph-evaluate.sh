@@ -20,7 +20,6 @@
 #   -m, --model <id>              Model (default: CLI-specific default)
 #   -n, --loops N                 Eval loop cap (default: 10).
 #                                 Env: RALPH_EVAL_MAX_LOOPS.
-#                                 --iterations is the deprecated alias.
 #   --prompt | --prompt-md        Ground truth = PROMPT.md in workspace root
 #   --prompt-file <path>          Ground truth = specified file
 #   --spec [name]                 Ground truth = specs/<name>/tasks.md (newest if omitted)
@@ -58,8 +57,7 @@ parse_args() {
         MODEL_FROM_FLAG="$2"
         shift 2
         ;;
-      -n | --loops | --iterations)
-        # 0.6.3: --iterations kept as a deprecated alias.
+      -n | --loops)
         EVAL_ITER_FROM_FLAG="$2"
         shift 2
         ;;

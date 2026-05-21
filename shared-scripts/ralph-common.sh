@@ -55,32 +55,23 @@ fi
 
 # Loop ceiling (safety cap, not a target).
 #
-# 0.6.3: renamed from MAX_ITERATIONS. The change isn't just cosmetic —
-# the unit of work is the LOOP, and a healthy run completes a whole
-# spec in ONE loop. This number is the upper bound on how many times
-# the driver will respawn the agent process before giving up; it's a
-# safety net for runaway recovery cycles, not a per-task counter.
-# RALPH_MAX_ITERATIONS is honored as a deprecated alias (one minor
-# release of compatibility) so existing call sites and env files keep
-# working.
+# Default 10. The unit of work is the LOOP — a healthy run completes a
+# whole spec in ONE loop. This number is the upper bound on how many
+# times the driver will respawn the agent process before giving up;
+# it's a safety net for runaway recovery cycles, not a per-task counter.
+# The driver's stall thresholds (3 consecutive natural-end zero-progress,
+# 10 consecutive DEFER, 5 gate-fail TURN_END) all trip well before 10
+# in any genuinely stuck scenario, so 10 is just the "you really
+# shouldn't be here" backstop. Operators on smaller-context models (or
+# genuinely huge specs) can override via --loops or MAX_LOOPS.
 #
-# 0.6.4: lowered default from 20 to 10. Under the flow framing one loop
-# is expected to chew through most/all of a spec; double-digit respawns
-# is now a smell, not steady state. The driver's stall thresholds
-# (3 consecutive natural-end zero-progress, 10 consecutive DEFER, 5
-# gate-fail TURN_END) all trip well before 10 in any genuinely stuck
-# scenario, so 10 is just the "you really shouldn't be here" backstop.
-# Operators on smaller-context models (or genuinely huge specs) can
-# override via --loops or MAX_LOOPS.
-MAX_LOOPS="${MAX_LOOPS:-${RALPH_MAX_LOOPS:-${MAX_ITERATIONS:-${RALPH_MAX_ITERATIONS:-10}}}}"
+# 0.12.5: dropped the pre-0.6.3 deprecated aliases MAX_ITERATIONS and
+# RALPH_MAX_ITERATIONS (verified zero usage in consuming projects).
+MAX_LOOPS="${MAX_LOOPS:-${RALPH_MAX_LOOPS:-10}}"
 
 # Feature flags (set by caller)
 USE_BRANCH="${USE_BRANCH:-}"
 OPEN_PR="${OPEN_PR:-false}"
-# Parallel mode ceiling (Phase 5 — reserved; sequential-only in v0.1.0).
-# Change this number to raise the cap. Each parallel agent is expensive
-# (worktree + dependency install), so 5 is the recommended ceiling.
-RALPH_MAX_PARALLEL="${RALPH_MAX_PARALLEL:-5}"
 
 # Where the resolved prompt text lives after prompt-resolver.sh runs
 RALPH_EFFECTIVE_PROMPT="${RALPH_EFFECTIVE_PROMPT:-.ralph/effective-prompt.md}"
@@ -100,37 +91,6 @@ sedi() {
 get_ralph_dir() {
   local workspace="${1:-.}"
   echo "$workspace/.ralph"
-}
-
-# 0.6.3: helpers carry the new "loop" terminology. The actual driver
-# (run_ralph_loop) tracks the live loop number in a local variable —
-# these persisted helpers exist so external tooling can ask "what loop
-# are we on?" without parsing activity.log. Unused by the driver itself.
-get_loop() {
-  local workspace="${1:-.}"
-  local state_file="$workspace/.ralph/.loop"
-  if [[ -f "$state_file" ]]; then
-    cat "$state_file"
-  else
-    echo "0"
-  fi
-}
-
-set_loop() {
-  local workspace="${1:-.}"
-  local loop_n="$2"
-  local ralph_dir="$workspace/.ralph"
-  mkdir -p "$ralph_dir"
-  echo "$loop_n" >"$ralph_dir/.loop"
-}
-
-increment_loop() {
-  local workspace="${1:-.}"
-  local current
-  current=$(get_loop "$workspace")
-  local next=$((current + 1))
-  set_loop "$workspace" "$next"
-  echo "$next"
 }
 
 get_health_emoji() {
@@ -401,11 +361,10 @@ build_prompt() {
     user_body=$(cat "$user_prompt_file")
   fi
 
-  # 0.12.0: Handoff block — rolling state document injected every loop.
-  # Maintained by stream-parser (Last gate state section) and the agent
-  # (Working set section). The troubleshoot overlay (0.10.0–0.11.x) is gone;
-  # the framing-prompt Gate Selection block below + the per-loop handoff
-  # injection cover what it used to deliver.
+  # Handoff block — rolling state document injected every loop.
+  # Maintained by stream-parser (`## Last gate state`), the agent
+  # (`## Working set`), and the loop's auto-enricher (`## Auto-enriched
+  # state` — last commit / last [x] / next unchecked).
   local handoff_block=""
   if [[ -f "$workspace/.ralph/handoff.md" ]]; then
     handoff_block=$(cat "$workspace/.ralph/handoff.md")
@@ -428,25 +387,14 @@ build_prompt() {
     gate_block=$(
       cat <<GATE_EOF
 
-## Gate Runner (read before running any verification command)
+## Gate Runner
 
-Run every test / lint / build via the wrapper \`$gate_run_cmd <label> <cmd>\`:
-
-- **Labels** (pick the closest fit): \`basic\` \`final\` \`e2e\` \`lint\` \`custom\`
-- **Never pipe, redirect, or filter the gate command.** The wrapper already
-  prints a bounded summary and persists the full log. Piping (\`| grep\`,
-  \`| tail\`, \`> /tmp/…\`) hides the exit code and forces an expensive re-run.
-- **If a gate fails: understand why, then act.** The persisted log at
-  \`.ralph/gates/<label>-latest.log\` is one source. Cypress/Playwright
-  failures usually have screenshots at predictable paths — those are
-  often faster to diagnose from than the log alone. The exit code lives
-  at \`.ralph/gates/<label>-latest.exit\`. Use whatever combination of
-  artifact reads, layer-bypassing diagnostics (\`curl\`, \`lsof\`), or
-  config inspection actually answers the question.
-- **On success:** the summary you already saw is authoritative. Commit
-  and move on.
-- Run \`$gate_run_cmd --help\` from your shell tool if you need the full
-  contract (env vars, exit codes, failure-pattern matching, timeouts).
+Run gates as documented in the project (e.g. \`pnpm basic-check\`, \`pnpm all-check\`).
+The plugin hook auto-wraps these through \`$gate_run_cmd <label> <cmd>\` and
+captures \`.ralph/gates/<label>-latest.log\` / \`.exit\` / \`.summary\` for you.
+Do not pipe or tail the output — the wrapper already bounds it. Labels:
+\`basic\` \`final\` \`e2e\` \`lint\` \`custom\`. On failure, read the log + any
+Cypress/Playwright screenshots before re-running.
 GATE_EOF
     )
   fi
@@ -464,9 +412,9 @@ $handoff_block
 "
   fi
 
-  # 0.12.0: Gate selection guidance. Three short paragraphs covering the
-  # default gate, when to escalate to all-check, and where the failure
-  # summary lives. Replaces the on-demand troubleshoot overlay.
+  # Gate selection guidance. Two short paragraphs covering the default
+  # gate, when to escalate to all-check, and where the failure summary
+  # lives.
   local gate_selection_block
   gate_selection_block=$(
     cat <<'GSEL_EOF'
@@ -501,20 +449,32 @@ read the next one, keep going.
 
 ## State Files (read on startup)
 
-1. \`.ralph/handoff.md\` — already inlined above. The same file is the rolling state document; the agent updates the **Working set** section before yielding.
-2. \`.ralph/guardrails.md\` — lessons from past failures.
-3. \`.ralph/errors.log\` — recent failures to avoid repeating.
-4. \`.ralph/orphan-leak.md\` — if present, prior loop committed files that were untracked at its start; classify and proceed.
+The handoff block above is already inlined — do NOT re-read \`.ralph/handoff.md\`.
+- \`.ralph/guardrails.md\` — lessons from past failures.
+- \`.ralph/errors.log\` — recent failures to avoid repeating.
+- \`.ralph/orphan-leak.md\` — if present, prior loop committed files that were untracked at its start; classify and proceed.
 
-## Stop conditions
+## Stop conditions (the only four)
 
-End your turn on:
-- \`<promise>ALL_TASKS_DONE</promise>\` — every task [x] AND final gate green
-- \`<ralph>GUTTER</ralph>\` — genuinely stuck after honest investigation
-- \`.ralph/context-warning-active\` exists — finish the current task, then yield
-- \`.ralph/stop-requested\` exists — yield cleanly
+End your turn ONLY when one of these is true. A successful commit is NOT a stop condition.
 
-Before yielding, update the **Working set** section of \`.ralph/handoff.md\` (≤ 10 lines: current task, files in flight, next planned steps). The **Last gate state** section is rewritten by the plugin — leave it alone.
+1. \`<promise>ALL_TASKS_DONE</promise>\` — every task \`[x]\` AND the final gate exits 0.
+2. \`.ralph/stop-requested\` exists — operator asked the loop to wind down.
+3. \`.ralph/context-warning-active\` exists — token budget is in the warning band; if you start another task you will be killed mid-work and lose progress.
+4. \`<ralph>GUTTER</ralph>\` — genuinely stuck after honest investigation.
+
+## After every commit (run these checks, in order)
+
+1. If \`.ralph/stop-requested\` exists → write \`.ralph/handoff.md\` (see below), then yield. STOP THIS TURN.
+2. If \`.ralph/context-warning-active\` exists → write \`.ralph/handoff.md\`, then yield. STOP THIS TURN. The loop will rotate to fresh context and the next agent resumes from your handoff.
+3. Otherwise, your next tool call is the read of the next unchecked task. No summary, no turn-end.
+
+## Handoff before yielding
+
+Write \`.ralph/handoff.md\` with a \`## Working set\` section (≤ 10 lines) covering:
+current task, files in flight, next planned step, ≤ 3 architectural facts you'd
+want the next agent to know. Leave \`## Last gate state\` and \`## Auto-enriched state\`
+alone — the plugin maintains them.
 
 ## Git hygiene
 
@@ -679,6 +639,32 @@ _check_orphan_leak() {
 # lives at <workspace>/.ralph-postmortems/<ISO-timestamp>-<reason>.tar.gz and
 # contains the most important .ralph/ state files plus a snapshot of recent
 # git activity. Host projects should gitignore .ralph-postmortems/.
+# 0.12.5: Distinguish a graceful yield from a generic natural-end.
+#
+# A graceful yield is a *good* loop boundary: the agent saw a breadcrumb
+# (stop-requested or context-warning-active), wrote handoff.md, and ended
+# its turn cleanly. A force-killed ROTATE/TURN_END or a polite "I think
+# I'm done" natural-end are not graceful by this definition.
+#
+# Returns 0 (success) when graceful: $workspace/.ralph/handoff.md was
+# modified during this loop iteration (more recent than loop-baseline-head,
+# which _capture_loop_baseline rewrites at every loop start). Returns 1
+# otherwise. Best-effort — false negatives are tolerable; the emoji is
+# operator UX, not a correctness signal.
+#
+# 0.12.5: reuses the existing loop-baseline-head sentinel rather than
+# maintaining a separate .loop-start-ts file. handoff-check.sh already
+# uses loop-baseline-head's mtime for the same purpose.
+_detect_graceful_yield() {
+  local workspace="$1"
+  local handoff="$workspace/.ralph/handoff.md"
+  local loop_start="$workspace/.ralph/loop-baseline-head"
+  [[ -f "$handoff" ]] || return 1
+  [[ -f "$loop_start" ]] || return 1
+  [[ "$handoff" -nt "$loop_start" ]] || return 1
+  return 0
+}
+
 # 0.12.4: Auto-enrich handoff.md with mechanically-derivable state.
 #
 # Motivation: in practice, the agent rarely writes a "Working set" section
@@ -1207,9 +1193,10 @@ run_loop() {
         ;;
       "TURN_END")
         # 0.10.0: Mechanical turn-end signal. Emitted by stream-parser
-        # when the gate-fail-streak threshold (5) is reached, or by the
-        # task-completion counter (3 tasks). Kill the agent and rotate to
-        # a fresh context with an optional troubleshoot overlay.
+        # when the gate-fail-streak threshold (5) is reached. Kill the
+        # agent and rotate to a fresh context; the handoff-after-gate-fail
+        # template + auto-enriched state carry forward the failure
+        # context to the next session.
         [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "🛑 Turn ended — killing agent and rotating to fresh context..." >&2
         kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
@@ -1563,15 +1550,31 @@ run_ralph_loop() {
     local signal
     signal=$(run_loop "$workspace" "$loop_n" "$session_id" "$script_dir" "$retry")
 
-    # 0.11.1: driver-side graceful-stop check. If the file exists and
-    # wasn't written by the DEFER handler (which sets signal=DEFER and
-    # has its own retry logic), a user touched it — honor immediately.
+    # 0.11.1: driver-side graceful-stop check. If `.ralph/stop-requested`
+    # exists and the loop's exit signal is NOT "DEFER", honor it as a
+    # user-initiated stop. The DEFER handler ALSO writes stop-requested
+    # (as its gentle-stop cooperation channel — see line ~1273) but in
+    # that case signal=="DEFER" and we let DEFER's own retry-with-backoff
+    # logic run instead. So the guard is on the signal, not the file's
+    # provenance.
     if [[ -f "$workspace/.ralph/stop-requested" ]] && [[ "$signal" != "DEFER" ]]; then
-      log_activity "$workspace" "LOOP $loop_label END — 🛑 STOP REQUESTED (user)"
+      # 0.12.5: distinguish "user asked, agent yielded with handoff" (graceful)
+      # from "user asked, agent was mid-task and never wrote handoff" (forced).
+      if _detect_graceful_yield "$workspace"; then
+        log_activity "$workspace" "LOOP $loop_label END — 🤝 GRACEFUL YIELD (stop-requested honored; handoff written)"
+      else
+        log_activity "$workspace" "LOOP $loop_label END — 🛑 STOP REQUESTED (user; no handoff written this iteration)"
+      fi
       log_progress "$workspace" "**Loop $loop_label ended** — 🛑 User requested stop"
       echo ""
       echo "🛑 Stop requested. Yielding after loop $loop_label."
       rm -f "$workspace/.ralph/stop-requested" 2>/dev/null || true
+      # 0.12.5: signal to ralph-setup.sh's chain-evaluate guard that this
+      # exit was user-initiated, NOT a clean "all tasks done" completion.
+      # Without this breadcrumb, --evaluate would interpret rc=0 as "ready
+      # for verification" and kick off the eval phase against the user's
+      # explicit intent to halt.
+      touch "$workspace/.ralph/.loop-stopped-by-user" 2>/dev/null || true
       return 0
     fi
 
@@ -1709,9 +1712,9 @@ run_ralph_loop() {
               -e "s|{{CONSECUTIVE_FAILURES}}|5|g" \
               "$_handoff_template" >"$workspace/.ralph/handoff.md"
           fi
-          # 0.12.0: troubleshoot overlay removed. Failure context is now
-          # carried in the inlined handoff block (stream-parser writes the
-          # ## Last gate state section from gate-run.sh's summary file).
+          # Failure context flows via the inlined handoff block —
+          # stream-parser keeps `## Last gate state` current from
+          # gate-run.sh's summary file.
         fi
         # 0.12.4: append mechanical state (last commit, last [x], next unchecked)
         # so the next session has carry-over context. The template overwrote
@@ -1792,9 +1795,20 @@ run_ralph_loop() {
             _write_postmortem "$workspace" "stall-natural"
             return 1
           fi
-          log_activity "$workspace" "LOOP $loop_label END — 🛌 NATURAL END (agent ended turn; $remaining_count remaining; bail #$natural_end_count this run)$task_suffix"
-          log_progress "$workspace" "**Loop $loop_label ended** — 🛌 Agent ended turn naturally ($remaining_count remaining)"
-          echo "🛌 Agent ended its turn but $remaining_count criteria remaining. Starting another loop (cold start, ~10-30k tokens)..."
+          # 0.12.5: a natural-end that follows a context-warning IS a
+          # graceful yield — agent honored the breadcrumb instead of
+          # blowing through to forced rotation. Distinguish in the log
+          # so operators can grep `🤝 GRACEFUL YIELD` to count
+          # well-behaved boundaries vs `🛌 NATURAL END` bailouts.
+          if [[ -f "$workspace/.ralph/context-warning-active" ]] && _detect_graceful_yield "$workspace"; then
+            log_activity "$workspace" "LOOP $loop_label END — 🤝 GRACEFUL YIELD (context-warning honored; handoff written; $remaining_count remaining)$task_suffix"
+            log_progress "$workspace" "**Loop $loop_label ended** — 🤝 Graceful yield ($remaining_count remaining)"
+            echo "🤝 Agent honored context warning and yielded with handoff. Rotating to fresh context ($remaining_count remaining)..."
+          else
+            log_activity "$workspace" "LOOP $loop_label END — 🛌 NATURAL END (agent ended turn; $remaining_count remaining; bail #$natural_end_count this run)$task_suffix"
+            log_progress "$workspace" "**Loop $loop_label ended** — 🛌 Agent ended turn naturally ($remaining_count remaining)"
+            echo "🛌 Agent ended its turn but $remaining_count criteria remaining. Starting another loop (cold start, ~10-30k tokens)..."
+          fi
         else
           log_activity "$workspace" "LOOP $loop_label END — 🛌 NATURAL END (no checkbox tracking; bail #$natural_end_count this run)$task_suffix"
           log_progress "$workspace" "**Loop $loop_label ended** — 🛌 Agent ended turn naturally (no checkbox tracking)"

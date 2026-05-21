@@ -9,6 +9,12 @@ Update the ralph-wiggum-plugin's internal Spec Kit integration files to match a 
 
 ## Step 1 — Understand what changed in Spec Kit
 
+First, read the current sync point:
+```bash
+cat shared-references/templates/.speckit-version
+```
+This is the Spec Kit version the plugin's integration files were last aligned with. The target version is the latest release (check with `gh release list --repo github/spec-kit --limit 1`).
+
 Gather the diff for the new release. There are two sources; use whichever is available:
 
 **Option A — staged diff in a consumer project** (preferred when the user has already applied the upgrade to a project like dmatrix):
@@ -24,7 +30,7 @@ Read the full diffs for changed scripts, templates, manifests, and skill files. 
 - Changed step logic in `.claude/skills/speckit-*/SKILL.md` files
 
 **Option B — GitHub release page**:
-Fetch `https://github.com/github/spec-kit/releases/tag/vX.Y.Z` and read the release notes.
+Fetch the release notes for every version between the current sync point and the target version.
 
 ## Step 2 — Identify plugin files that need updating
 
@@ -58,7 +64,7 @@ Do not touch files unrelated to Spec Kit.
 bash lint.sh
 ```
 
-All 170 tests must pass. If any fail, fix the underlying issue before proceeding — do not skip or work around failing tests.
+All tests must pass. If any fail, fix the underlying issue before proceeding — do not skip or work around failing tests.
 
 ## Step 5 — Bump the version
 
@@ -68,7 +74,12 @@ Update `"version"` in `.claude-plugin/plugin.json`.
 
 ## Step 6 — Commit, push, and update
 
-Stage all changed files by name (no `git add .`). Write a Conventional Commits message:
+Update the sync marker:
+```bash
+echo "X.Y.Z" > shared-references/templates/.speckit-version
+```
+
+Stage all changed files by name (no `git add .`), including `.speckit-version`. Write a Conventional Commits message:
 
 ```
 chore(speckit): align with Spec Kit vX.Y.Z

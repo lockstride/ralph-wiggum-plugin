@@ -68,18 +68,24 @@ Emergency bypass is `--no-verify`, but this should be rare and justified in the 
 
 The prompt sent to the agent has two layers:
 
-1. **Framing** (`build_prompt()` in `ralph-common.sh`) — loop awareness, state-file pointers, stop conditions, git hygiene, gate-runner pointer, gate-selection guidance. Currently capped at ~90 framing lines (enforced by `tests/ralph-common.bats`). The conditional blocks that count toward the cap:
-   - `## Handoff from previous loop` — inlines `.ralph/handoff.md` when present (0.12.0)
-   - `## Gate Runner` — only when `gate-run.sh` ships next to `ralph-common.sh`
-   - `## Gate Selection` — default basic-check vs. risky-task all-check guidance (0.12.0)
-2. **Body** (`.ralph/effective-prompt.md`) — the task execution instructions. In Spec Kit mode, this is generated from `speckit.implement.md` via the adaptation guide.
+1. **Framing** (`build_prompt()` in `ralph-common.sh`) — owns the load-bearing instructions that must not drift:
+   - `## Completion` — gate-must-be-green-before-`[x]` rule.
+   - `## State Files` — pointer block (handoff.md is already inlined; don't re-read).
+   - `## Stop conditions (the only four)` — `ALL_TASKS_DONE`, `stop-requested`, `context-warning-active`, `GUTTER`.
+   - `## After every commit` — the three-bullet breadcrumb check (stop-requested → context-warning-active → next task).
+   - `## Handoff before yielding` — what to write to `## Working set`.
+   - `## Git hygiene` — never-amend, never-`git add .ralph/`.
+   - `## Gate Runner` (conditional on `gate-run.sh` being present) — compact pointer; the hook does the wrapping.
+   - `## Gate Selection` — basic-check default; all-check only for `[risky]` tasks.
+   - `## Handoff from previous loop` (conditional on `handoff.md` existing) — inlined verbatim.
+
+2. **Body** (`.ralph/effective-prompt.md`) — purely task-execution mechanics (Paths, Recent activity, Per-task flow, Constitution). In Spec Kit mode, generated from the project's `speckit-implement` skill via the adaptation guide. **Must NOT restate Stop conditions, After-every-commit, or Handoff** — those live in the framing (see adaptation guide rules 7, 12, 13).
 
 Key rules:
-- The adaptation guide at `shared-references/templates/speckit-adaptation-guide.md` is the durable recipe for transforming speckit.implement into a loop prompt
-- Generated prompts should stay under 120 lines
-- Never duplicate guidance that belongs in the project's constitution (naming conventions, architecture rules, etc.)
-- The framing and body should not have competing instruction sets — if both cover the same topic (git protocol, error handling), keep it in one place only
-- When growing the framing further, update the 90-line cap in `ralph-common.bats` AND this section in the same commit
+- The adaptation guide at `shared-references/templates/speckit-adaptation-guide.md` is the durable recipe for transforming speckit-implement into a loop prompt.
+- Generated body should stay under 40 lines (warned at 50 in `prompt-resolver.sh`).
+- The framing and body must not have competing instruction sets. Stop / Handoff / After-commit live in the framing only. Project-specific stuff (naming conventions, architecture rules) belongs in the constitution, not either layer.
+- Safety net: `_ensure_breadcrumb_checks` in `prompt-resolver.sh` injects an addendum if the generator paraphrased the breadcrumb-check language out of the body.
 
 ## Gate runner (`shared-scripts/gate-run.sh`)
 

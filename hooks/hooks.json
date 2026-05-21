@@ -1,33 +1,37 @@
 {
-  "hooks": [
-    {
-      "type": "PreToolUse",
-      "matcher": "Bash",
-      "hooks": [
-        {
-          "command": "bash \"${CLAUDE_PLUGIN_ROOT}/shared-scripts/ralph-guard.sh\"",
-          "timeout": 5000
-        }
-      ]
-    },
-    {
-      "type": "PreToolUse",
-      "matcher": "Write|Edit|MultiEdit",
-      "hooks": [
-        {
-          "command": "bash \"${CLAUDE_PLUGIN_ROOT}/shared-scripts/ralph-guard.sh\"",
-          "timeout": 5000
-        }
-      ]
-    },
-    {
-      "type": "Stop",
-      "hooks": [
-        {
-          "command": "bash \"${CLAUDE_PLUGIN_ROOT}/shared-scripts/handoff-check.sh\"",
-          "timeout": 2000
-        }
-      ]
-    }
-  ]
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/shared-scripts/ralph-guard.sh\"",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/shared-scripts/ralph-guard.sh\"",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/shared-scripts/handoff-check.sh\"",
+            "timeout": 2000
+          }
+        ]
+      }
+    ]
+  }
 }

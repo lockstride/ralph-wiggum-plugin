@@ -89,37 +89,18 @@ tool_result_json() {
   [ -f "$MOCK_WORKSPACE/.ralph/context-warning-active" ]
 }
 
-@test "log_activity emits HEARTBEAT to stdout (0.4.0)" {
-  # Regression for the 0.4.0 activity-based heartbeat. Every Read /
-  # Shell / Write (which routes through log_activity) should emit a
-  # HEARTBEAT token on stdout so the main loop's `read -t` timer
-  # resets on real parser activity. Pre-0.4.0 the timer only reset
-  # on control signals (ROTATE/COMPLETE/…) so an agent working quietly
-  # between commits would trip the 300s heartbeat and die at 5-6 min.
+@test "parser emits HEARTBEAT on every log_activity (0.4.0)" {
+  # Each tool event flowing through log_activity emits a HEARTBEAT on
+  # stdout. The main loop's `read -t` timer depends on this — pre-0.4.0
+  # the timer only reset on control signals (ROTATE/COMPLETE) so an
+  # agent working quietly between commits would die at the 300s timer.
   local events=""
-  events+=$(tool_result_json "Read" 100 10 0 "/tmp/file.ts")
-  events+=$'\n'
-  local output
-  output=$(run_parser "$events")
-  # One HEARTBEAT from the Read's log_activity, plus (often) one from
-  # the 30s token-status timer if the test takes long enough.
-  echo "$output" | grep -q "^HEARTBEAT$"
-}
-
-@test "log_token_status emits HEARTBEAT to stdout (0.4.0)" {
-  # The 30s periodic token-status log also resets the heartbeat timer.
-  # We can't easily wait 30s in a test; instead we assert log_activity
-  # emits HEARTBEAT (proven above) and that log_token_status does too
-  # by invoking stream-parser with input that forces both code paths.
-  local events=""
-  # Enough reads to push through the token-status logging cadence.
   for i in $(seq 1 5); do
     events+=$(tool_result_json "Read" 100 10 0 "/tmp/f${i}.ts")
     events+=$'\n'
   done
   local output
   output=$(run_parser "$events")
-  # Expect at least one HEARTBEAT per log_activity call (5 reads → 5+).
   local count
   count=$(echo "$output" | grep -c "^HEARTBEAT$" || true)
   [ "$count" -ge 5 ]
@@ -235,28 +216,22 @@ tool_result_json() {
 # operations.
 # ---------------------------------------------------------------------------
 
-@test "Edit operation emits EDIT token, not READ (0.11.4)" {
-  local events
-  events=$(tool_result_json "Edit" 100 5 0 "/tmp/changed.ts")
-  run_parser "$events" >/dev/null
-  grep -q "EDIT /tmp/changed.ts" "$MOCK_WORKSPACE/.ralph/activity.log"
-  if grep -q "READ /tmp/changed.ts" "$MOCK_WORKSPACE/.ralph/activity.log"; then
-    fail "Edit operation was logged as READ — token split regressed"
-  fi
-}
-
-@test "MultiEdit operation emits EDIT token (0.11.4)" {
-  local events
-  events=$(tool_result_json "MultiEdit" 100 5 0 "/tmp/multi.ts")
-  run_parser "$events" >/dev/null
-  grep -q "EDIT /tmp/multi.ts" "$MOCK_WORKSPACE/.ralph/activity.log"
-}
-
-@test "NotebookEdit operation emits EDIT token (0.11.4)" {
-  local events
-  events=$(tool_result_json "NotebookEdit" 100 5 0 "/tmp/nb.ipynb")
-  run_parser "$events" >/dev/null
-  grep -q "EDIT /tmp/nb.ipynb" "$MOCK_WORKSPACE/.ralph/activity.log"
+@test "Edit family emits EDIT token across all variants (0.11.4)" {
+  # Edit, MultiEdit, NotebookEdit all share the EDIT classification.
+  # Single test loops over the variants so the contract is one assertion.
+  local name path
+  for name in Edit MultiEdit NotebookEdit; do
+    path="/tmp/edit-$name.ts"
+    local events
+    events=$(tool_result_json "$name" 100 5 0 "$path")
+    : > "$MOCK_WORKSPACE/.ralph/activity.log"
+    run_parser "$events" >/dev/null
+    grep -q "EDIT $path" "$MOCK_WORKSPACE/.ralph/activity.log" \
+      || fail "$name did not emit EDIT token"
+    grep -q "READ $path" "$MOCK_WORKSPACE/.ralph/activity.log" \
+      && fail "$name was misclassified as READ"
+  done
+  true
 }
 
 @test "Edit thrash at threshold emits GUTTER (0.11.4)" {

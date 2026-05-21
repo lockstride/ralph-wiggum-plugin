@@ -22,7 +22,7 @@ bats tests/
 Tests cover:
 
 - `gate-run.sh` — timeout, exit codes, log retention, mkdir-mutex serialization
-- `stream-parser.sh` — signal detection (ROTATE, WARN, GUTTER, RECOVER_ATTEMPT, SUGGEST_SKILL), stall patterns, heartbeat sidecar
+- `stream-parser.sh` — signal detection (ROTATE, WARN, GUTTER, TURN_END, DEFER, COMPLETE, RECOVER, HEARTBEAT), stall patterns, heartbeat sidecar
 - `prompt-resolver.sh` — caching, hash checks, fallbacks, multi-line `{{ACTIVITY_TAIL}}` rendering, `task-file-path` breadcrumb across all prompt modes
 - `ralph-evaluate.sh` — flag parsing, ground-truth resolution, report seeding, orchestrator prompt rendering
 - `ralph-status.sh` — PROGRESS banner, PREVIOUS/CURRENT/NEXT sections, terminal-width-aware wrapping

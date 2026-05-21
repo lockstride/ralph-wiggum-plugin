@@ -4,7 +4,11 @@ Ralph ships **four** plugin skills — one maintenance skill (`ralph-plugin-spec
 
 > **Skills require plugin install.** Standalone-script users (Install Options A and B in the README) get the loop infrastructure, but the agent does NOT discover plugin skills. Install via the marketplace to unlock skill behavior. See [README → Install](../README.md#install).
 
-Gate discipline for the main implementation loop is handled by the guard hook (blocks direct test-tool invocations, pipe/redirect on protected scripts) and the speckit prompt template (hardcodes `basic` gate for per-task verification). No main-loop skills are needed — the prompt template and mechanical enforcement are more reliable than skills the agent may or may not read.
+Gate discipline for the main implementation loop is handled by the PreToolUse guard hook and the framing prompt:
+- The hook (`ralph-guard.sh`) **transparently rewrites** raw `pnpm <wrap-target>` invocations through `gate-run.sh` via `updatedInput` (logged as 🔀 `GUARD REWRITE`), and **hard-denies** state tampering, direct test-tool invocations, and `[deny]` rules (logged as ⛔ `GUARD DENY`).
+- The framing prompt (`build_prompt()` in `ralph-common.sh`) hardcodes `basic` gate as the per-task default and `all-check` only for `[risky]` tasks.
+
+No main-loop skills are needed — mechanical enforcement plus a small framing prompt is more reliable than skills the agent may or may not read.
 
 ## Acceptance-evaluation skills
 
@@ -60,6 +64,6 @@ These three drive the post-completion `ralph-evaluate` loop. The orchestrator + 
 
 1. Create `skills/<gerund-form-name>/SKILL.md` (gerund form per [Anthropic best practices](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices)).
 2. Frontmatter: `name`, `description` (third-person, ≤1024 chars, includes both *what* and *when*). Body ≤500 lines.
-3. Reference the new skill from `shared-references/templates/speckit-prompt.md` and `shared-references/templates/speckit-adaptation-guide.md` so generated prompts mention it.
+3. If the skill is part of the eval loop, reference it from `ralph-evaluate.sh`'s effective-prompt construction (currently the orchestrator skill is named in `shared-references/templates/evaluator-framing.md`). Implementation-loop skills are discovered by name without an explicit reference.
 4. Add a frontmatter-validation test case to `tests/skills.bats`.
 5. Document the skill here.

@@ -74,6 +74,23 @@ LAST_GATE_TS="$STATE_DIR/last-gate-ts"
 # Helpers
 # ---------------------------------------------------------------------------
 
+# 0.12.5: Surface guard activity to activity.log so operators can see
+# when an intercept fired without having to debug the hook channel.
+# Append-only writes are safe — stream-parser and this hook never race
+# on the same line because each call writes a single line atomically.
+_log_intercept() {
+  local emoji="$1" kind="$2" detail="$3"
+  local log="$WORKSPACE/.ralph/activity.log"
+  [[ -d "$WORKSPACE/.ralph" ]] || return 0
+  local ts
+  ts=$(date '+%H:%M:%S')
+  # Trim long commands so the log line stays bounded.
+  if [[ ${#detail} -gt 200 ]]; then
+    detail="${detail:0:200}…"
+  fi
+  printf '[%s] %s GUARD %s %s\n' "$ts" "$emoji" "$kind" "$detail" >>"$log" 2>/dev/null || true
+}
+
 _block() {
   # 0.12.3: Use Claude Code's documented PreToolUse hook response format.
   # The legacy `{"result":"block","reason":"..."}` form is SILENTLY IGNORED
@@ -81,7 +98,10 @@ _block() {
   # root cause of every "guard isn't enforcing" symptom: gate-wrapped bypass
   # via pipes, direct vitest invocations, state-tampering rm -rf .ralph/,
   # etc. all went through unblocked because the hook output was unrecognized.
+  #
+  # 0.12.5: also log to activity.log so operators see the intercept.
   local reason="$1"
+  _log_intercept "⛔" "DENY" "${TOOL_INPUT_CMD:-${TOOL_INPUT_FILE_PATH:-?}} → $reason"
   jq -nc --arg reason "$reason" \
     '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$reason}}' \
     2>/dev/null
@@ -287,6 +307,12 @@ _apply_rewrites() {
 
 _emit_rewrite() {
   local cmd="$1"
+  # 0.12.5: log the transparent rewrite so operators can see when the
+  # canonicalize/wrap/rewrite pipeline corrected the agent's invocation.
+  local orig="${TOOL_INPUT_CMD:-?}"
+  if [[ "$orig" != "$cmd" ]]; then
+    _log_intercept "🔀" "REWRITE" "$orig → $cmd"
+  fi
   # Use jq for safe JSON escaping of the command string.
   jq -n --arg cmd "$cmd" \
     '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":$cmd}}}' 2>/dev/null
@@ -414,6 +440,7 @@ _apply_wrap() {
   if echo "$cmd" | grep -qE '(&&|\|\||;)'; then
     local IFS=$'\n'
     local segment seg_canonical
+    local _segments_seen=""
     # shellcheck disable=SC2046  # intentional word splitting on newlines
     for segment in $(printf '%s' "$cmd" | sed -E 's/[[:space:]]*(&&|\|\||;)[[:space:]]*/\n/g'); do
       segment=$(printf '%s' "$segment" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
@@ -421,8 +448,19 @@ _apply_wrap() {
       seg_canonical=$(_canonicalize "$segment")
       [[ -z "$seg_canonical" ]] && continue
       if _try_match_wrap_segment "$seg_canonical" "$wrfile"; then
+        # 0.12.5: log which prefix segments got dropped. The "drop the
+        # prefix" assumption is safe for `format:write && lint:check`-style
+        # warm-ups (basic-check / all-check already run those) but may
+        # not be safe for every project's chain. Surface the dropped
+        # segments so an operator can spot a load-bearing prefix being
+        # discarded.
+        if [[ -n "$_segments_seen" ]]; then
+          _log_intercept "🔀" "REWRITE-CHAIN" "dropped prefix: $_segments_seen | wrapped: $seg_canonical"
+        fi
         return 0
       fi
+      [[ -n "$_segments_seen" ]] && _segments_seen="$_segments_seen, "
+      _segments_seen="${_segments_seen}${seg_canonical}"
     done
   fi
   return 0

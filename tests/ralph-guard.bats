@@ -824,3 +824,48 @@ EOF
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm api:test-coverage")'
 }
+
+# =============================================================================
+# 0.12.5: activity-log emoji callouts for hook intercepts
+# =============================================================================
+# Operators couldn't tell when the guard fired without inspecting the
+# hook stream directly. These emojis make rewrites and denies visible
+# in activity.log next to the agent's other tool events.
+
+@test "rewrite via [wrap] writes 🔀 GUARD REWRITE to activity.log (0.12.5)" {
+  setup_wrap_policy
+  : > "$MOCK_WORKSPACE/.ralph/activity.log"
+  run _run_guard Bash "pnpm basic-check 2>&1 | tail -30"
+  [ "$status" -eq 0 ]
+  grep -q "🔀 GUARD REWRITE" "$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -qE "pnpm basic-check 2>&1.*→.*gate-run.sh basic pnpm basic-check" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "rewrite via [rewrite] writes 🔀 GUARD REWRITE to activity.log (0.12.5)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[rewrite]
+^npx pnpm (.+)$ | pnpm \1 | use local pnpm
+EOF
+  : > "$MOCK_WORKSPACE/.ralph/activity.log"
+  run _run_guard Bash "npx pnpm format"
+  [ "$status" -eq 0 ]
+  grep -q "🔀 GUARD REWRITE" "$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -qE "npx pnpm format.*→.*pnpm format" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "deny writes ⛔ GUARD DENY to activity.log (0.12.5)" {
+  : > "$MOCK_WORKSPACE/.ralph/activity.log"
+  run _run_guard Bash "rm -rf .ralph/"
+  [ "$status" -eq 0 ]
+  grep -q "⛔ GUARD DENY" "$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -q "rm -rf .ralph/" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "no-op tool calls do NOT write GUARD lines to activity.log (0.12.5)" {
+  setup_wrap_policy
+  : > "$MOCK_WORKSPACE/.ralph/activity.log"
+  # `ls /tmp` matches no rule and triggers no intercept.
+  run _run_guard Bash "ls /tmp"
+  [ "$status" -eq 0 ]
+  ! grep -q "GUARD" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
