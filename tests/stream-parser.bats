@@ -438,12 +438,14 @@ tool_result_json() {
 Active task: T031
 HOFF
   # Seed a summary file that gate-run.sh would have produced on failure.
+  # 0.13.1: summary is a pointer breadcrumb (no failures: extraction).
   mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
   cat > "$MOCK_WORKSPACE/.ralph/gates/basic-latest.summary" <<'SUM'
 label: basic
 exit: 1
-failures:
-1:src/foo.spec.ts > assertion failed
+duration: 12s
+log: .ralph/gates/basic-latest.log
+cmd: pnpm basic-check
 SUM
   local events=""
   events+=$(tool_result_json "Shell" 50 5 1 "" "bash /plugin/shared-scripts/gate-run.sh basic pnpm basic-check")
@@ -453,7 +455,7 @@ SUM
   grep -q "Active task: T031" "$MOCK_WORKSPACE/.ralph/handoff.md"
   # Summary is inlined under "## Last gate state".
   grep -q "label: basic" "$MOCK_WORKSPACE/.ralph/handoff.md"
-  grep -q "src/foo.spec.ts" "$MOCK_WORKSPACE/.ralph/handoff.md"
+  grep -q "log: .ralph/gates/basic-latest.log" "$MOCK_WORKSPACE/.ralph/handoff.md"
 }
 
 @test "gate-end success rewrites Last gate state with a one-liner (0.12.0)" {

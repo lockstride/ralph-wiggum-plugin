@@ -524,9 +524,14 @@ if [[ $cmd_status -ne 0 ]]; then
   printf '%s' "$rel_latest" >"$gates_dir/last-failed-log"
 fi
 
-# 0.12.0: Structured failure summary at .ralph/gates/<label>-latest.summary.
+# Structured gate summary at .ralph/gates/<label>-latest.summary.
 # Consumed by stream-parser to write the "Last gate state" section of
 # handoff.md, and by the framing prompt's handoff block on the next loop.
+#
+# 0.13.1: failure-line extraction removed. Project test runners vary too
+# much for one regex to reliably catch failures, and stale/empty
+# "failures:" blocks were misleading. Agents read .ralph/gates/<label>-latest.log
+# directly when they need failure detail — the breadcrumb just points at it.
 # Capped at ~2KB so it never balloons the next prompt.
 if [[ $cmd_status -ne 0 ]]; then
   summary_file="$gates_dir/$label-latest.summary"
@@ -536,21 +541,14 @@ if [[ $cmd_status -ne 0 ]]; then
     printf 'duration: %ss\n' "$duration"
     printf 'log: %s\n' "$rel_latest"
     printf 'cmd: %s\n' "$*"
-    printf '\n'
     # Coverage gaps section — present when the wrapped command's log contains
     # a "=== coverage gaps ===" block (produced by a project-side coverage
     # summarizer). Surface it verbatim if found.
     if grep -q '^=== coverage gaps ===' "$log_file" 2>/dev/null; then
-      printf 'coverage_gaps:\n'
+      printf '\ncoverage_gaps:\n'
       awk '/^=== coverage gaps ===/{flag=1;next} /^=== /{flag=0} flag' \
         "$log_file" 2>/dev/null | head -n 30
-      printf '\n'
     fi
-    # Failing-signature lines (line-anchored, same regex as the console summary).
-    printf 'failures:\n'
-    grep -n -E \
-      '^\s*(FAIL|✗|× |Error:|AssertionError|TypeError|ReferenceError|SyntaxError|\s+at\s|expected|Expected|    [0-9]+\)|ERROR in|error TS[0-9]+|error\s+@|✖ )' \
-      "$log_file" 2>/dev/null | head -n 20 || true
   } >"$summary_file"
   # Hard cap at 2KB.
   if [[ -f "$summary_file" ]]; then

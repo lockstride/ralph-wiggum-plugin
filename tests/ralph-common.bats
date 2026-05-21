@@ -134,8 +134,9 @@ teardown() {
 
 label: basic
 exit: 1
-failures:
-1:src/foo.spec.ts > assertion failed
+duration: 12s
+log: .ralph/gates/basic-latest.log
+cmd: pnpm basic-check
 
 ## Working set
 
@@ -146,7 +147,7 @@ HOFF
   echo "$output" | grep -q "^## Handoff from previous loop$"
   echo "$output" | grep -q "## Last gate state"
   echo "$output" | grep -q "Active task: T031"
-  echo "$output" | grep -q "src/foo.spec.ts"
+  echo "$output" | grep -q "log: .ralph/gates/basic-latest.log"
 }
 
 @test "build_prompt omits handoff section when handoff.md is absent (0.12.0)" {

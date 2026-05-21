@@ -1176,10 +1176,10 @@ run_loop() {
         [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "🔄 Context rotation triggered — stopping agent..." >&2
         kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
-        # 0.12.4: append mechanical state to handoff.md so the next session
-        # has carry-over context even when the agent didn't write a Working set
-        # before being force-killed.
-        _auto_enrich_handoff "$workspace" 2>/dev/null || true
+        # 0.13.1: auto-enrich now runs at the single loop-end chokepoint
+        # in run_ralph_loop (right before `sleep 2`), so every loop boundary
+        # gets fresh "Last commit / Last task / Next unchecked" carry-over,
+        # not just force-kill paths.
         signal="ROTATE"
         break
         ;;
@@ -1717,12 +1717,9 @@ run_ralph_loop() {
           # Failure context flows via the inlined handoff block —
           # stream-parser keeps `## Last gate state` current from
           # gate-run.sh's summary file.
+          # (0.13.1: _auto_enrich_handoff runs at the loop-end chokepoint
+          # below — no need to call it per signal branch.)
         fi
-        # 0.12.4: append mechanical state (last commit, last [x], next unchecked)
-        # so the next session has carry-over context. The template overwrote
-        # any agent-written sections, so this is the only carry-over the
-        # next session will see.
-        _auto_enrich_handoff "$workspace" 2>/dev/null || true
         log_progress "$workspace" "**Loop $loop_label ended** — 🛑 TURN_END"
         echo "🛑 Turn ended — rotating to fresh context..."
         stall_count=0
@@ -1822,6 +1819,16 @@ run_ralph_loop() {
         retry=0
         ;;
     esac
+
+    # 0.13.1: single loop-end chokepoint for handoff auto-enrichment.
+    # Every loop boundary that hands off to another iteration refreshes
+    # "Last commit / Last task done / Next unchecked" so the next loop's
+    # framing inlines accurate orientation. Skipped on DEFER (same loop
+    # retries with unchanged state) and after terminal branches that
+    # already `return`ed (COMPLETE, GUTTER, stop-requested).
+    if [[ "$signal" != "DEFER" ]]; then
+      _auto_enrich_handoff "$workspace" 2>/dev/null || true
+    fi
 
     sleep 2
   done

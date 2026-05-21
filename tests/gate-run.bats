@@ -339,16 +339,22 @@ EOF
 
 # --- 0.12.0: failure summary file ---
 
-@test "writes <label>-latest.summary on failure (0.12.0)" {
-  # Use bash -c to emit a recognizable failure signature, then fail.
+@test "writes <label>-latest.summary on failure (0.13.1 — pointer-only)" {
+  # 0.13.1: the summary file is now a pointer breadcrumb (label/exit/duration/
+  # log/cmd), not a parsed failure transcript. Agents read the log file
+  # directly when they need failure detail — project test runners vary too
+  # much for one regex to reliably extract failures.
   bash "$SCRIPTS_DIR/gate-run.sh" basic bash -c 'echo "FAIL  src/foo.spec.ts > test name"; echo "AssertionError: expected 1 to be 2"; exit 1' || true
 
   local summary="$MOCK_WORKSPACE/.ralph/gates/basic-latest.summary"
   [ -f "$summary" ]
   grep -q "^label: basic" "$summary"
   grep -q "^exit: 1" "$summary"
-  grep -q "^failures:" "$summary"
-  grep -q "AssertionError" "$summary"
+  grep -q "^duration: " "$summary"
+  grep -q "^log: " "$summary"
+  grep -q "^cmd: " "$summary"
+  # No failure extraction — must NOT have a failures: section
+  ! grep -q "^failures:" "$summary"
 }
 
 @test "removes stale summary on success (0.12.0)" {

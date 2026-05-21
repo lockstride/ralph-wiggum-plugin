@@ -68,14 +68,19 @@ and unattended execution. Stable across versions of speckit-implement.
     `{{PLAN_FILE}}`, `{{SPEC_FILE}}`, `{{CONSTITUTION_PATH}}`,
     `{{GATE_RUN}}`, `{{BASIC_CHECK_COMMAND}}`,
     `{{FINAL_CHECK_COMMAND}}` — the loop substitutes them.
-15. **Reference `{{ACTIVITY_TAIL}}`.** A `Recent activity` section
-    in the prompt body shows the last ~50 events from
-    `.ralph/activity.log`. The loop populates this on each loop.
-    Surface it so the agent can spot meta-patterns (same gate failing
-    3×, same file thrashed) it would otherwise miss.
-16. **Total output should stay under 40 lines.** With Stop / Handoff /
-    After-commit moved to the framing, the body is purely task-execution
-    flow and can shrink. Trust the framing for everything else.
+15. **Don't emit dynamic state.** Recent activity, gate failure
+    summaries, and other per-loop state belong in the framing prompt
+    (which fires per iteration), not in the cached body (which is
+    rendered once at session start). The body is the durable,
+    project-shaped "how to do tasks" layer — keep it static.
+16. **Define paths once.** Inline `{{TASK_FILE}}`, `{{PLAN_FILE}}`,
+    `{{CONSTITUTION_PATH}}`, and gate commands in a `## Paths` section
+    at the top, then refer to them symbolically in the per-task flow
+    ("the basic gate", "the tasks file"). Repeating absolute paths in
+    every step is noise.
+17. **Total output should stay under 40 lines.** With Stop / Handoff /
+    After-commit moved to the framing and paths defined once, the body
+    is purely task-execution flow and should shrink.
 
 ---
 
@@ -112,37 +117,29 @@ context rotation and rate limits; you handle the work.
 - **Basic gate**: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`
 - **Final gate**: `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
 
-## Recent activity
-{{ACTIVITY_TAIL}}
-
-If the snapshot shows the same gate failing or the same file edited
-repeatedly without progress, investigate the root cause before
-retrying — read the gate log, check screenshots, use `curl` directly.
-
 ## Per-task flow
-1. Read `{{TASK_FILE}}` and `{{PLAN_FILE}}`. Read data-model.md /
+1. Read the tasks file and the plan file. Read data-model.md /
    contracts/ / research.md / quickstart.md if they exist.
-2. For each unchecked task in `{{TASK_FILE}}`, in phase order:
+2. For each unchecked task in phase order:
    - Read only the files the task references.
    - Implement the minimum change. TDD where applicable.
-   - Run `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`.
-   - Mark `[x]` in `{{TASK_FILE}}` only after the gate exits 0.
+   - Run the basic gate.
+   - Mark `[x]` only after the gate exits 0.
    - Commit: `git add <exact paths> && git commit -m "<type>(<scope>): <description> (T###)"`.
    - (Framing's `## After every commit` block governs what's next.)
-3. When all `[x]` AND `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
-   exits 0, emit `<promise>ALL_TASKS_DONE</promise>`.
+3. When all `[x]` AND the final gate exits 0, emit
+   `<promise>ALL_TASKS_DONE</promise>`.
 
-If a gate fails, read `.ralph/gates/basic-latest.log` (or the
-relevant label's log). Screenshots at `cypress/screenshots/` and
-direct `curl` against endpoints are cheaper evidence than re-running.
+If a gate fails, read `.ralph/gates/<label>-latest.log` for the output.
+Screenshots and direct `curl` are cheaper evidence than re-running.
 After a genuine fix, if the gate still fails for the same reason,
 emit `<ralph>GUTTER</ralph>`.
 
 ## Constitution
-Ground every decision in `{{CONSTITUTION_PATH}}`. If a task would
-violate it, mark blocked and emit `<ralph>GUTTER</ralph>`.
+Ground every decision in the constitution. If a task would violate
+it, mark blocked and emit `<ralph>GUTTER</ralph>`.
 
-Begin from the first unchecked task in `{{TASK_FILE}}`.
+Begin from the first unchecked task.
 ```
 
 ---

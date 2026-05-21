@@ -83,25 +83,12 @@ _resolve_guardrails_preamble() {
 # Write the resolved prompt body to .ralph/effective-prompt.md.
 # Prepends the universal guardrails preamble so PROMPT.md, --prompt-file,
 # and spec modes all carry the same anti-pattern rules.
-#
-# 0.6.0: optional third argument $append_loop_extras. When "true", appends
-# a "Recent activity" section (last 50 events from activity.log) and a
-# "Skills available" pointer block to the body. Used by PROMPT.md and
-# --prompt-file modes so user-supplied prompts get the same self-observation
-# and skill-pointer benefits the spec-mode template gets via {{ACTIVITY_TAIL}}
-# placeholder substitution. Spec mode passes "false" (the template handles
-# both itself).
 _write_effective_prompt() {
   local workspace="$1"
   local body="$2"
-  local append_loop_extras="${3:-false}"
   local rel="${RALPH_EFFECTIVE_PROMPT:-.ralph/effective-prompt.md}"
   local out="$workspace/$rel"
   mkdir -p "$(dirname "$out")"
-
-  if [[ "$append_loop_extras" == "true" ]]; then
-    body="${body}$(_loop_extras_block "$workspace")"
-  fi
 
   local preamble
   preamble=$(_resolve_guardrails_preamble)
@@ -113,50 +100,13 @@ _write_effective_prompt() {
   echo "$out"
 }
 
-# 0.6.0: build the loop-extras block that PROMPT.md / --prompt-file modes
-# get appended to the user's prompt. Mirrors what spec-mode templates
-# include via {{ACTIVITY_TAIL}} substitution + the inline skills section,
-# so non-spec users still benefit from self-observation and skill
-# discoverability without having to manually template their PROMPT.md.
-_loop_extras_block() {
-  local workspace="$1"
-  local activity_tail=""
-  local _activity_log_path="$workspace/.ralph/activity.log"
-  if [[ -f "$_activity_log_path" ]]; then
-    activity_tail=$(tail -n 50 "$_activity_log_path" 2>/dev/null || true)
-  fi
-  if [[ -z "$activity_tail" ]]; then
-    activity_tail="(no prior activity — this is the first loop)"
-  fi
-
-  cat <<EOF
-
-
----
-
-## Recent activity (last 50 events from .ralph/activity.log)
-
-\`\`\`
-$activity_tail
-\`\`\`
-
-If the snapshot above shows you've been running the same gate or editing
-the same file repeatedly without progress, investigate the root cause
-before retrying — read the gate log, check screenshots, use \`curl\`
-against endpoints directly.
-EOF
-}
-
 # Substitute {{VAR}} placeholders in a template using a simple key/value map.
 # Args: template_path KEY1 VAL1 KEY2 VAL2 ...
 #
-# 0.6.0: uses bash parameter expansion instead of sed. The previous sed
-# implementation broke on multi-line values (newlines in the replacement
-# get interpreted as new sed commands and corrupt the output) — fine when
-# all placeholders were single-line, but the new {{ACTIVITY_TAIL}}
-# placeholder substitutes ~50 lines of activity log. Bash's `${var//search/replace}`
-# handles multi-line values correctly because the replacement side is
-# always literal (no glob/regex interpretation).
+# Uses bash parameter expansion instead of sed so multi-line replacement
+# values (if any) render cleanly — bash's `${var//search/replace}` treats
+# the replacement side as literal (no glob/regex interpretation), unlike
+# sed which interprets newlines in the replacement as new sed commands.
 _render_template() {
   local template="$1"
   shift
@@ -187,10 +137,7 @@ resolve_prompt_promptmd() {
   fi
   mkdir -p "$workspace/.ralph"
   echo "$prompt_file" >"$workspace/.ralph/task-file-path"
-  # 0.6.0: append loop extras (activity tail + skill pointers) so PROMPT.md
-  # users get the same self-observation and skill discoverability that
-  # spec-mode templates include via placeholder substitution.
-  _write_effective_prompt "$workspace" "$(cat "$prompt_file")" "true"
+  _write_effective_prompt "$workspace" "$(cat "$prompt_file")"
 }
 
 # Mode 2: custom prompt file at a user-supplied path
@@ -211,9 +158,7 @@ resolve_prompt_file() {
   fi
   mkdir -p "$workspace/.ralph"
   echo "$path" >"$workspace/.ralph/task-file-path"
-  # 0.6.0: append loop extras (activity tail + skill pointers) — see
-  # resolve_prompt_promptmd for rationale.
-  _write_effective_prompt "$workspace" "$(cat "$path")" "true"
+  _write_effective_prompt "$workspace" "$(cat "$path")"
 }
 
 # 0.12.4: Belt-and-suspenders against generator regressions.
@@ -632,20 +577,6 @@ resolve_prompt_spec() {
     template="$templates_dir/speckit-prompt.md"
   fi
 
-  # 0.6.0: render the {{ACTIVITY_TAIL}} placeholder with the last ~50 events
-  # from .ralph/activity.log. Lets the agent see its own recent pattern (same
-  # gate failing 3×, same file thrashed) which it would otherwise miss.
-  # ~500 token cost on a populated log; degrades gracefully to a placeholder
-  # message when activity.log doesn't exist yet (first loop).
-  local activity_tail=""
-  local _activity_log_path="$workspace/.ralph/activity.log"
-  if [[ -f "$_activity_log_path" ]]; then
-    activity_tail=$(tail -n 50 "$_activity_log_path" 2>/dev/null || true)
-  fi
-  if [[ -z "$activity_tail" ]]; then
-    activity_tail="(no prior activity — this is the first loop)"
-  fi
-
   local rendered
   if ! rendered=$(_render_template "$template" \
     SPEC_DIR "$spec_dir" \
@@ -658,8 +589,7 @@ resolve_prompt_spec() {
     PUSH_GUIDANCE "$push_guidance" \
     TASK_FILE "$task_file" \
     PLAN_FILE "$plan_file" \
-    SPEC_FILE "$spec_file" \
-    ACTIVITY_TAIL "$activity_tail"); then
+    SPEC_FILE "$spec_file"); then
     return 1
   fi
 

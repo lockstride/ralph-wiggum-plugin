@@ -15,38 +15,30 @@ context rotation; you handle the work.
 - **Basic gate**: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`
 - **Final gate**: `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
 
-## Recent activity
-{{ACTIVITY_TAIL}}
-
-If the snapshot shows the same gate failing or the same file edited
-repeatedly, investigate the root cause before retrying — read the gate
-log, check whether you're editing the right file, and look for
-infrastructure issues (ports, containers, env vars).
-
 ## Per-task flow
-1. Read `{{TASK_FILE}}` and `{{PLAN_FILE}}`. Read data-model.md /
+1. Read the tasks file and the plan file. Read data-model.md /
    contracts/ / research.md / quickstart.md if they exist.
 2. For each unchecked task in phase order:
    - Read only files the task references; implement the minimum change.
-   - Run `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`.
+   - Run the basic gate.
    - Mark `[x]` only after the gate exits 0.
    - `git add <exact paths> && git commit -m "<type>(<scope>): <desc> (T###)"`. No agent footers. No `--amend`. {{PUSH_GUIDANCE}}
    - (The framing's `## After every commit` block governs what happens
      next — yield-if-breadcrumb OR read the next task.)
-3. When all tasks are `[x]` AND `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
-   exits 0, emit `<promise>ALL_TASKS_DONE</promise>`.
+3. When all tasks are `[x]` AND the final gate exits 0,
+   emit `<promise>ALL_TASKS_DONE</promise>`.
 
-If a gate fails, read `.ralph/gates/basic-latest.log` (or the
-relevant label's log). Screenshots at `cypress/screenshots/` and
-direct `curl` against endpoints are cheaper evidence than re-running.
-After a genuine fix, if the gate still fails for the same reason,
-emit `<ralph>GUTTER</ralph>` — the loop will rotate to a fresh agent.
+If a gate fails, read `.ralph/gates/<label>-latest.log` for the
+output. Screenshots at `cypress/screenshots/` and direct `curl` against
+endpoints are cheaper evidence than re-running. After a genuine fix,
+if the gate still fails for the same reason, emit `<ralph>GUTTER</ralph>`
+— the loop will rotate to a fresh agent.
 
 ## Constitution
-Ground every decision in `{{CONSTITUTION_PATH}}`. A task that would
-violate it: mark blocked and emit `<ralph>GUTTER</ralph>`.
+Ground every decision in the constitution. A task that would violate
+it: mark blocked and emit `<ralph>GUTTER</ralph>`.
 
 ---
 The framing has already inlined `.ralph/handoff.md`. Do NOT re-read the
 file — it may have been auto-enriched since the inline snapshot. Begin
-from the first unchecked task in `{{TASK_FILE}}`.
+from the first unchecked task.
