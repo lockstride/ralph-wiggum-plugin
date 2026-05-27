@@ -54,7 +54,7 @@ Substitute the actual paths from your framing prompt. **Do not perform verificat
 iter N - MODE - <one-sentence summary from sub-agent>
 ```
 
-Bump the **Last loop** and **Last mode** header fields. Commit the report change.
+Bump the **Last loop** and **Last mode** header fields. The report lives under `.ralph/` (gitignored, per-run state) — **do not** commit it, and do not `git add -f` to bypass the ignore. Disk state is sufficient: the task-counter, the mode-decision grep, and `seed_report()` all read the file directly.
 
 **Step 5. Let the loop advance.** No signal emission needed. The loop's own task-counter will see the updated checkbox state and decide whether to continue or exit.
 
