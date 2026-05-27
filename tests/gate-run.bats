@@ -48,6 +48,27 @@ teardown() {
   [ "$status" -eq 64 ]
 }
 
+@test "accepts eval-* labels (0.13.3)" {
+  # The eval loop (verifying-acceptance-criteria, addressing-acceptance-gaps)
+  # uses eval-* labels to keep its gate history separate from the main loop.
+  # Previously rejected with exit 64 because the label list was too narrow.
+  for label in eval-final eval-rework eval-something-custom; do
+    run bash "$SCRIPTS_DIR/gate-run.sh" "$label" true
+    [ "$status" -eq 0 ] || { echo "eval label '$label' rejected: $output"; return 1; }
+    [[ -f "$MOCK_WORKSPACE/.ralph/gates/${label}-latest.exit" ]] || {
+      echo "expected breadcrumb at gates/${label}-latest.exit"; return 1;
+    }
+  done
+}
+
+@test "rejects malformed eval-* labels (0.13.3)" {
+  # eval-* must be eval-<lowercase-id>. Uppercase or spaces are not allowed.
+  run bash "$SCRIPTS_DIR/gate-run.sh" "eval-FINAL" true
+  [ "$status" -eq 64 ]
+  run bash "$SCRIPTS_DIR/gate-run.sh" "eval-" true
+  [ "$status" -eq 64 ]
+}
+
 @test "--help prints usage and exits 0" {
   run bash "$SCRIPTS_DIR/gate-run.sh" --help
   [ "$status" -eq 0 ]

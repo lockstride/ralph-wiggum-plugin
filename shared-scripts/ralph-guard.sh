@@ -603,7 +603,7 @@ _guard_bash() {
   # tasks that need 'final' after 'basic' get incorrectly blocked.)
   if echo "$cmd" | grep -qE 'gate-run\.sh'; then
     local label
-    label=$(echo "$cmd" | grep -oE 'gate-run\.sh\s+(basic|final|e2e|lint|custom)' | awk '{print $2}') || label="unknown"
+    label=$(echo "$cmd" | grep -oE 'gate-run\.sh\s+(basic|final|e2e|lint|custom|eval-[a-z0-9-]+)' | awk '{print $2}') || label="unknown"
 
     local last_gate_ts_file="$STATE_DIR/last-gate-ts.$label"
     local last_write last_gate
@@ -637,11 +637,17 @@ _guard_write() {
   # Block writes to .ralph/ except allowlisted files
   if [[ "$rel_path" == .ralph/* ]]; then
     case "$rel_path" in
-      .ralph/handoff.md | .ralph/errors.log | .ralph/guardrails.md | .ralph/diagnosis.md | .ralph/progress.md)
-        # Allowed
+      .ralph/handoff.md | .ralph/errors.log | .ralph/guardrails.md | .ralph/diagnosis.md | .ralph/progress.md | .ralph/acceptance-report.md)
+        # Allowed.
+        # acceptance-report.md is writable because it is the eval loop's
+        # primary output: the orchestrator (running-acceptance-evaluation)
+        # appends History lines, and the verifier sub-agent
+        # (verifying-acceptance-criteria) records gaps and Status. It lives
+        # under .ralph/ (per-run state, gitignored) but is not commit-tracked
+        # so writing it never leaks into git history.
         ;;
       *)
-        _block "Write to '$rel_path' denied. Files under .ralph/ (except handoff.md, errors.log, guardrails.md, diagnosis.md, progress.md) are managed by the loop."
+        _block "Write to '$rel_path' denied. Files under .ralph/ (except handoff.md, errors.log, guardrails.md, diagnosis.md, progress.md, acceptance-report.md) are managed by the loop."
         ;;
     esac
   fi

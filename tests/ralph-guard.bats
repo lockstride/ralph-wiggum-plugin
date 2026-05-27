@@ -236,6 +236,35 @@ _run_guard() {
   echo "$output" | jq -e ".hookSpecificOutput.permissionDecisionReason | test(\"Gate 'final'\")"
 }
 
+@test "extracts eval-* labels for the per-label cache (0.13.3)" {
+  # Pre-0.13.3 the label-extraction regex was '(basic|final|e2e|lint|custom)'.
+  # When the verifier ran 'gate-run.sh eval-final ...', the regex didn't
+  # match, pipefail fired the ||, and label became "unknown" — so two
+  # different eval invocations collided on last-gate-ts.unknown and the
+  # second got cache-denied even though no actual eval-* gate had run.
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.eval-final"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh eval-final pnpm all-check"
+  [ "$status" -eq 0 ]
+  # The deny must name 'eval-final' specifically — proves the label was
+  # parsed correctly and the lookup hit the eval-final cache, not 'unknown'.
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e ".hookSpecificOutput.permissionDecisionReason | test(\"Gate 'eval-final'\")"
+}
+
+@test "fresh eval-rework label is not blocked by a cached eval-final (0.13.3)" {
+  # Per-label cache must still hold for eval-* labels: a cached eval-final
+  # must NOT block a never-run eval-rework.
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.eval-final"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  rm -f "$STATE_DIR/last-gate-ts.eval-rework"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh eval-rework pnpm test-unit"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
 # --- Write/Edit forbidden-path denial ---
 
 @test "blocks write to .ralph/gates/" {
@@ -272,6 +301,26 @@ _run_guard() {
   if [ -n "$output" ]; then
     ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
   fi
+}
+
+@test "allows write to .ralph/acceptance-report.md (0.13.3)" {
+  # The acceptance-evaluation orchestrator and verifier sub-agent write
+  # to this file as their primary output (History line, Status, Gaps).
+  # Prior versions denied the write, which broke every eval loop that got
+  # past the seed step.
+  run _run_guard Write "$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "still denies write to other .ralph/ files (0.13.3)" {
+  # Sanity-check: the allowlist expansion didn't accidentally open .ralph/
+  # writes generally. Any unlisted .ralph/ path should still be denied.
+  run _run_guard Write "$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 @test "allows write to normal project files" {

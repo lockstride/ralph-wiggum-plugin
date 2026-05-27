@@ -141,8 +141,17 @@ fi
 
 case "$label" in
   basic | final | e2e | lint | custom) ;;
+  eval-*)
+    # eval-* labels are reserved for the post-completion acceptance
+    # evaluation loop (verifying-acceptance-criteria, addressing-acceptance-gaps).
+    # They keep eval-loop gate history separate from the main loop's.
+    [[ "$label" =~ ^eval-[a-z0-9-]+$ ]] || {
+      echo "gate-run.sh: invalid eval label '$label' (expected eval-<lowercase-id>, e.g. eval-final, eval-rework)" >&2
+      exit 64
+    }
+    ;;
   *)
-    echo "gate-run.sh: invalid label '$label' (expected basic|final|e2e|lint|custom)" >&2
+    echo "gate-run.sh: invalid label '$label' (expected basic|final|e2e|lint|custom|eval-*)" >&2
     echo "  run 'gate-run.sh --help' for details" >&2
     exit 64
     ;;
