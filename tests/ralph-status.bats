@@ -141,3 +141,93 @@ TASKS
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "mode:      acceptance eval (ground truth: $gt)"
 }
+
+# --- Eval-mode ACCEPTANCE section (0.13.4) ---
+#
+# In eval mode the report's top-level checkbox is a verdict, not a task,
+# so PROGRESS / PREVIOUS / CURRENT / NEXT all need eval-aware handling.
+
+@test "ralph-status: eval mode with CLEAN report shows verified verdict (0.13.4)" {
+  echo "$MOCK_WORKSPACE/spec.md" > "$MOCK_WORKSPACE/.ralph/eval-ground-truth"
+  cat > "$MOCK_WORKSPACE/.ralph/acceptance-report.md" <<'REPORT'
+# Acceptance Report
+
+- [x] All acceptance criteria met and verified
+
+**Status:** CLEAN
+**Ground truth:** /tmp/spec.md
+**Last loop:** 3
+**Last mode:** VERIFIER
+
+## Gaps
+
+(none — all criteria verified)
+
+## History
+
+loop 1 - VERIFIER - 5 gaps found
+loop 2 - REWORK - resolved 5 gaps
+loop 3 - VERIFIER - re-verified, zero gaps, set CLEAN
+REPORT
+
+  run bash "$STATUS_SCRIPT" "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+
+  echo "$output" | grep -q '📋 ACCEPTANCE: ✅ verified'
+  echo "$output" | grep -qE '^ACCEPTANCE$'
+  echo "$output" | grep -q 'status:    CLEAN'
+  echo "$output" | grep -q 'last mode: VERIFIER  (loop 3)'
+  # No misleading "1 / 1 complete, 0%" from the generic task counter.
+  ! echo "$output" | grep -q '📋 TASKS'
+  # No PREVIOUS/CURRENT/NEXT — they'd read the top-level checkbox.
+  ! echo "$output" | grep -qE '^PREVIOUS'
+  ! echo "$output" | grep -qE '^CURRENT'
+}
+
+@test "ralph-status: eval mode with open gaps shows pending verdict + counts (0.13.4)" {
+  echo "$MOCK_WORKSPACE/spec.md" > "$MOCK_WORKSPACE/.ralph/eval-ground-truth"
+  cat > "$MOCK_WORKSPACE/.ralph/acceptance-report.md" <<'REPORT'
+# Acceptance Report
+
+- [ ] All acceptance criteria met and verified
+
+**Status:** UNVERIFIED
+**Ground truth:** /tmp/spec.md
+**Last loop:** 2
+**Last mode:** REWORK
+
+## Gaps
+
+- [ ] T037 missing E2E test for inline panel lifecycle
+- [ ] T041 only 19 off-topic prompts, requirement >= 20
+- [ ] T044 final gate red (blocked: needs verifier re-check)
+- [x] T038 quota notice header slot added
+
+## History
+
+loop 1 - VERIFIER - 4 gaps found
+loop 2 - REWORK - closed 1 gap, 1 blocked
+REPORT
+
+  run bash "$STATUS_SCRIPT" "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+
+  echo "$output" | grep -q '📋 ACCEPTANCE: ⏳ pending'
+  # Open count excludes the blocked gap.
+  echo "$output" | grep -q 'gaps:      2 open, 1 blocked, 1 resolved'
+  echo "$output" | grep -q 'last mode: REWORK  (loop 2)'
+  echo "$output" | grep -q 'history:   2 entries — last: loop 2 - REWORK'
+}
+
+@test "ralph-status: eval mode with un-seeded report falls back gracefully (0.13.4)" {
+  # eval-ground-truth breadcrumb present but no report yet — the
+  # acceptance section should still render with a graceful "not seeded"
+  # placeholder rather than blanking out or crashing.
+  echo "$MOCK_WORKSPACE/spec.md" > "$MOCK_WORKSPACE/.ralph/eval-ground-truth"
+  # No acceptance-report.md.
+
+  run bash "$STATUS_SCRIPT" "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '📋 ACCEPTANCE: (report not seeded yet)'
+  echo "$output" | grep -qE '^ACCEPTANCE$'
+}

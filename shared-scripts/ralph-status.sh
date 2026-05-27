@@ -56,6 +56,62 @@ if [[ -f "$eval_ground_truth_path" ]]; then
   _eval_ground_truth=$(cat "$eval_ground_truth_path")
 fi
 
+# 0.13.4: parse the acceptance report once so the PROGRESS and ACCEPTANCE
+# sections can surface eval-specific signal (verdict, status, last mode,
+# gap counts, history). All fields are best-effort — a missing / malformed
+# report leaves the variables empty and the section prints "(not seeded)".
+_eval_status=""        # CLEAN / UNVERIFIED / (placeholder text from template)
+_eval_verdict_glyph="" # ✅ / ⏳
+_eval_verdict_label="" # verified / pending
+_eval_last_mode=""
+_eval_last_loop=""
+_eval_gaps_open=0
+_eval_gaps_blocked=0
+_eval_gaps_resolved=0
+_eval_history_count=0
+_eval_history_last=""
+
+if [[ "$_eval_mode" == "true" ]]; then
+  _report="$ralph_dir/acceptance-report.md"
+  if [[ -f "$_report" ]]; then
+    # Top-level checkbox decides the verdict glyph. The line is created by
+    # the report template and never moves, so a simple grep is robust.
+    if grep -qE '^- \[x\] All acceptance criteria met and verified' "$_report"; then
+      _eval_verdict_glyph="✅"
+      _eval_verdict_label="verified"
+    else
+      _eval_verdict_glyph="⏳"
+      _eval_verdict_label="pending"
+    fi
+
+    _eval_status=$(grep -m1 -E '^\*\*Status:\*\*' "$_report" | sed -E 's/^\*\*Status:\*\*[[:space:]]*//' | tr -d '\r' || true)
+    _eval_last_mode=$(grep -m1 -E '^\*\*Last mode:\*\*' "$_report" | sed -E 's/^\*\*Last mode:\*\*[[:space:]]*//' | tr -d '\r' || true)
+    _eval_last_loop=$(grep -m1 -E '^\*\*Last loop:\*\*' "$_report" | sed -E 's/^\*\*Last loop:\*\*[[:space:]]*//' | tr -d '\r' || true)
+
+    # Gap counts: scan only the Gaps section (between `## Gaps` and the
+    # next `## ` heading). Excludes the top-level "All acceptance criteria
+    # met" checkbox, which lives above the Gaps section.
+    _gaps_slice=$(awk '
+      /^## Gaps[[:space:]]*$/ { in_g = 1; next }
+      in_g && /^## / { in_g = 0 }
+      in_g { print }
+    ' "$_report")
+    if [[ -n "$_gaps_slice" ]]; then
+      _eval_gaps_resolved=$(echo "$_gaps_slice" | grep -cE '^- \[x\]' || true)
+      _eval_gaps_blocked=$(echo "$_gaps_slice" | grep -cE '^- \[ \].*\(blocked:' || true)
+      _eval_gaps_open=$(echo "$_gaps_slice" | grep -cE '^- \[ \]' || true)
+      _eval_gaps_open=$((_eval_gaps_open - _eval_gaps_blocked))
+      [[ "$_eval_gaps_open" -lt 0 ]] && _eval_gaps_open=0
+    fi
+
+    # History: count `loop N -` / `iter N -` lines and capture the most recent.
+    _eval_history_count=$(grep -cE '^(loop|iter)[[:space:]]+[0-9]+[[:space:]]+-' "$_report" || true)
+    if [[ "$_eval_history_count" -gt 0 ]]; then
+      _eval_history_last=$(grep -E '^(loop|iter)[[:space:]]+[0-9]+[[:space:]]+-' "$_report" | tail -1)
+    fi
+  fi
+fi
+
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
@@ -156,7 +212,27 @@ printf '════════════════════════
 # file is configured (e.g. PROMPT.md mode without a checkbox-style file).
 # -----------------------------------------------------------------------------
 
-if [[ -f "$task_file_path" ]]; then
+if [[ "$_eval_mode" == "true" ]]; then
+  # In eval mode the "task file" is the acceptance report, which only
+  # holds a single top-level checkbox. The TASKS line as printed in the
+  # main loop ("1/1 complete, 0%") is misleading — verdict + gap counts
+  # are the actually-meaningful summary.
+  if [[ -n "$_eval_verdict_glyph" ]]; then
+    if [[ "$_eval_verdict_label" == "verified" ]]; then
+      printf '\n📋 ACCEPTANCE: %s %s\n' "$_eval_verdict_glyph" "$_eval_verdict_label"
+    else
+      _summary_extras=""
+      if [[ "$_eval_gaps_open" -gt 0 || "$_eval_gaps_blocked" -gt 0 ]]; then
+        _summary_extras=" ($_eval_gaps_open open"
+        [[ "$_eval_gaps_blocked" -gt 0 ]] && _summary_extras="$_summary_extras, $_eval_gaps_blocked blocked"
+        _summary_extras="$_summary_extras)"
+      fi
+      printf '\n📋 ACCEPTANCE: %s %s%s\n' "$_eval_verdict_glyph" "$_eval_verdict_label" "$_summary_extras"
+    fi
+  else
+    printf '\n📋 ACCEPTANCE: (report not seeded yet)\n'
+  fi
+elif [[ -f "$task_file_path" ]]; then
   _task_file=$(cat "$task_file_path")
   if [[ -f "$_task_file" ]]; then
     _total=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[(x| )\]' "$_task_file" 2>/dev/null || echo 0)
@@ -240,7 +316,40 @@ fi
 # no NEXT when current is the last task.
 # -----------------------------------------------------------------------------
 
-if [[ -f "$task_file_path" ]]; then
+if [[ "$_eval_mode" == "true" ]]; then
+  # 0.13.4: dedicated ACCEPTANCE section, since the generic PREVIOUS/
+  # CURRENT/NEXT block reads the report's top-level checkbox as if it
+  # were a task — uninformative for eval. The fields below come from
+  # the parser block near the top of the script.
+  _section 'ACCEPTANCE'
+  if [[ -z "$_eval_status" || "$_eval_status" == '_(filled by orchestrator)_' ]]; then
+    printf '  status:    (not yet run — orchestrator hasn'\''t set Status)\n'
+  else
+    printf '  status:    %s\n' "$_eval_status"
+  fi
+
+  if [[ -z "$_eval_last_mode" || "$_eval_last_mode" == '_(filled by orchestrator)_' ]]; then
+    printf '  last mode: (none yet)\n'
+  else
+    if [[ -n "$_eval_last_loop" && "$_eval_last_loop" != '_(filled by orchestrator)_' ]]; then
+      printf '  last mode: %s  (loop %s)\n' "$_eval_last_mode" "$_eval_last_loop"
+    else
+      printf '  last mode: %s\n' "$_eval_last_mode"
+    fi
+  fi
+
+  printf '  gaps:      %s open, %s blocked, %s resolved\n' \
+    "$_eval_gaps_open" "$_eval_gaps_blocked" "$_eval_gaps_resolved"
+
+  if [[ "$_eval_history_count" -eq 0 ]]; then
+    printf '  history:   (no loops recorded yet)\n'
+  elif [[ "$_eval_history_count" -eq 1 ]]; then
+    printf '  history:   1 entry — %s\n' "$(echo "$_eval_history_last" | cut -c1-100)"
+  else
+    printf '  history:   %s entries — last: %s\n' \
+      "$_eval_history_count" "$(echo "$_eval_history_last" | cut -c1-100)"
+  fi
+elif [[ -f "$task_file_path" ]]; then
   task_file=$(cat "$task_file_path")
   if [[ -f "$task_file" ]]; then
     _prev_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[x\]' "$task_file" 2>/dev/null | tail -1 || true)
