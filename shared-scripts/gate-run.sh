@@ -76,6 +76,9 @@ EXIT CODES
   0       The wrapped command exited 0.
   N≠0     The wrapped command exited N. Passed through verbatim.
   64      Usage error (missing args, invalid label).
+  75      Gate busy — another gate of this label is still running and the lock
+          could not be acquired within RALPH_GATE_LOCK_WAIT. Transient: no
+          breadcrumb is written; wait for the in-progress gate and retry.
   124     The command exceeded its timeout (GNU/BSD 'timeout' convention).
 
 ENVIRONMENT
@@ -258,10 +261,26 @@ while [[ $_lock_waited -lt $_lock_wait ]]; do
   _lock_waited=$((_lock_waited + 1))
 done
 if [[ $_lock_acquired -eq 0 ]]; then
-  echo "gate-run.sh: another gate-run.sh is holding the $label lock; waited ${_lock_wait}s and gave up" >&2
-  echo "  (lock dir: $_lock_dir — remove manually if you are sure no other gate is running)" >&2
-  _log_activity "🧪 GATE BLOCKED label=$label — could not acquire lock after ${_lock_wait}s"
-  exit 64
+  # 0.13.5: a live lock means another gate of THIS label is genuinely still
+  # running — this is a transient "busy", not a failure to own. Surface who
+  # holds it and how long it's been running so the agent waits for it instead
+  # of tampering. (The previous message literally suggested "remove manually",
+  # which is what drove agents to `rm` the lock — promptly denied by the guard
+  # as state-tampering, wasting a turn.) Exit 75 (EX_TEMPFAIL) distinguishes
+  # "gate did not run, try again shortly" from a usage error (64) or a real
+  # gate failure (the wrapped command's own non-zero) — no breadcrumb is
+  # written, so the last real .exit/.cmd result is left untouched.
+  _holder_pid=$(cat "$_lock_dir/pid" 2>/dev/null || echo "?")
+  _holder_age=$(($(date +%s) - $(stat -f '%m' "$_lock_dir" 2>/dev/null || stat -c '%Y' "$_lock_dir" 2>/dev/null || echo 0)))
+  if [[ "$_holder_pid" =~ ^[0-9]+$ ]] && kill -0 "$_holder_pid" 2>/dev/null; then
+    _holder_state="alive — still running"
+  else
+    _holder_state="not detectable (it should be reclaimed automatically on the next attempt)"
+  fi
+  echo "gate-run.sh: the '$label' gate is already running (pid=$_holder_pid, ${_holder_age}s elapsed, $_holder_state); waited ${_lock_wait}s for it." >&2
+  echo "  Do NOT delete the lock or re-run this gate under a different label — both are dodges. Wait for the in-progress gate to finish, then read .ralph/gates/${label}-latest.{log,exit} for its result. (lock dir: $_lock_dir)" >&2
+  _log_activity "🧪 GATE BLOCKED label=$label — gate already running (pid=$_holder_pid, age=${_holder_age}s); waited ${_lock_wait}s"
+  exit 75
 fi
 trap 'rm -rf "$_lock_dir" 2>/dev/null || true' EXIT
 

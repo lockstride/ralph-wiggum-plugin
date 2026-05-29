@@ -605,6 +605,38 @@ _guard_bash() {
     local label
     label=$(echo "$cmd" | grep -oE 'gate-run\.sh\s+(basic|final|e2e|lint|custom|eval-[a-z0-9-]+)' | awk '{print $2}') || label="unknown"
 
+    # --- Final-command label lock (0.13.5) ---
+    # The completion guard (_complete_allowed) only honors a green result when
+    # the pinned final command ran under label=final. Running that exact
+    # command under any other ad-hoc label (basic|e2e|lint|custom) produces a
+    # result the completion guard ignores AND writes the breadcrumb to a
+    # different per-label cache — i.e. it sidesteps the final-gate cache. That
+    # is precisely the "re-run the final gate under a fresh label to escape the
+    # cache and fish for green" anti-pattern. A failing/flaky gate is the
+    # agent's to fix at the source, not to relabel around. eval-* labels are
+    # exempt: the acceptance-evaluation loop legitimately runs the final
+    # command under eval-final.
+    case "$label" in
+      final | eval-*) ;;
+      *)
+        local pinned_final gated_cmd
+        pinned_final="pnpm all-check"
+        if [[ -f "$WORKSPACE/.ralph/final-check-command" ]]; then
+          pinned_final=$(tr -d '\n' <"$WORKSPACE/.ralph/final-check-command" 2>/dev/null)
+        fi
+        pinned_final=$(_normalize_pnpm "$pinned_final")
+        pinned_final=$(printf '%s' "$pinned_final" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+        # Extract the command being gated from the canonical (pipe/redirect-
+        # stripped) form, then normalize it the same way as the pinned command.
+        gated_cmd=$(printf '%s' "$canonical" | sed -E "s|.*gate-run\.sh[[:space:]]+${label}[[:space:]]+||")
+        gated_cmd=$(_normalize_pnpm "$gated_cmd")
+        gated_cmd=$(printf '%s' "$gated_cmd" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+        if [[ -n "$pinned_final" && "$gated_cmd" == "$pinned_final" ]]; then
+          _block "The final completion gate '${pinned_final}' must run under label 'final', not '${label}'. A pass under '${label}' is invisible to the completion guard and bypasses the final-gate cache — re-running the final command under a fresh label to fish for green is dodging ownership of the failure. Re-run as: gate-run.sh final ${pinned_final}. If label 'final' reports it already ran since your last code edit, that cache is the signal to FIX the failing code (you own every failure, flaky infra included) — not to relabel around it."
+        fi
+        ;;
+    esac
+
     local last_gate_ts_file="$STATE_DIR/last-gate-ts.$label"
     local last_write last_gate
     last_write=$(_read_ts "$LAST_WRITE_TS")

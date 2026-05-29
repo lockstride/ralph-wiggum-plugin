@@ -163,14 +163,19 @@ teardown() {
 
 @test "concurrent runs of the same label serialize via the lock (0.5.4)" {
   # Holder grabs the lock by hand, then we kick off a second invocation
-  # with a tiny lock-wait timeout. The second one must give up with exit
-  # 64 and a recognizable message rather than racing the holder.
+  # with a tiny lock-wait timeout. The second one must give up rather than
+  # racing the holder. 0.13.5: exit 75 (EX_TEMPFAIL, "gate busy") instead of
+  # 64, with a message that surfaces the in-progress gate and forbids
+  # tampering instead of inviting "remove manually".
   mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
   mkdir "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
 
   RALPH_GATE_LOCK_WAIT=2 run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "should not run"
-  [ "$status" -eq 64 ]
-  [[ "$output" == *"holding the basic lock"* ]]
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"'basic' gate is already running"* ]]
+  # The old "remove manually" invitation must be gone; tampering is forbidden.
+  [[ "$output" == *"Do NOT delete the lock"* ]]
+  [[ "$output" != *"remove manually"* ]]
 
   # Cleanup
   rmdir "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
@@ -225,7 +230,10 @@ teardown() {
 
   RALPH_GATE_LOCK_WAIT=2 RALPH_GATE_STALE_LOCK_SEC=99999 \
     run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "should be blocked"
-  [ "$status" -eq 64 ]  # blocked, lock not stolen
+  [ "$status" -eq 75 ]  # 0.13.5: busy (lock not stolen), EX_TEMPFAIL
+  # A live holder is reported as alive/still-running and names its PID.
+  [[ "$output" == *"pid=$$"* ]]
+  [[ "$output" == *"alive"* ]]
   ! grep -q "should be blocked" "$MOCK_WORKSPACE/.ralph/gates/basic-latest.log" 2>/dev/null
 
   rm -rf "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"

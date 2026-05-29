@@ -941,3 +941,82 @@ EOF
   [ "$status" -eq 0 ]
   ! grep -q "GUARD" "$MOCK_WORKSPACE/.ralph/activity.log"
 }
+
+# -----------------------------------------------------------------------------
+# 0.13.5: Final-command label lock
+# -----------------------------------------------------------------------------
+# The pinned final command must run under label=final (or eval-* during
+# acceptance evaluation). Running it under an ad-hoc label (custom/basic/e2e/
+# lint) escapes the final-gate cache and produces a result the completion
+# guard ignores — the "relabel to dodge the cache and fish for green"
+# anti-pattern observed in loop 152651.
+
+@test "denies pinned final command under label=custom (0.13.5)" {
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh custom pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("must run under label .final.")'
+}
+
+@test "denies pinned final command under label=basic (0.13.5)" {
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "denies pinned final command under label=custom even with pipe (0.13.5)" {
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh custom pnpm all-check 2>&1 | tail -40"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "allows pinned final command under label=final (0.13.5)" {
+  rm -f "$STATE_DIR"/last-gate-ts*
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh final pnpm all-check"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "allows pinned final command under label=eval-final (eval loop exempt) (0.13.5)" {
+  rm -f "$STATE_DIR"/last-gate-ts*
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh eval-final pnpm all-check"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "allows a non-final command under label=custom (0.13.5)" {
+  rm -f "$STATE_DIR"/last-gate-ts*
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh custom pnpm some-other-script"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "final-command lock respects .ralph/final-check-command override (0.13.5)" {
+  echo "pnpm verify:all" > "$MOCK_WORKSPACE/.ralph/final-check-command"
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  # The overridden final command under a non-final label is denied...
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh custom pnpm verify:all"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  # ...while the old default (pnpm all-check) is no longer the pinned command,
+  # so it is NOT specially locked.
+  rm -f "$STATE_DIR"/last-gate-ts*
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh custom pnpm all-check"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
