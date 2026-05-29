@@ -23,23 +23,34 @@ gate-run.sh -h | --help
 
 ### Labels
 
-Fixed set. Pick the closest match; use `custom` for anything that doesn't fit.
+Fixed set, two families:
 
-| Label    | Typical use                                                        | Default timeout |
-| -------- | ------------------------------------------------------------------ | --------------- |
-| `basic`  | Fast pre-commit gate (format, lint, unit tests)                    | 1200 s          |
-| `final`  | Full verification (basic + integration + E2E)                      | 1200 s          |
-| `e2e`    | Targeted E2E, browser, or container suites                         | 1200 s          |
-| `lint`   | Lint-only or type-check-only runs                                  | 1200 s          |
-| `custom` | Anything outside the four above                                    | 1200 s          |
+**Tier labels** — exactly one command each, declared in `[gates]` in `.ralph/command-policy`. The tier-command label-lock requires each `[gates]` command to run under its own tier label.
 
-Each label gets its own artifact namespace — so `basic` and `final` don't overwrite each other's `-latest.log` / `-latest.exit` / `-latest.cmd` / `-latest.summary`. The `-latest.cmd` file is what the completion guard `_complete_allowed` uses to refuse `<promise>ALL_TASKS_DONE</promise>` when the final-gate command was spoofed (e.g. `gate-run.sh final pnpm basic-check`).
+| Label    | Typical use                                                          | Default timeout |
+| -------- | -------------------------------------------------------------------- | --------------- |
+| `basic`  | Per-task pre-commit gate (typically format + lint + unit)            | 1200 s          |
+| `full`   | Impl-loop completion gate (basic + integration + E2E)                | 1200 s          |
+| `final`  | Eval-loop gate (post-completion acceptance verification)             | 1200 s          |
+
+**Kind labels** — many commands, routed via `[wrap]`.
+
+| Label         | Typical use                                                     | Default timeout |
+| ------------- | --------------------------------------------------------------- | --------------- |
+| `unit`        | Unit test runs                                                  | 1200 s          |
+| `integration` | Integration test runs                                           | 1200 s          |
+| `e2e`         | Targeted E2E / browser / container suites                       | 1200 s          |
+| `lint`        | Lint-only / type-check-only runs                                | 1200 s          |
+| `format`      | Format-only runs                                                | 1200 s          |
+
+Each label gets its own artifact namespace — `<label>-latest.{log,exit,cmd,summary}`. The `full-latest.cmd` file is what the completion guard `_complete_allowed` uses to refuse `<promise>ALL_TASKS_DONE</promise>` when the impl-loop completion command was spoofed (e.g. running a cheap command under `gate-run.sh full`). The label-lock catches spoofs the other way too — running the tier-`full` command under `gate-run.sh basic` is denied.
 
 ### Exit codes
 
 - `0` — the wrapped command succeeded.
 - `N≠0` — the wrapped command exited `N`. Passed through verbatim via `PIPESTATUS`.
 - `64` — usage error (missing args, invalid label).
+- `75` — gate busy: another gate of this label is still running and the lock could not be acquired within `RALPH_GATE_LOCK_WAIT`. Transient — no breadcrumb is written; wait for the in-progress gate and retry.
 - `124` — timed out (matches the GNU/BSD `timeout` convention).
 
 The wrapper **always** reflects the real status of the wrapped command, even when `tee` succeeds and the command fails.
@@ -83,9 +94,10 @@ Configurable via `RALPH_GATE_TAIL` (default 60) and `RALPH_GATE_FAIL_HEAD` (defa
 | `RALPH_GATE_KEEP`              | `10`                 | How many timestamped logs to keep per label. 0 keeps everything (be careful).    |
 | `RALPH_GATE_TAIL`              | `60`                 | Lines of tail included in the summary.                                           |
 | `RALPH_GATE_FAIL_HEAD`         | `80`                 | Failure-match lines in the summary.                                              |
-| `RALPH_GATE_TIMEOUT`           | *(unset)*            | Blanket timeout override (seconds). Wins over the per-label vars below.          |
-| `RALPH_FINAL_GATE_TIMEOUT`     | `1200`               | Timeout when `label=final`.                                                      |
-| `RALPH_BASIC_GATE_TIMEOUT`     | `1200`               | Timeout for every other label.                                                   |
+| `RALPH_GATE_TIMEOUT`           | *(unset)*            | Blanket timeout override (seconds). Wins over the per-tier vars below.           |
+| `RALPH_BASIC_GATE_TIMEOUT`     | `1200`               | Timeout for tier label `basic` (also covers kind labels `unit | integration | e2e | lint | format`). |
+| `RALPH_FULL_GATE_TIMEOUT`      | `1200`               | Timeout for tier label `full`.                                                   |
+| `RALPH_FINAL_GATE_TIMEOUT`     | `1200`               | Timeout for tier label `final`.                                                  |
 | `RALPH_GATE_KILL_GRACE`        | `10`                 | Seconds between SIGTERM and SIGKILL on timeout. Subtree-kill so no orphaned grandchildren. |
 | `RALPH_GATE_LOCK_WAIT`         | `60`                 | Seconds to wait for the per-label lock before giving up (exit 64).               |
 | `RALPH_GATE_STALE_LOCK_SEC`    | `2700`               | Time-based stale-lock fallback (45 min). PID-aware steal (0.12.5+) kicks in immediately when the holder pid is dead — only locks without a `pid` file fall through to this timer. |
@@ -131,20 +143,21 @@ A `RALPH_GATE_FAIL_REGEX` env hook may land in a future release if demand justif
 
 This is the discipline that makes the wrapper pay off. Skipping it is why agents end up running the same gate three or four times.
 
-### 1. Use the project's pnpm scripts — the hook handles wrapping.
+### 1. Use the project's scripts — the hook handles wrapping.
 
 ```bash
-# ✅ Good — the [wrap] hook (0.12.3+) routes these through gate-run.sh
-pnpm basic-check
-pnpm all-check
+# ✅ Good — the [gates]/[wrap] hook routes these through gate-run.sh
+<project's [gates].basic command>
+<project's [gates].full command>
+<project's [wrap]'d targeted commands>
 
 # ❌ Bad — breaks exit code, defeats the hook's bounded summary
-pnpm basic-check | tail -50
-pnpm all-check 2>&1 | grep -i fail
-pnpm test > /tmp/out
+<basic-check> | tail -50
+<all-check> 2>&1 | grep -i fail
+<test> > /tmp/out
 ```
 
-When `.ralph/command-policy` has a `[wrap]` entry for the script, the PreToolUse hook transparently rewrites the agent's invocation to `bash gate-run.sh <label> <cmd>`. You don't need to type the wrapped form yourself — the hook does it for you and the rewrite is logged to activity.log as `🔀 GUARD REWRITE`. The agent can also invoke the wrapper directly if it prefers; both paths produce the same artifacts.
+The three `[gates]` commands are auto-wrapped by their tier label. Other commands listed in `[wrap]` are transparently rewritten to `bash gate-run.sh <label> <cmd>` by the PreToolUse hook. You don't need to type the wrapped form yourself — the hook does it for you and the rewrite is logged to activity.log as `🔀 GUARD REWRITE`. The agent can also invoke the wrapper directly if it prefers; both paths produce the same artifacts.
 
 Piping is still wrong because the wrapper's whole point is the bounded summary + persisted log. The hook strips the pipe before wrapping, but if you typed your own wrapped invocation with a pipe (`bash gate-run.sh basic pnpm test | head`) you'd defeat the point and lose the real exit code.
 
@@ -154,11 +167,11 @@ The summary you already saw, plus the persisted log at `.ralph/gates/<label>-lat
 
 **Read the log with targeted, bounded reads:**
 
-- `Read .ralph/gates/final-latest.log` — first 2000 lines (usually covers the failure block and the tail).
-- `Read .ralph/gates/final-latest.log` with `offset=500 limit=200` — slice around a specific region.
-- `Grep pattern="^\s*(FAIL|✗|×)" path=.ralph/gates/final-latest.log` — list failing test titles.
-- `Grep pattern="AssertionError|Error:" path=.ralph/gates/final-latest.log -A 5` — error sites with context.
-- `Grep pattern="error TS[0-9]+" path=.ralph/gates/final-latest.log` — TypeScript errors.
+- `Read .ralph/gates/full-latest.log` — first 2000 lines (usually covers the failure block and the tail).
+- `Read .ralph/gates/full-latest.log` with `offset=500 limit=200` — slice around a specific region.
+- `Grep pattern="^\s*(FAIL|✗|×)" path=.ralph/gates/full-latest.log` — list failing test titles.
+- `Grep pattern="AssertionError|Error:" path=.ralph/gates/full-latest.log -A 5` — error sites with context.
+- `Grep pattern="error TS[0-9]+" path=.ralph/gates/full-latest.log` — TypeScript errors.
 
 Prefer the `Grep` tool over a shell `grep` in a second process — it produces cleaner, cheaper output.
 
@@ -172,7 +185,7 @@ Re-reading a green gate log is the second-most common waste pattern (after blind
 
 ### 4. The exit-code breadcrumb is for automation, not agents.
 
-`.ralph/gates/<label>-latest.exit` is a single-decimal breadcrumb read by Ralph's completion guard (`_complete_allowed` in `ralph-common.sh`) to refuse `<promise>ALL_TASKS_DONE</promise>` when the most recent gate was red. It is not something an agent needs to `cat` or `Read` — the summary line `exit=<N>` is the same fact in a more readable form.
+`.ralph/gates/<label>-latest.exit` is a single-decimal breadcrumb. The impl-loop completion guard (`_complete_allowed` in `ralph-common.sh`) reads `full-latest.exit` to refuse `<promise>ALL_TASKS_DONE</promise>` when the impl-loop's `full`-tier gate is red. It is not something an agent needs to `cat` or `Read` — the summary line `exit=<N>` is the same fact in a more readable form.
 
 ### 5. Failure summary (0.12.0).
 

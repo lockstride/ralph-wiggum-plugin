@@ -256,6 +256,10 @@ main() {
 
   init_ralph_dir "$WORKSPACE"
 
+  if ! _validate_gates_section "$WORKSPACE"; then
+    exit 1
+  fi
+
   local ground_truth
   if ! ground_truth=$(resolve_ground_truth "$WORKSPACE" "$GROUND_TRUTH_MODE" "$GROUND_TRUTH_VALUE"); then
     exit 1
@@ -272,8 +276,9 @@ main() {
   echo "✓ Report: $report$([[ "$FRESH" == "true" ]] && echo ' (fresh)')"
 
   # Clear stale gate state so a red gate left behind by the main loop
-  # doesn't block the eval-loop completion guard. Eval loop records its
-  # own gates under eval-* labels if the sub-agents run any.
+  # doesn't block the eval-loop completion guard. The eval loop's
+  # verifier/rework sub-agents run their gates under label `final`,
+  # writing fresh `final-latest.*` artifacts.
   rm -rf "$WORKSPACE/.ralph/gates"
   mkdir -p "$WORKSPACE/.ralph/gates"
 

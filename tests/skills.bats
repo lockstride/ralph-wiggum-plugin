@@ -130,11 +130,16 @@ _all_skills() {
   [ -f "$SKILLS_DIR/ralph-plugin-speckit-update/SKILL.md" ]
 }
 
-@test "verifying-acceptance-criteria requires a fresh eval-final gate before flipping CLEAN" {
+@test "verifying-acceptance-criteria requires a fresh final-tier gate before flipping CLEAN" {
+  # 0.14.0: eval-* label family collapsed into 'final'. The verifier now
+  # runs the [gates].final command via gate-run.sh under label=final.
   local skill_md="$SKILLS_DIR/verifying-acceptance-criteria/SKILL.md"
   [ -f "$skill_md" ]
-  grep -q "eval-final" "$skill_md" \
-    || { echo "verifier skill missing 'eval-final' gate label requirement" >&2; return 1; }
+  grep -qE "gate-run\.sh +final" "$skill_md" \
+    || { echo "verifier skill missing 'gate-run.sh final ...' gate requirement" >&2; return 1; }
   grep -qiE "fresh.*(final|gate)|cached.*does not satisfy|cached .*does not" "$skill_md" \
     || { echo "verifier skill missing freshness-of-gate-run requirement" >&2; return 1; }
+  # Regression guard: the v0.13.x eval-* labels must be gone.
+  ! grep -qE "eval-final|eval-rework|eval-\*" "$skill_md" \
+    || { echo "verifier skill still references retired eval-* labels" >&2; return 1; }
 }

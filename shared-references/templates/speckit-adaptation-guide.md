@@ -45,7 +45,8 @@ and unattended execution. Stable across versions of speckit-implement.
    when the agent has to pick between two versions.
 8. **Hardcode the basic gate inline.** The per-task flow should say
    `Run \`{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}\``. Reserve
-   `final` for the completion gate only (step 3). Keep failure-
+   `full` for the impl-loop completion gate (step 3) — the eval loop
+   owns `final`, so the impl-loop body never invokes it. Keep failure-
    diagnosis guidance to 2–3 lines: read the gate log, check
    screenshots, use `curl` — don't re-run to "see if it's really
    broken."
@@ -55,7 +56,7 @@ and unattended execution. Stable across versions of speckit-implement.
     `<type>(<scope>): <description> (T###)`. Stage by exact path. No
     agent-identifying footers.
 11. **Add completion signal.** `<promise>ALL_TASKS_DONE</promise>`
-    when all `[x]` AND final gate passes.
+    when all `[x]` AND the `full` gate passes (under label `full`).
 12. **DO NOT enumerate the after-commit flow.** The framing prompt
     contains a `## After every commit` block with the three-bullet
     breadcrumb check (stop-requested → context-warning-active → next
@@ -66,8 +67,9 @@ and unattended execution. Stable across versions of speckit-implement.
     the canonical four. A body-level version drifts and weakens.
 14. **Preserve `{{PLACEHOLDER}}` variables**: `{{TASK_FILE}}`,
     `{{PLAN_FILE}}`, `{{SPEC_FILE}}`, `{{CONSTITUTION_PATH}}`,
-    `{{GATE_RUN}}`, `{{BASIC_CHECK_COMMAND}}`,
-    `{{FINAL_CHECK_COMMAND}}` — the loop substitutes them.
+    `{{GATE_RUN}}`, `{{BASIC_CHECK_COMMAND}}`, `{{FULL_CHECK_COMMAND}}`,
+    `{{FINAL_CHECK_COMMAND}}` — the loop substitutes them from
+    `[gates]` in `.ralph/command-policy`.
 15. **Don't emit dynamic state.** Recent activity, gate failure
     summaries, and other per-loop state belong in the framing prompt
     (which fires per iteration), not in the cached body (which is
@@ -114,8 +116,8 @@ context rotation and rate limits; you handle the work.
 ## Paths
 - **Tasks**: `{{TASK_FILE}}` | **Plan**: `{{PLAN_FILE}}` | **Spec**: `{{SPEC_FILE}}`
 - **Constitution**: `{{CONSTITUTION_PATH}}`
-- **Basic gate**: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`
-- **Final gate**: `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
+- **Basic gate (per-task)**: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`
+- **Full gate (impl-loop completion)**: `{{GATE_RUN}} full {{FULL_CHECK_COMMAND}}`
 
 ## Per-task flow
 1. Read the tasks file and the plan file. Read data-model.md /
@@ -127,7 +129,7 @@ context rotation and rate limits; you handle the work.
    - Mark `[x]` only after the gate exits 0.
    - Commit: `git add <exact paths> && git commit -m "<type>(<scope>): <description> (T###)"`.
    - (Framing's `## After every commit` block governs what's next.)
-3. When all `[x]` AND the final gate exits 0, emit
+3. When all `[x]` AND the full gate exits 0, emit
    `<promise>ALL_TASKS_DONE</promise>`.
 
 If a gate fails, read `.ralph/gates/<label>-latest.log` for the output.

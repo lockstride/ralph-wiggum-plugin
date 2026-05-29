@@ -48,25 +48,25 @@ teardown() {
   [ "$status" -eq 64 ]
 }
 
-@test "accepts eval-* labels (0.13.3)" {
-  # The eval loop (verifying-acceptance-criteria, addressing-acceptance-gaps)
-  # uses eval-* labels to keep its gate history separate from the main loop.
-  # Previously rejected with exit 64 because the label list was too narrow.
-  for label in eval-final eval-rework eval-something-custom; do
+@test "accepts every label in the 0.14.0 canonical set" {
+  # Tier labels (basic|full|final) and kind labels (unit|integration|
+  # e2e|lint|format) are all accepted; each writes a per-label breadcrumb.
+  for label in basic full final unit integration e2e lint format; do
     run bash "$SCRIPTS_DIR/gate-run.sh" "$label" true
-    [ "$status" -eq 0 ] || { echo "eval label '$label' rejected: $output"; return 1; }
+    [ "$status" -eq 0 ] || { echo "label '$label' rejected: $output"; return 1; }
     [[ -f "$MOCK_WORKSPACE/.ralph/gates/${label}-latest.exit" ]] || {
       echo "expected breadcrumb at gates/${label}-latest.exit"; return 1;
     }
   done
 }
 
-@test "rejects malformed eval-* labels (0.13.3)" {
-  # eval-* must be eval-<lowercase-id>. Uppercase or spaces are not allowed.
-  run bash "$SCRIPTS_DIR/gate-run.sh" "eval-FINAL" true
-  [ "$status" -eq 64 ]
-  run bash "$SCRIPTS_DIR/gate-run.sh" "eval-" true
-  [ "$status" -eq 64 ]
+@test "rejects pre-0.14 labels removed from the canonical set" {
+  # 0.14.0 dropped 'custom' (use a kind label) and the eval-* family
+  # (eval loop now uses 'final' directly).
+  for label in custom eval-final eval-rework eval-something-custom; do
+    run bash "$SCRIPTS_DIR/gate-run.sh" "$label" true
+    [ "$status" -eq 64 ] || { echo "stale label '$label' should be rejected: $output"; return 1; }
+  done
 }
 
 @test "--help prints usage and exits 0" {
@@ -115,16 +115,23 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
-# Per-label gate timeout
+# Per-tier gate timeout
 # ---------------------------------------------------------------------------
-# Behavioral assertion: per-label env vars override the default, and the
-# blanket RALPH_GATE_TIMEOUT overrides per-label. Each label uses an
-# appropriate timeout (basic+final+custom).
+# Behavioral assertion: per-tier env vars override the default, and the
+# blanket RALPH_GATE_TIMEOUT overrides per-tier. Kind labels share the
+# basic-tier timeout budget.
 
-@test "RALPH_BASIC_GATE_TIMEOUT applies to basic + custom labels" {
+@test "RALPH_BASIC_GATE_TIMEOUT applies to basic + every kind label" {
   RALPH_BASIC_GATE_TIMEOUT=1 run bash "$SCRIPTS_DIR/gate-run.sh" basic sleep 5
   [ "$status" -eq 124 ]
-  RALPH_BASIC_GATE_TIMEOUT=1 run bash "$SCRIPTS_DIR/gate-run.sh" e2e sleep 5
+  for label in unit integration e2e lint format; do
+    RALPH_BASIC_GATE_TIMEOUT=1 run bash "$SCRIPTS_DIR/gate-run.sh" "$label" sleep 5
+    [ "$status" -eq 124 ] || { echo "kind label '$label' did not inherit basic timeout"; return 1; }
+  done
+}
+
+@test "RALPH_FULL_GATE_TIMEOUT applies to full label (0.14.0)" {
+  RALPH_FULL_GATE_TIMEOUT=1 run bash "$SCRIPTS_DIR/gate-run.sh" full sleep 5
   [ "$status" -eq 124 ]
 }
 

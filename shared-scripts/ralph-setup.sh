@@ -450,6 +450,14 @@ main() {
 
   init_ralph_dir "$WORKSPACE"
 
+  # Refuse to start the loop if the project hasn't declared its three
+  # tier-gate commands in .ralph/command-policy [gates]. The framing prompt,
+  # completion guard, and label-lock all key on these — running without
+  # them would only confuse the agent.
+  if ! _validate_gates_section "$WORKSPACE"; then
+    exit 1
+  fi
+
   # Render effective prompt
   if ! out=$(resolve_prompt "$WORKSPACE" "$PROMPT_MODE" "$PROMPT_VALUE"); then
     exit 1

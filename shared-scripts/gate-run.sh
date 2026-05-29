@@ -13,12 +13,16 @@
 # Usage:
 #   gate-run.sh <label> <cmd> [args...]
 #
-#   <label> MUST be one of: basic | final | e2e | lint | custom
+#   <label> MUST be one of:
+#     tier labels: basic | full | final  (the three tier-gate commands declared
+#                  in .ralph/command-policy [gates])
+#     kind labels: unit | integration | e2e | lint | format  (everything else
+#                  the agent might invoke; routed via [wrap])
 #
 # Examples:
-#   gate-run.sh final pnpm all-check
-#   gate-run.sh basic pnpm basic-check
-#   gate-run.sh e2e pnpm test-e2e:local
+#   gate-run.sh basic <project's basic-tier command>
+#   gate-run.sh full  <project's full-tier command>
+#   gate-run.sh e2e   <project's e2e command>
 #
 # Exit code:
 #   The real exit code of <cmd>, via ${PIPESTATUS[0]}. `tee`'s status is
@@ -59,18 +63,32 @@ WHY
     • Writes a command breadcrumb at .ralph/gates/<label>-latest.cmd
     • Maintains a .ralph/gates/<label>-latest.log pointer for quick reading
 
-LABELS (fixed set — pick the closest match; use 'custom' for anything else)
-  basic   Fast pre-commit gate (format, lint, unit tests). Default timeout 1200 s.
-  final   Full verification gate (basic + integration/E2E). Default timeout 1200 s.
-  e2e     Targeted E2E / browser / container suite. Default timeout 1200 s.
-  lint    Lint-only or type-check-only runs. Default timeout 1200 s.
-  custom  Anything that does not fit the four above. Default timeout 1200 s.
+LABELS (fixed set — pick the closest match)
+  Tier labels — exactly one command each, declared in [gates] in
+  .ralph/command-policy. The tier-command label-lock requires these
+  commands to run under their own tier label:
+    basic   Per-task pre-commit gate (typically format + lint + unit).
+    full    Implementation-loop completion gate (basic + integration + e2e).
+    final   Eval-loop gate (post-completion acceptance verification).
+
+  Kind labels — many commands, routed via [wrap] in command-policy:
+    unit         Unit test runs.
+    integration  Integration test runs.
+    e2e          Targeted E2E / browser / container suites.
+    lint         Lint-only / type-check-only runs.
+    format       Format-only runs.
+
+  All labels share the same default 1200 s timeout. Tier overrides:
+  RALPH_BASIC_GATE_TIMEOUT, RALPH_FULL_GATE_TIMEOUT, RALPH_FINAL_GATE_TIMEOUT.
 
 EXAMPLES
-  gate-run.sh basic pnpm basic-check
-  gate-run.sh final pnpm all-check
-  gate-run.sh e2e   pnpm test-e2e:local
-  gate-run.sh lint  pnpm lint:check
+  # tier gates (project supplies the actual commands via [gates])
+  gate-run.sh basic <project basic-tier command>
+  gate-run.sh full  <project full-tier command>
+  gate-run.sh final <project final-tier command>
+  # kind labels (free-form routing)
+  gate-run.sh e2e  <project e2e command>
+  gate-run.sh lint <project lint command>
 
 EXIT CODES
   0       The wrapped command exited 0.
@@ -91,8 +109,12 @@ ENVIRONMENT
   RALPH_GATE_FAIL_HEAD  Failure-match lines in the summary (default 80).
   RALPH_GATE_TIMEOUT    Blanket timeout override (seconds) for any label.
                         Takes precedence over the per-label vars below.
-  RALPH_FINAL_GATE_TIMEOUT  Timeout for label=final   (default 1200).
-  RALPH_BASIC_GATE_TIMEOUT  Timeout for every other label (default 1200).
+  RALPH_BASIC_GATE_TIMEOUT  Timeout for tier label 'basic' (default 1200).
+                            Also used for the kind labels (unit/integration/
+                            e2e/lint/format) — they're targeted runs and
+                            share the basic-tier timeout budget.
+  RALPH_FULL_GATE_TIMEOUT   Timeout for tier label 'full'  (default 1200).
+  RALPH_FINAL_GATE_TIMEOUT  Timeout for tier label 'final' (default 1200).
 
 FAILURE-PATTERN MATCHING
   On completion the wrapper greps the log for common failure signatures
@@ -126,7 +148,7 @@ fi
 
 if [[ $# -lt 2 ]]; then
   echo "usage: gate-run.sh <label> <cmd> [args...]" >&2
-  echo "  <label> in: basic | final | e2e | lint | custom" >&2
+  echo "  <label> in: basic | full | final | unit | integration | e2e | lint | format" >&2
   echo "  run 'gate-run.sh --help' for details" >&2
   exit 64
 fi
@@ -143,18 +165,9 @@ if [[ $# -eq 1 && "$1" == *" "* ]]; then
 fi
 
 case "$label" in
-  basic | final | e2e | lint | custom) ;;
-  eval-*)
-    # eval-* labels are reserved for the post-completion acceptance
-    # evaluation loop (verifying-acceptance-criteria, addressing-acceptance-gaps).
-    # They keep eval-loop gate history separate from the main loop's.
-    [[ "$label" =~ ^eval-[a-z0-9-]+$ ]] || {
-      echo "gate-run.sh: invalid eval label '$label' (expected eval-<lowercase-id>, e.g. eval-final, eval-rework)" >&2
-      exit 64
-    }
-    ;;
+  basic | full | final | unit | integration | e2e | lint | format) ;;
   *)
-    echo "gate-run.sh: invalid label '$label' (expected basic|final|e2e|lint|custom|eval-*)" >&2
+    echo "gate-run.sh: invalid label '$label' (expected basic|full|final|unit|integration|e2e|lint|format)" >&2
     echo "  run 'gate-run.sh --help' for details" >&2
     exit 64
     ;;
@@ -310,24 +323,24 @@ start_epoch=$(date +%s)
 # tail without a meaningful latency penalty on normal (2–8 min) runs.
 # Projects with faster suites can lower via the env vars below.
 #
-#   basic  20 min (1200 s)
-#   final  20 min (1200 s)
-#
-# Projects with larger suites can override via the env vars below.
+# All labels default to 20 min (1200 s). Projects with larger suites can
+# override the tier timeouts individually or set a blanket override.
 #
 # Env vars cascade:
 #
-#   RALPH_FINAL_GATE_TIMEOUT  → used when label=final  (default 1200)
-#   RALPH_BASIC_GATE_TIMEOUT  → used when label=basic  (default 1200)
-#   RALPH_GATE_TIMEOUT        → blanket override for any label (no default;
-#                                takes precedence over the per-label vars
-#                                when set, for backward compat)
+#   RALPH_GATE_TIMEOUT        → blanket override (wins over per-label vars)
+#   RALPH_BASIC_GATE_TIMEOUT  → tier label 'basic'; also used for the kind
+#                                labels (unit/integration/e2e/lint/format)
+#   RALPH_FULL_GATE_TIMEOUT   → tier label 'full'
+#   RALPH_FINAL_GATE_TIMEOUT  → tier label 'final'
 if [[ -n "${RALPH_GATE_TIMEOUT:-}" ]]; then
   gate_timeout="$RALPH_GATE_TIMEOUT"
-elif [[ "$label" == "final" ]]; then
-  gate_timeout="${RALPH_FINAL_GATE_TIMEOUT:-1200}"
 else
-  gate_timeout="${RALPH_BASIC_GATE_TIMEOUT:-1200}"
+  case "$label" in
+    full) gate_timeout="${RALPH_FULL_GATE_TIMEOUT:-1200}" ;;
+    final) gate_timeout="${RALPH_FINAL_GATE_TIMEOUT:-1200}" ;;
+    *) gate_timeout="${RALPH_BASIC_GATE_TIMEOUT:-1200}" ;;
+  esac
 fi
 
 # 0.6.3: subtree-aware gate execution.
@@ -537,12 +550,12 @@ _log_activity "🧪 GATE end label=$label exit=$cmd_status duration=${duration}s
 printf '%s' "$cmd_status" >"$gates_dir/$label-latest.exit"
 
 # 0.6.4: Sibling breadcrumb recording the actual command that was run for
-# this label. Consumed by the loop's COMPLETE guard to verify the
-# pinned final-gate command was the one that produced the green result —
-# closes the spoof where an agent labels a cheap command as `final`.
-# Stored space-joined (the same form a user types in `.ralph/final-check-command`)
-# so the comparison in `_complete_allowed` is a plain string match after
-# whitespace normalization. No newline.
+# this label. Consumed by the loop's COMPLETE guard (full-latest.cmd) and
+# the tier-command label-lock (see ralph-guard.sh) to verify the actual
+# command matches what [gates] declares for the tier — closes the spoof
+# where an agent labels a cheap command as a tier gate. Stored space-joined
+# so the comparison is a plain string match after whitespace normalization.
+# No newline.
 printf '%s' "$*" >"$gates_dir/$label-latest.cmd"
 
 # 0.10.0: Last-failed breadcrumbs for the TURN_END handler. Written on

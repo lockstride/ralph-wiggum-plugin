@@ -152,37 +152,6 @@ _run_guard() {
   [ -z "$output" ]
 }
 
-# --- Protected scripts pipe/redirect denial ---
-
-@test "blocks pipe on protected script" {
-  export RALPH_PROTECTED_SCRIPTS="pnpm basic-check pnpm all-check"
-  run _run_guard Bash "pnpm basic-check | tail -20"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("pipe/redirect")'
-}
-
-@test "blocks redirect on protected script" {
-  export RALPH_PROTECTED_SCRIPTS="pnpm basic-check"
-  run _run_guard Bash "pnpm basic-check > /tmp/out.log"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-}
-
-@test "allows protected script without pipe" {
-  export RALPH_PROTECTED_SCRIPTS="pnpm basic-check"
-  run _run_guard Bash "pnpm basic-check"
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-}
-
-@test "allows protected script with arguments" {
-  export RALPH_PROTECTED_SCRIPTS="pnpm basic-check"
-  run _run_guard Bash "pnpm basic-check tests/foo.spec.ts"
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-}
-
 # --- Gate-without-write check ---
 
 @test "blocks gate re-run with no write since last same-label gate (0.13.1)" {
@@ -234,35 +203,6 @@ _run_guard() {
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
   echo "$output" | jq -e ".hookSpecificOutput.permissionDecisionReason | test(\"Gate 'final'\")"
-}
-
-@test "extracts eval-* labels for the per-label cache (0.13.3)" {
-  # Pre-0.13.3 the label-extraction regex was '(basic|final|e2e|lint|custom)'.
-  # When the verifier ran 'gate-run.sh eval-final ...', the regex didn't
-  # match, pipefail fired the ||, and label became "unknown" — so two
-  # different eval invocations collided on last-gate-ts.unknown and the
-  # second got cache-denied even though no actual eval-* gate had run.
-  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.eval-final"
-  echo "0" > "$STATE_DIR/last-write-ts"
-  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh eval-final pnpm all-check"
-  [ "$status" -eq 0 ]
-  # The deny must name 'eval-final' specifically — proves the label was
-  # parsed correctly and the lookup hit the eval-final cache, not 'unknown'.
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-  echo "$output" | jq -e ".hookSpecificOutput.permissionDecisionReason | test(\"Gate 'eval-final'\")"
-}
-
-@test "fresh eval-rework label is not blocked by a cached eval-final (0.13.3)" {
-  # Per-label cache must still hold for eval-* labels: a cached eval-final
-  # must NOT block a never-run eval-rework.
-  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.eval-final"
-  echo "0" > "$STATE_DIR/last-write-ts"
-  rm -f "$STATE_DIR/last-gate-ts.eval-rework"
-  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh eval-rework pnpm test-unit"
-  [ "$status" -eq 0 ]
-  if [ -n "$output" ]; then
-    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
-  fi
 }
 
 # --- Write/Edit forbidden-path denial ---
@@ -352,89 +292,6 @@ _run_guard() {
 
 @test "blocks cypress with env prefix" {
   run _run_guard Bash "CI=true npx cypress run"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-}
-
-# --- .ralph/protected-scripts breadcrumb ---
-
-@test "blocks pipe on command listed in .ralph/protected-scripts" {
-  printf 'pnpm all-check\npnpm basic-check\n' > "$MOCK_WORKSPACE/.ralph/protected-scripts"
-  run _run_guard Bash "pnpm all-check | tail -20"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("pipe/redirect")'
-}
-
-@test "allows bare command listed in .ralph/protected-scripts" {
-  printf 'pnpm all-check\n' > "$MOCK_WORKSPACE/.ralph/protected-scripts"
-  run _run_guard Bash "pnpm all-check"
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-}
-
-@test "protected-scripts file ignores comments and blank lines" {
-  printf '# gate commands\npnpm all-check\n\n# lint\npnpm lint:check\n' > "$MOCK_WORKSPACE/.ralph/protected-scripts"
-  run _run_guard Bash "pnpm lint:check | grep error"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-}
-
-@test "protected-scripts file takes precedence over env var" {
-  export RALPH_PROTECTED_SCRIPTS="pnpm old-check"
-  printf 'pnpm new-check\n' > "$MOCK_WORKSPACE/.ralph/protected-scripts"
-  # old-check from env should NOT be protected
-  run _run_guard Bash "pnpm old-check | tail"
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-  # new-check from file SHOULD be protected
-  run _run_guard Bash "pnpm new-check | tail"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-}
-
-@test "falls back to RALPH_PROTECTED_SCRIPTS env var when no file" {
-  rm -f "$MOCK_WORKSPACE/.ralph/protected-scripts"
-  export RALPH_PROTECTED_SCRIPTS="pnpm env-check"
-  run _run_guard Bash "pnpm env-check | tail"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-}
-
-# --- .ralph/denied-commands breadcrumb ---
-
-@test "blocks denied command exactly" {
-  printf 'pnpm api:test-e2e|Use pnpm api:test-e2e:local instead\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
-  run _run_guard Bash "pnpm api:test-e2e"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("local")'
-}
-
-@test "blocks denied command with trailing args" {
-  printf 'pnpm api:test-e2e|Use the local variant\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
-  run _run_guard Bash "pnpm api:test-e2e --headed"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-}
-
-@test "denied command does not block longer command names" {
-  printf 'pnpm api:test-e2e|blocked\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
-  run _run_guard Bash "pnpm api:test-e2e:local"
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-}
-
-@test "denied-commands ignores comments and blank lines" {
-  printf '# expensive commands\n\npnpm test-e2e|Use pnpm test-e2e:local\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
-  run _run_guard Bash "pnpm test-e2e"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-}
-
-@test "denied command with env prefix is still blocked" {
-  printf 'pnpm test-e2e|Use the local variant\n' > "$MOCK_WORKSPACE/.ralph/denied-commands"
-  run _run_guard Bash "CI=true pnpm test-e2e"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
@@ -549,14 +406,6 @@ pnpm basic-check | basic
 EOF
 }
 
-setup_legacy_gate_wrapped_policy() {
-  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
-[gate-wrapped]
-pnpm all-check
-pnpm basic-check
-EOF
-}
-
 @test "[wrap] auto-wraps bare invocation via updatedInput" {
   setup_wrap_policy
   run _run_guard Bash "pnpm all-check"
@@ -660,26 +509,51 @@ EOF
   [ -z "$output" ]
 }
 
-@test "[wrap] defaults to 'basic' label when no label provided" {
+@test "[wrap] row with no label is skipped (0.14.0 — no implicit default)" {
   cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
 [wrap]
 pnpm all-check
 EOF
+  # No label → row skipped. Command passes through (no wrap, no allow JSON).
   run _run_guard Bash "pnpm all-check"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm all-check")'
+  [ -z "$output" ] || ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput' 2>/dev/null
 }
 
-@test "[wrap] sanitizes invalid label to 'basic'" {
+@test "[wrap] row with invalid label is skipped (0.14.0 — no silent fallback)" {
   cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
 [wrap]
 pnpm all-check | not-a-real-label
 EOF
+  # Unrecognized label → row skipped. Command passes through unchanged.
   run _run_guard Bash "pnpm all-check"
   [ "$status" -eq 0 ]
-  # Invalid label silently falls back to "basic" rather than emitting an
-  # invalid gate-run.sh invocation that would fail downstream.
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm all-check")'
+  [ -z "$output" ] || ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput' 2>/dev/null
+}
+
+@test "[wrap] accepts every label in the 0.14.0 canonical set" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[wrap]
+pnpm a | basic
+pnpm b | full
+pnpm c | final
+pnpm d | unit
+pnpm e | integration
+pnpm f | e2e
+pnpm g | lint
+pnpm h | format
+EOF
+  local letter label
+  local _i=0
+  for label in basic full final unit integration e2e lint format; do
+    letter=$(printf '\\x%x' $((97 + _i)))
+    letter=$(printf "$letter")
+    run _run_guard Bash "pnpm $letter"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e ".hookSpecificOutput.updatedInput.command | test(\"gate-run.sh $label pnpm $letter\")" \
+      || { echo "label '$label' did not wrap pnpm $letter: $output"; return 1; }
+    _i=$((_i + 1))
+  done
 }
 
 @test "[wrap] interacts cleanly with [rewrite] for 'pnpm -w run' (0.12.3)" {
@@ -727,24 +601,6 @@ EOF
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("hard deny")'
   # Wrap rewrite must not have fired.
   ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput' 2>/dev/null
-}
-
-# --- Backward compat for legacy [gate-wrapped] section ---
-
-@test "[gate-wrapped] (legacy) auto-wraps with default 'basic' label" {
-  setup_legacy_gate_wrapped_policy
-  run _run_guard Bash "pnpm all-check"
-  [ "$status" -eq 0 ]
-  # Legacy section has no label — defaults to "basic".
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "allow"'
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm all-check")'
-}
-
-@test "[gate-wrapped] (legacy) auto-wraps piped invocation" {
-  setup_legacy_gate_wrapped_policy
-  run _run_guard Bash "pnpm basic-check 2>&1 | tail -30"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
 }
 
 # --- 0.12.3: _block uses modern hook response format ---
@@ -943,37 +799,126 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
-# 0.13.5: Final-command label lock
+# 0.14.0: Tier-command label lock
 # -----------------------------------------------------------------------------
-# The pinned final command must run under label=final (or eval-* during
-# acceptance evaluation). Running it under an ad-hoc label (custom/basic/e2e/
-# lint) escapes the final-gate cache and produces a result the completion
-# guard ignores — the "relabel to dodge the cache and fish for green"
-# anti-pattern observed in loop 152651.
+# Each of the three [gates] commands (basic / full / final) is "owned" by
+# its tier label. Running a tier command under any other label escapes the
+# tier's per-label cache AND lands the breadcrumb in a per-label namespace
+# the downstream consumer (_complete_allowed reads full-latest.*; the eval
+# orchestrator reads final-latest.*) does not check — the "relabel to fish
+# for green" anti-pattern observed in loop 152651, generalized to all
+# three tiers. No eval-* exemption — eval uses 'final' directly.
 
-@test "denies pinned final command under label=custom (0.13.5)" {
-  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
-  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh custom pnpm all-check"
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("must run under label .final.")'
+setup_v14_gates_policy() {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[gates]
+basic | pnpm basic-check
+full  | pnpm all-check
+final | pnpm verify:final
+EOF
 }
 
-@test "denies pinned final command under label=basic (0.13.5)" {
+@test "label-lock: denies [gates].full command under label=basic (0.14.0)" {
+  setup_v14_gates_policy
   echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
   run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm all-check"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("must run under label .full.")'
 }
 
-@test "denies pinned final command under label=custom even with pipe (0.13.5)" {
+@test "label-lock: denies [gates].full command under label=unit (0.14.0)" {
+  setup_v14_gates_policy
   echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
-  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh custom pnpm all-check 2>&1 | tail -40"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh unit pnpm all-check"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
-@test "allows pinned final command under label=final (0.13.5)" {
+@test "label-lock: denies [gates].basic command under label=unit (0.14.0)" {
+  setup_v14_gates_policy
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh unit pnpm basic-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "label-lock: denies [gates].final command under label=full (0.14.0)" {
+  setup_v14_gates_policy
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh full pnpm verify:final"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "label-lock: pipe form still triggers the lock (0.14.0)" {
+  setup_v14_gates_policy
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm all-check 2>&1 | tail -40"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "label-lock: allows [gates].basic under label=basic (0.14.0)" {
+  setup_v14_gates_policy
+  rm -f "$STATE_DIR"/last-gate-ts*
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm basic-check"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "label-lock: allows [gates].full under label=full (0.14.0)" {
+  setup_v14_gates_policy
+  rm -f "$STATE_DIR"/last-gate-ts*
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh full pnpm all-check"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "label-lock: allows [gates].final under label=final (0.14.0; no eval-* exemption needed)" {
+  setup_v14_gates_policy
+  rm -f "$STATE_DIR"/last-gate-ts*
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh final pnpm verify:final"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "label-lock: allows a non-tier command under any kind label (0.14.0)" {
+  setup_v14_gates_policy
+  rm -f "$STATE_DIR"/last-gate-ts*
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh unit pnpm test-unit foo"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "label-lock: when full and final share the same command, either label is OK (0.14.0)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[gates]
+basic | pnpm basic-check
+full  | pnpm all-check
+final | pnpm all-check
+EOF
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  # both 'full' and 'final' are valid for 'pnpm all-check'
+  rm -f "$STATE_DIR"/last-gate-ts*
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh full pnpm all-check"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
   rm -f "$STATE_DIR"/last-gate-ts*
   echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
   run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh final pnpm all-check"
@@ -981,42 +926,37 @@ EOF
   if [ -n "$output" ]; then
     ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
   fi
-}
-
-@test "allows pinned final command under label=eval-final (eval loop exempt) (0.13.5)" {
+  # …but label=basic still denied since 'pnpm all-check' isn't [gates].basic.
   rm -f "$STATE_DIR"/last-gate-ts*
   echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
-  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh eval-final pnpm all-check"
-  [ "$status" -eq 0 ]
-  if [ -n "$output" ]; then
-    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
-  fi
-}
-
-@test "allows a non-final command under label=custom (0.13.5)" {
-  rm -f "$STATE_DIR"/last-gate-ts*
-  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
-  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh custom pnpm some-other-script"
-  [ "$status" -eq 0 ]
-  if [ -n "$output" ]; then
-    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
-  fi
-}
-
-@test "final-command lock respects .ralph/final-check-command override (0.13.5)" {
-  echo "pnpm verify:all" > "$MOCK_WORKSPACE/.ralph/final-check-command"
-  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
-  # The overridden final command under a non-final label is denied...
-  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh custom pnpm verify:all"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm all-check"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
-  # ...while the old default (pnpm all-check) is no longer the pinned command,
-  # so it is NOT specially locked.
-  rm -f "$STATE_DIR"/last-gate-ts*
-  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
-  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh custom pnpm all-check"
+}
+
+# -----------------------------------------------------------------------------
+# 0.14.0: [gates] auto-wrap (tier commands wrap without a [wrap] row)
+# -----------------------------------------------------------------------------
+
+@test "[gates] auto-wraps each tier command under its tier label (0.14.0)" {
+  setup_v14_gates_policy
+  run _run_guard Bash "pnpm basic-check"
   [ "$status" -eq 0 ]
-  if [ -n "$output" ]; then
-    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
-  fi
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
+  run _run_guard Bash "pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh full pnpm all-check")'
+  run _run_guard Bash "pnpm verify:final"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm verify:final")'
+}
+
+@test "[gates] auto-wrap survives env prefix on agent's invocation (0.14.0)" {
+  setup_v14_gates_policy
+  # Canonicalization strips the env prefix, matching is on the canonical
+  # form. The wrap rewrite drops the env (a documented limitation: use a
+  # shell script if you need the env preserved at execution time).
+  run _run_guard Bash "CI=1 pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh full pnpm all-check")'
 }

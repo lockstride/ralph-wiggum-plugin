@@ -103,6 +103,10 @@ main() {
 
   init_ralph_dir "$WORKSPACE"
 
+  if ! _validate_gates_section "$WORKSPACE"; then
+    exit 1
+  fi
+
   echo "📝 Resolving prompt source: $PROMPT_MODE${PROMPT_VALUE:+ ($PROMPT_VALUE)}"
   out=$(resolve_prompt "$WORKSPACE" "$PROMPT_MODE" "$PROMPT_VALUE") || exit 1
   echo "✓ Effective prompt: $out"

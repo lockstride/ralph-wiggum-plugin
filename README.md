@@ -30,10 +30,11 @@ the inventory when reviewing the loop's reliability end-to-end.
 
 ### Script call filters & transparent rewrites
 - `PreToolUse` hook (`ralph-guard.sh`) registered via `hooks/hooks.json` (record-keyed-by-event-name schema; the wrong-schema 0.12.4 bug is fixed in 0.12.5).
-- `.ralph/command-policy` has four sections, evaluated in order: `[rewrite] → [deny] → [wrap] → [protect]`.
+- `.ralph/command-policy` has five sections, evaluated in order: `[gates] → [rewrite] → [deny] → [wrap] → [protect]`.
+  - `[gates]` — **required.** Declares the three tier-gate commands (`basic | <cmd>`, `full | <cmd>`, `final | <cmd>`). Loop refuses to start if any are missing.
   - `[rewrite]` — project-specific regex transforms (e.g. `pnpm nx X → pnpm X`). Transparent via `updatedInput`.
   - `[deny]` — hard block with `permissionDecision: deny` (e.g. containerized E2E).
-  - `[wrap]` — auto-routes `pnpm <script>` through `gate-run.sh <label> <cmd>` transparently. Labels: `basic | final | e2e | lint | custom`.
+  - `[wrap]` — auto-routes other commands through `gate-run.sh <label> <cmd>` transparently. Labels: `basic | full | final | unit | integration | e2e | lint | format`.
   - `[protect]` — bare invocation OK; pipe/redirect denied.
 - Canonicalization (`_canonicalize` in `ralph-guard.sh`): env-prefix stripped, pipes/redirects stripped, `pnpm run X` / `pnpm exec X` normalized to `pnpm X`. Compound chains (`pnpm A && pnpm B`) split — if any segment matches `[wrap]`, the whole chain is rewrapped on just that segment.
 - Activity-log emoji: 🔀 `GUARD REWRITE` on transparent rewrites, ⛔ `GUARD DENY` on hard blocks.
@@ -42,12 +43,11 @@ the inventory when reviewing the loop's reliability end-to-end.
 - `ralph-guard.sh`'s gate-without-write check blocks re-running a gate when no Write/Edit happened since the last gate (`LAST_WRITE_TS` vs `LAST_GATE_TS` in `$XDG_STATE_HOME/ralph/<workspace-hash>/`).
 - Prevents the "run gate → read output → re-run gate for more output" anti-pattern that wastes minutes per loop.
 
-### Gate-level adherence (basic vs final)
-- Framing's `## Gate Selection` block: `pnpm basic-check` default after each task; `pnpm all-check` only on `[risky]` tasks or at end-of-loop.
-- `gate-run.sh` enforces 5 canonical labels and writes `<label>-latest.{log,exit,cmd,summary}` per label.
-- Completion guard `_complete_allowed` refuses `<promise>ALL_TASKS_DONE</promise>` when:
-  - the most recent gate exit is non-zero, OR
-  - `final-latest.cmd` doesn't match `.ralph/final-check-command` (default `pnpm all-check`) — closes the cheap-command-relabeled-as-final spoof.
+### Gate-level adherence (three-tier model)
+- Framing's `## Gate Selection` block interpolates the project's `[gates].basic` (per-task default) and `[gates].full` (on `[risky]` tasks and at end-of-loop). The `final` tier is reserved for the eval loop.
+- `gate-run.sh` enforces 8 canonical labels (3 tier labels `basic | full | final` + 5 kind labels `unit | integration | e2e | lint | format`) and writes `<label>-latest.{log,exit,cmd,summary}` per label.
+- Tier-command label-lock: each of the three `[gates]` commands must run under its own tier label. Running `[gates].full` under any other label is denied — closes the "relabel to escape the gate cache and fish for green" anti-pattern.
+- Completion guard `_complete_allowed` refuses `<promise>ALL_TASKS_DONE</promise>` unless `full-latest.cmd` matches `[gates].full` AND `full-latest.exit` is 0.
 
 ### Smooth handoff between loops
 - `.ralph/handoff.md` has three managed sections:
@@ -59,7 +59,7 @@ the inventory when reviewing the loop's reliability end-to-end.
 ### Effective and reliable eval loop
 - `--evaluate` chains an acceptance-evaluation loop after the main loop emits `ALL_TASKS_DONE`.
 - `ralph-evaluate.sh` orchestrates two roles in alternation: `running-acceptance-evaluation` skill (orchestrator), which delegates to `verifying-acceptance-criteria` (VERIFIER role) or `addressing-acceptance-gaps` (REWORK role) via the `Task` tool.
-- Drives `.ralph/acceptance-report.md` — checkbox state advances the loop. Verifier runs `final` gate independently; rework loops fix logged gaps.
+- Drives `.ralph/acceptance-report.md` — checkbox state advances the loop. Verifier runs the project's `[gates].final` command under label `final` independently; rework loops fix logged gaps.
 
 ### Proper dynamic prompt generation
 - `prompt-resolver.sh` reads the project's `speckit-implement` skill, applies the adaptation guide, and invokes `claude -p --model sonnet --effort low` to produce a loop-adapted body.
@@ -191,17 +191,13 @@ After the loop starts, Ralph writes to `.ralph/` (git-ignored automatically):
 - `handoff.md` — rolling state document, injected into the framing prompt every loop (see [Handoff state](#handoff-state) below)
 - `gates/` — per-label logs, exit breadcrumbs, summary files, lock dirs for gate-run.sh
 
-**Breadcrumb files** (optional, placed in `.ralph/` to configure behavior):
+**Breadcrumb files** (placed in `.ralph/`):
 
-| File | Purpose |
-|---|---|
-| `basic-check-command` | Override the basic gate command (default: `pnpm basic-check`) |
-| `final-check-command` | Override the final gate command (default: `pnpm all-check`) |
-| `command-policy` | Unified rewrite/deny/protect rules — see [Command policy](#command-policy) below |
-| `denied-commands` | *(deprecated, prefer `command-policy`)* Commands to block outright, `command\|reason` per line |
-| `protected-scripts` | *(deprecated, prefer `command-policy`)* Commands that must not be piped/redirected, one prefix per line |
-| `push-policy` | Push behavior: `never` (default), `completion-only` |
-| `stop-requested` | Touch this file to signal the agent to stop after the current task |
+| File | Required | Purpose |
+|---|---|---|
+| `command-policy` | **yes** | Single source of truth for gate tiers + routing — see [Command policy](#command-policy) below. The loop refuses to start without a `[gates]` section declaring all three of `basic`, `full`, `final`. |
+| `push-policy` | no | Push behavior: `never` (default), `per-commit`, `per-3-commits`, `phase-close`, `completion-only` |
+| `stop-requested` | no | Touch this file to signal the agent to stop after the current task |
 
 Your commits are your durable memory. Ralph commits frequently during each loop so any involuntary kill is recoverable from the last commit.
 
@@ -216,9 +212,16 @@ A skeleton is seeded automatically by `init_ralph_dir` on first run.
 
 ### Command policy
 
-`.ralph/command-policy` consolidates the rewrite / deny / wrap / protect rules into one file. Four sections, scanned in order: `[rewrite]` → `[deny]` → `[wrap]` → `[protect]`.
+`.ralph/command-policy` is the single source of truth: gate tiers + transparent rewrites + denials + free-form routing + pipe protection. Five sections, scanned in order: `[gates]` → `[rewrite]` → `[deny]` → `[wrap]` → `[protect]`.
 
 ```
+[gates]
+# REQUIRED — the three tier-gate commands. Loop refuses to start if any are missing.
+# tier  | command
+basic | pnpm basic-check
+full  | pnpm all-check
+final | pnpm all-check
+
 [rewrite]
 # regex | replacement | reason  (backrefs \1, \2, … supported in replacement)
 ^pnpm -w run (.+)$ | pnpm \1 | this repo's package.json has no -w workspace flag
@@ -229,10 +232,11 @@ A skeleton is seeded automatically by `init_ralph_dir` on first run.
 pnpm test-e2e | containerized E2E is too expensive — use pnpm test-e2e:local
 
 [wrap]
-# command-prefix | label   (label: basic | final | e2e | lint | custom)
-pnpm all-check     | final
-pnpm basic-check   | basic
-pnpm test-e2e:local| e2e
+# command-prefix | label   label ∈ basic | full | final | unit | integration | e2e | lint | format
+pnpm test-unit       | unit
+pnpm test-integration| integration
+pnpm test-e2e:local  | e2e
+pnpm lint            | lint
 
 [protect]
 # bare OK, pipe/redirect denied
@@ -241,12 +245,13 @@ pnpm format:write
 
 Section semantics:
 
+- **`[gates]`** — the project's three tier-gate commands, exactly one per tier. The framing prompt's `## Gate Selection` block, the completion guard `_complete_allowed`, and the tier-command label-lock all read this. No defaults — every project must declare its own.
 - **`[rewrite]`** — regex match; transparently rewrites the agent's command via the hook's `updatedInput` mechanism (no block, no retry puzzle). Use for incorrect command shapes the agent reaches for.
 - **`[deny]`** — literal prefix match; blocks outright with `permissionDecision: deny`. Use for commands the agent should never run (containerized E2E, destructive ops).
-- **`[wrap]`** — listed command is **transparently auto-rewritten** to its `gate-run.sh <label> <cmd>` form via `updatedInput`, so the loop captures tracking artifacts (latest.log / .exit / .cmd / .summary) without the agent having to remember the wrapper. The matcher strips env-var prefixes AND normalizes `pnpm run X` / `pnpm exec X` to `pnpm X` before matching. Compound chains (`pnpm format:write && pnpm test-coverage`) split — if any segment matches, the chain is rewrapped on just that segment.
+- **`[wrap]`** — free-form routing table for commands NOT in `[gates]`. Listed command is **transparently auto-rewritten** to its `gate-run.sh <label> <cmd>` form via `updatedInput`, so the loop captures tracking artifacts (latest.log / .exit / .cmd / .summary) without the agent having to remember the wrapper. The label drives the artifact namespace and timeout bucket. Missing/unrecognized label → row skipped. The matcher strips env-var prefixes AND normalizes `pnpm run X` / `pnpm exec X` to `pnpm X` before matching. Compound chains (`pnpm format:write && pnpm test-coverage`) split — if any segment matches, the chain is rewrapped on just that segment.
 - **`[protect]`** — bare invocation OK; only pipe / redirect of the command is denied. Use for commands you want to allow bare but not let the agent dump into a sidecar log.
 
-Activity-log feedback: 🔀 `GUARD REWRITE` is logged when `[rewrite]` or `[wrap]` fires; ⛔ `GUARD DENY` when `[deny]` or a state-tampering check fires. Pre-0.12.5 plugins still ship a legacy `[gate-wrapped]` section name as a backward-compat alias for `[wrap]` (default label `basic`). The legacy `.ralph/denied-commands` + `.ralph/protected-scripts` are still read as a fallback when `command-policy` is absent (with a one-time deprecation notice in `.ralph/errors.log`); they only get `[deny]` + `[protect]` semantics. Migrate when convenient — the template at [`shared-references/templates/command-policy.md`](shared-references/templates/command-policy.md) is a starting point.
+Activity-log feedback: 🔀 `GUARD REWRITE` is logged when `[rewrite]` or `[wrap]` fires; ⛔ `GUARD DENY` when `[deny]` or a state-tampering check fires. The template at [`shared-references/templates/command-policy.md`](shared-references/templates/command-policy.md) is a starting point for a new project's `command-policy`.
 
 ### Guard hook
 
@@ -282,10 +287,10 @@ If you use [Spec Kit](https://github.com/github/spec-kit), pick `--spec` and Ral
 
 1. Find the most-recent `specs/*` dir by mtime (or the one you name).
 2. **Generate a loop-adapted prompt** from your project's `speckit-implement` skill (`.claude/skills/speckit-implement/SKILL.md`, with hash-based caching) — keeps the loop in sync with your version of Spec Kit. Falls back to the built-in template if the skill doesn't exist.
-3. Substitute `{{SPEC_DIR}}`, `{{CONSTITUTION_PATH}}`, `{{TASK_FILE}}`, `{{PLAN_FILE}}`, `{{SPEC_FILE}}`, gate commands, and the recent activity-log tail into the prompt.
+3. Substitute `{{SPEC_DIR}}`, `{{CONSTITUTION_PATH}}`, `{{TASK_FILE}}`, `{{PLAN_FILE}}`, `{{SPEC_FILE}}`, `{{BASIC_CHECK_COMMAND}}` / `{{FULL_CHECK_COMMAND}}` / `{{FINAL_CHECK_COMMAND}}` (from `[gates]`), and the recent activity-log tail into the prompt.
 4. Enforce one-task-per-commit, gate-discipline, and the `<promise>ALL_TASKS_DONE</promise>` completion sigil (verified against the real checkbox state — no hallucinated promises).
 
-Default check commands: `pnpm basic-check` (basic gate) and `pnpm all-check` (final gate). Override via `.ralph/basic-check-command` and `.ralph/final-check-command` breadcrumbs.
+Gate commands come from `[gates]` in `.ralph/command-policy` — every project sets its own. There are no defaults.
 
 For prompt-generation internals, see [docs/development.md → Prompt generation deep details](docs/development.md#prompt-generation-deep-details).
 
@@ -309,9 +314,10 @@ For mode mechanics, artifacts, and limitations, see [docs/development.md → Acc
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RALPH_GATE_TIMEOUT` | — | Override all gate timeouts (seconds) |
-| `RALPH_BASIC_GATE_TIMEOUT` | `1200` | Basic gate timeout |
-| `RALPH_FINAL_GATE_TIMEOUT` | `1200` | Final gate timeout |
+| `RALPH_GATE_TIMEOUT` | — | Blanket gate-timeout override (seconds). Wins over the per-tier vars below. |
+| `RALPH_BASIC_GATE_TIMEOUT` | `1200` | Timeout for tier label `basic` (and all kind labels: `unit | integration | e2e | lint | format`) |
+| `RALPH_FULL_GATE_TIMEOUT` | `1200` | Timeout for tier label `full` |
+| `RALPH_FINAL_GATE_TIMEOUT` | `1200` | Timeout for tier label `final` |
 | `RALPH_GATE_KILL_GRACE` | `10` | Seconds between SIGTERM and SIGKILL on timeout |
 | `RALPH_GATE_KEEP` | `5` | Number of timestamped gate logs to retain per label |
 | `RALPH_GATE_LOCK_WAIT` | `60` | Seconds to wait for a gate lock before giving up. PID-aware steal kicks in immediately when the holder is dead. |

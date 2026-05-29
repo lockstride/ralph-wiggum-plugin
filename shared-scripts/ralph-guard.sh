@@ -8,8 +8,7 @@
 #   - Gate-without-write block (Bash: gate-run.sh without intervening write)
 #   - Direct-test-tool denial (Bash: vitest/cypress/tsc without gate-run.sh)
 #   - Command-policy enforcement (Bash: .ralph/command-policy —
-#     rewrite/deny/gate-wrapped/protect)
-#     Legacy fallback: .ralph/denied-commands + .ralph/protected-scripts
+#     gates/rewrite/deny/wrap/protect)
 #   - State-tampering denial (Bash: rm -rf .ralph/, edits to state paths)
 #   - Forbidden-path denial (Write/Edit/MultiEdit: .ralph/gates/*, state dir)
 #   - Write-event recording (Write/Edit/MultiEdit: updates last-write-ts)
@@ -178,6 +177,50 @@ _canonicalize() {
   echo "$cmd"
 }
 
+# Inline copy of _load_gates_from_policy. The guard runs as a standalone
+# hook process and does not source ralph-common.sh; keeping a small private
+# copy mirrors the existing pattern (see _canonicalize, _normalize_pnpm).
+# Keep this implementation in sync with ralph-common.sh:_load_gates_from_policy.
+_guard_load_gates() {
+  local policy="$1"
+  local basic_var="$2" full_var="$3" final_var="$4"
+  local basic_cmd="" full_cmd="" final_cmd=""
+
+  if [[ -f "$policy" ]]; then
+    local section="" line key value
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line%$'\r'}"
+      line="$(printf '%s' "$line" | sed -E 's/[[:space:]]+$//')"
+      case "$line" in
+        "" | \#*) continue ;;
+        "[gates]")
+          section="gates"
+          continue
+          ;;
+        "["*"]")
+          section=""
+          continue
+          ;;
+      esac
+      [[ "$section" == "gates" ]] || continue
+      [[ "$line" == *"|"* ]] || continue
+      key="${line%%|*}"
+      value="${line#*|}"
+      key="$(printf '%s' "$key" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+      value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+      # shellcheck disable=SC2034  # tier locals are read indirectly via eval below
+      case "$key" in
+        basic) basic_cmd="$value" ;;
+        full) full_cmd="$value" ;;
+        final) final_cmd="$value" ;;
+      esac
+    done <"$policy"
+  fi
+  eval "$basic_var=\$basic_cmd"
+  eval "$full_var=\$full_cmd"
+  eval "$final_var=\$final_cmd"
+}
+
 # ---------------------------------------------------------------------------
 # Command policy (rewrite / deny / wrap / protect)
 # ---------------------------------------------------------------------------
@@ -200,43 +243,20 @@ _canonicalize() {
 #   [deny]
 #   command-prefix | reason          # genuinely dangerous; hard block
 #
-#   [wrap]                           # 0.12.3 — replaces [gate-wrapped]
+#   [wrap]
 #   command-prefix | label           # auto-wrapped in gate-run.sh with <label>
-#                                    # (label must be one of: basic|final|e2e|lint|custom)
+#                                    # label ∈ basic|full|final|unit|integration|e2e|lint|format
 #
 #   [protect]
 #   command-prefix                   # bare OK; pipe/redirect denied
-#
-# Backward compat: [gate-wrapped] entries are accepted and treated as [wrap]
-# entries with the default label "basic". Projects should migrate to [wrap]
-# with explicit labels for accurate gate logging.
-#
-# Falls back to .ralph/denied-commands (deny) + .ralph/protected-scripts
-# (protect) when command-policy is absent. Legacy fallback never gets
-# rewrite or wrap — only the new format supports them.
-
-_warn_legacy_policy() {
-  local sentinel="$STATE_DIR/.policy-deprecation-warned"
-  [[ -f "$sentinel" ]] && return 0
-  : >"$sentinel"
-  local errlog="$WORKSPACE/.ralph/errors.log"
-  [[ -f "$errlog" ]] || return 0
-  {
-    echo ""
-    echo "[$(date '+%H:%M:%S')] DEPRECATION: .ralph/denied-commands and"
-    echo "  .ralph/protected-scripts are deprecated. Migrate to .ralph/command-policy"
-    echo "  (see shared-references/templates/command-policy.md in the plugin)."
-  } >>"$errlog" 2>/dev/null || true
-}
 
 # Parse command-policy into four temp files for the four sections.
 # Output paths are echoed space-separated:
 #   "rewrite_file deny_file wrap_file protect_file"
-# Caller is responsible for cleanup.
-#
-# 0.12.3: [gate-wrapped] is a backward-compat alias for [wrap]. Entries
-# from a [gate-wrapped] section are appended to the wrap file with no
-# label (defaulting downstream to "basic").
+# Caller is responsible for cleanup. The [gates] section is recognized
+# here so its rows don't fall through to other buckets, but its content
+# is consumed by _load_gates_from_policy in ralph-common.sh — not by
+# this parser's enforcement path.
 _parse_command_policy() {
   local policy_file="$1"
   local rw dn wr pt
@@ -252,10 +272,10 @@ _parse_command_policy() {
     line="${line%"${line##*[![:space:]]}"}"
     case "$line" in
       "" | \#*) continue ;;
+      "[gates]") section="gates" ;;
       "[rewrite]") section="rewrite" ;;
       "[deny]") section="deny" ;;
       "[wrap]") section="wrap" ;;
-      "[gate-wrapped]") section="wrap_legacy" ;;
       "[protect]") section="protect" ;;
       "["*"]") section="" ;;
       *)
@@ -263,8 +283,8 @@ _parse_command_policy() {
           rewrite) printf '%s\n' "$line" >>"$rw" ;;
           deny) printf '%s\n' "$line" >>"$dn" ;;
           wrap) printf '%s\n' "$line" >>"$wr" ;;
-          wrap_legacy) printf '%s\n' "$line" >>"$wr" ;;
           protect) printf '%s\n' "$line" >>"$pt" ;;
+          gates) ;; # consumed by _load_gates_from_policy in ralph-common.sh
         esac
         ;;
     esac
@@ -368,8 +388,8 @@ _apply_protect() {
 #
 # Rule syntax (one per line):
 #   command-prefix | label
-# label must be one of basic|final|e2e|lint|custom. Missing label defaults
-# to "basic" (used for backward-compat [gate-wrapped] entries).
+# label must be one of basic|full|final|unit|integration|e2e|lint|format.
+# Missing or unrecognized label → the rule is skipped (no silent fallback).
 #
 # On match, sets _WRAP_REWRITE to the rewritten command. _enforce_command_policy
 # emits it via _emit_rewrite after all checks pass.
@@ -382,24 +402,24 @@ _WRAP_REWRITE=""
 _try_match_wrap_segment() {
   # $1 = canonical segment to match (already env/pipe/pnpm-normalized)
   # $2 = wrap file
+  # 0.14.0: every [wrap] row must specify an explicit, valid label —
+  # silent fallback to "basic" hid misclassification. Rows without `|`
+  # or with an unrecognized label are skipped (the segment falls through
+  # to whatever other policy/check would handle it).
   local segment="$1" wrfile="$2"
   local gate_run_path="${PLUGIN_ROOT:-..}/shared-scripts/gate-run.sh"
   local rule prefix label
   while IFS= read -r rule || [[ -n "$rule" ]]; do
     [[ -z "$rule" ]] && continue
-    if [[ "$rule" == *"|"* ]]; then
-      prefix="${rule%%|*}"
-      label="${rule#*|}"
-    else
-      prefix="$rule"
-      label="basic"
-    fi
+    [[ "$rule" == *"|"* ]] || continue
+    prefix="${rule%%|*}"
+    label="${rule#*|}"
     prefix="$(printf '%s' "$prefix" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
     label="$(printf '%s' "$label" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
-    [[ -z "$prefix" ]] && continue
+    [[ -z "$prefix" || -z "$label" ]] && continue
     case "$label" in
-      basic | final | e2e | lint | custom) ;;
-      *) label="basic" ;;
+      basic | full | final | unit | integration | e2e | lint | format) ;;
+      *) continue ;;
     esac
     if [[ "$segment" == "$prefix" || "$segment" == "$prefix "* ]]; then
       _WRAP_REWRITE="bash $gate_run_path $label $segment"
@@ -483,30 +503,37 @@ _enforce_command_policy() {
     parsed="${parsed#* }"
     wrfile="${parsed%% *}"
     ptfile="${parsed#* }"
-  else
-    # Legacy fallback. Only deny + protect; no rewrite, no wrap.
-    local legacy_used=0
-    if [[ -f "$WORKSPACE/.ralph/denied-commands" ]]; then
-      dnfile=$(mktemp)
-      grep -v '^\s*#' "$WORKSPACE/.ralph/denied-commands" 2>/dev/null | grep -v '^\s*$' >"$dnfile" || true
-      legacy_used=1
+
+    # 0.14.0: [gates] commands are auto-wrapped under their tier label —
+    # the project does not need to duplicate them in [wrap]. We append
+    # synthesized wrap rules to the parsed wrap file before enforcement.
+    # The command prefix is canonicalized (env-prefix + pipe stripped,
+    # pnpm-normalized) so it matches the canonical form the [wrap]
+    # matcher uses. (Caveat: env prefixes are dropped at wrap time —
+    # if a [gates] command relies on a leading env var, wrap it in a
+    # shell script so the env lives inside the script.)
+    local _g_basic _g_full _g_final _g_can
+    _guard_load_gates "$policy" _g_basic _g_full _g_final
+    if [[ -n "$_g_basic" ]]; then
+      _g_can=$(_canonicalize "$_g_basic")
+      [[ -n "$_g_can" ]] && printf '%s | basic\n' "$_g_can" >>"$wrfile"
     fi
-    if [[ -f "$WORKSPACE/.ralph/protected-scripts" ]]; then
-      ptfile=$(mktemp)
-      grep -v '^\s*#' "$WORKSPACE/.ralph/protected-scripts" 2>/dev/null | grep -v '^\s*$' >"$ptfile" || true
-      legacy_used=1
-    elif [[ -n "${RALPH_PROTECTED_SCRIPTS:-}" ]]; then
-      ptfile=$(mktemp)
-      printf '%s' "$RALPH_PROTECTED_SCRIPTS" | tr ' ' '\n' >"$ptfile"
+    if [[ -n "$_g_full" ]]; then
+      _g_can=$(_canonicalize "$_g_full")
+      [[ -n "$_g_can" ]] && printf '%s | full\n' "$_g_can" >>"$wrfile"
     fi
-    if [[ "$legacy_used" -eq 1 ]]; then
-      _warn_legacy_policy
+    if [[ -n "$_g_final" ]]; then
+      _g_can=$(_canonicalize "$_g_final")
+      [[ -n "$_g_can" ]] && printf '%s | final\n' "$_g_can" >>"$wrfile"
     fi
   fi
+  # No policy file → no rewrite/deny/wrap/protect rules. Tier-gate
+  # validation (in ralph-setup.sh / loop entry points) has already failed
+  # the loop if .ralph/command-policy is missing, so this branch only
+  # matters for the test harness and the hook running outside an active
+  # loop (e.g. interactive debugging). Pass commands through unchanged.
 
   # Enforcement order: rewrite → deny → wrap → protect.
-  #
-  # 0.12.3 model:
   #   - [rewrite] applies regex transforms to the canonical form (and
   #     anywhere else it appears). Project-specific (e.g. `pnpm nx X → pnpm X`).
   #     Result feeds into all downstream checks.
@@ -591,51 +618,63 @@ _guard_bash() {
   fi
 
   # --- Command-policy enforcement ---
-  # Preferred:  .ralph/command-policy  (sections: [rewrite] [deny] [wrap] [protect])
-  # Legacy:     .ralph/denied-commands + .ralph/protected-scripts
-  # On legacy use, append a one-shot deprecation note to .ralph/errors.log.
+  # .ralph/command-policy: [gates] [rewrite] [deny] [wrap] [protect].
   _enforce_command_policy "$cmd" "$canonical"
 
   # --- Gate-without-write check (per-label) ---
-  # Different gates run different commands (basic ≠ final ≠ e2e ≠ lint), so
-  # a successful 'basic' does NOT make a subsequent 'final' redundant — the
-  # cache must be tracked per label, not globally. (Without this, [risky]
-  # tasks that need 'final' after 'basic' get incorrectly blocked.)
+  # Different labels run different commands, so a successful 'basic' does
+  # NOT make a subsequent 'full' redundant — the cache must be tracked
+  # per label, not globally. (Without this, [risky] tasks that need 'full'
+  # after 'basic' would get incorrectly blocked.)
   if echo "$cmd" | grep -qE 'gate-run\.sh'; then
     local label
-    label=$(echo "$cmd" | grep -oE 'gate-run\.sh\s+(basic|final|e2e|lint|custom|eval-[a-z0-9-]+)' | awk '{print $2}') || label="unknown"
+    label=$(echo "$cmd" | grep -oE 'gate-run\.sh\s+(basic|full|final|unit|integration|e2e|lint|format)' | awk '{print $2}') || label="unknown"
 
-    # --- Final-command label lock (0.13.5) ---
-    # The completion guard (_complete_allowed) only honors a green result when
-    # the pinned final command ran under label=final. Running that exact
-    # command under any other ad-hoc label (basic|e2e|lint|custom) produces a
-    # result the completion guard ignores AND writes the breadcrumb to a
-    # different per-label cache — i.e. it sidesteps the final-gate cache. That
-    # is precisely the "re-run the final gate under a fresh label to escape the
-    # cache and fish for green" anti-pattern. A failing/flaky gate is the
-    # agent's to fix at the source, not to relabel around. eval-* labels are
-    # exempt: the acceptance-evaluation loop legitimately runs the final
-    # command under eval-final.
-    case "$label" in
-      final | eval-*) ;;
-      *)
-        local pinned_final gated_cmd
-        pinned_final="pnpm all-check"
-        if [[ -f "$WORKSPACE/.ralph/final-check-command" ]]; then
-          pinned_final=$(tr -d '\n' <"$WORKSPACE/.ralph/final-check-command" 2>/dev/null)
-        fi
-        pinned_final=$(_normalize_pnpm "$pinned_final")
-        pinned_final=$(printf '%s' "$pinned_final" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
-        # Extract the command being gated from the canonical (pipe/redirect-
-        # stripped) form, then normalize it the same way as the pinned command.
-        gated_cmd=$(printf '%s' "$canonical" | sed -E "s|.*gate-run\.sh[[:space:]]+${label}[[:space:]]+||")
-        gated_cmd=$(_normalize_pnpm "$gated_cmd")
-        gated_cmd=$(printf '%s' "$gated_cmd" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
-        if [[ -n "$pinned_final" && "$gated_cmd" == "$pinned_final" ]]; then
-          _block "The final completion gate '${pinned_final}' must run under label 'final', not '${label}'. A pass under '${label}' is invisible to the completion guard and bypasses the final-gate cache — re-running the final command under a fresh label to fish for green is dodging ownership of the failure. Re-run as: gate-run.sh final ${pinned_final}. If label 'final' reports it already ran since your last code edit, that cache is the signal to FIX the failing code (you own every failure, flaky infra included) — not to relabel around it."
-        fi
-        ;;
-    esac
+    # --- Tier-command label lock (0.14.0) ---
+    # The three tier-gate commands declared in [gates] (basic / full / final)
+    # are "owned" by their tier labels. Running a tier command under any
+    # other label (a) writes the breadcrumb to a per-label cache the tier's
+    # downstream consumer doesn't read (e.g. _complete_allowed reads
+    # full-latest.{cmd,exit}, not unit-latest.{...}), and (b) escapes the
+    # per-label gate cache so the agent can re-run hoping for a different
+    # result. That is the "relabel to fish for green" anti-pattern. A flaky
+    # or failing gate is the agent's to fix at the source.
+    #
+    # If the same command is declared for more than one tier (allowed —
+    # e.g. full = final), ANY of those tier labels satisfies the lock.
+    local _basic_gate _full_gate _final_gate
+    _guard_load_gates "$WORKSPACE/.ralph/command-policy" \
+      _basic_gate _full_gate _final_gate
+    _basic_gate=$(_normalize_pnpm "$_basic_gate")
+    _basic_gate=$(printf '%s' "$_basic_gate" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+    _full_gate=$(_normalize_pnpm "$_full_gate")
+    _full_gate=$(printf '%s' "$_full_gate" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+    _final_gate=$(_normalize_pnpm "$_final_gate")
+    _final_gate=$(printf '%s' "$_final_gate" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+
+    local gated_cmd expected_tiers=""
+    gated_cmd=$(printf '%s' "$canonical" | sed -E "s|.*gate-run\.sh[[:space:]]+${label}[[:space:]]+||")
+    gated_cmd=$(_normalize_pnpm "$gated_cmd")
+    gated_cmd=$(printf '%s' "$gated_cmd" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+
+    [[ -n "$_basic_gate" && "$gated_cmd" == "$_basic_gate" ]] && expected_tiers="$expected_tiers basic"
+    [[ -n "$_full_gate" && "$gated_cmd" == "$_full_gate" ]] && expected_tiers="$expected_tiers full"
+    [[ -n "$_final_gate" && "$gated_cmd" == "$_final_gate" ]] && expected_tiers="$expected_tiers final"
+    expected_tiers="${expected_tiers# }"
+
+    if [[ -n "$expected_tiers" ]]; then
+      local _t _ok=0
+      for _t in $expected_tiers; do
+        [[ "$_t" == "$label" ]] && {
+          _ok=1
+          break
+        }
+      done
+      if [[ $_ok -eq 0 ]]; then
+        local _expected_pretty="${expected_tiers// /|}"
+        _block "The tier-gate command '${gated_cmd}' must run under label '${_expected_pretty}', not '${label}'. A pass under '${label}' lands in a per-label cache the completion/eval guards don't read, AND escapes the '${_expected_pretty}' gate cache — re-running a tier command under a fresh label to fish for green is dodging ownership of the failure. Re-run as: gate-run.sh ${_expected_pretty%%|*} ${gated_cmd}. If that label reports it already ran since your last code edit, the cache is signalling: FIX the failing code (you own every failure, flaky infra included)."
+      fi
+    fi
 
     local last_gate_ts_file="$STATE_DIR/last-gate-ts.$label"
     local last_write last_gate

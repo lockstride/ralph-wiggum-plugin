@@ -12,8 +12,9 @@ context rotation; you handle the work.
 ## Paths
 - **Tasks**: `{{TASK_FILE}}` | **Plan**: `{{PLAN_FILE}}` | **Spec**: `{{SPEC_FILE}}`
 - **Constitution**: `{{CONSTITUTION_PATH}}`
-- **Basic gate**: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`
-- **Final gate**: `{{GATE_RUN}} final {{FINAL_CHECK_COMMAND}}`
+- **Basic gate (per-task)**: `{{GATE_RUN}} basic {{BASIC_CHECK_COMMAND}}`
+- **Full gate (on [risky] + end-of-loop completion)**: `{{GATE_RUN}} full {{FULL_CHECK_COMMAND}}`
+- **Final gate**: reserved for the post-completion eval loop — do NOT run it from this loop.
 
 ## Per-task flow
 1. Read the tasks file and the plan file. Read data-model.md /
@@ -25,7 +26,7 @@ context rotation; you handle the work.
    - `git add <exact paths> && git commit -m "<type>(<scope>): <desc> (T###)"`. No agent footers. No `--amend`. {{PUSH_GUIDANCE}}
    - (The framing's `## After every commit` block governs what happens
      next — yield-if-breadcrumb OR read the next task.)
-3. When all tasks are `[x]` AND the final gate exits 0,
+3. When all tasks are `[x]` AND the full gate exits 0,
    emit `<promise>ALL_TASKS_DONE</promise>`.
 
 If a gate fails, read `.ralph/gates/<label>-latest.log` for the

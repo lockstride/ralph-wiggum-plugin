@@ -13,8 +13,19 @@ setup() {
   create_mock_workspace
   create_mock_spec "test-spec"
 
-  # Source the resolver so we can call functions directly
+  # 0.14.0: resolve_prompt_spec reads [gates] from command-policy via
+  # _load_gates_from_policy (in ralph-common.sh). Source that first so
+  # the helper is in scope, then seed a [gates] section the resolver
+  # can interpolate.
+  source "$SCRIPTS_DIR/ralph-common.sh"
   source "$SCRIPTS_DIR/prompt-resolver.sh"
+
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[gates]
+basic | mock basic-check
+full  | mock all-check
+final | mock verify:final
+EOF
 }
 
 teardown() {
@@ -349,11 +360,13 @@ PROMPT
   grep -q "tasks.md" "$effective"
   grep -q "plan.md" "$effective"
   grep -q "gate-run.sh" "$effective"
-  grep -q "pnpm basic-check" "$effective"
+  # 0.14.0: BASIC_CHECK_COMMAND now comes from [gates].basic, not a hardcoded default
+  grep -q "mock basic-check" "$effective"
 
   # Raw placeholders should NOT remain
   ! grep -q '{{TASK_FILE}}' "$effective"
   ! grep -q '{{PLAN_FILE}}' "$effective"
+  ! grep -q '{{BASIC_CHECK_COMMAND}}' "$effective"
 }
 
 # -----------------------------------------------------------------------------

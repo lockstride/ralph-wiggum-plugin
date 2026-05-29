@@ -376,26 +376,13 @@ resolve_prompt_spec() {
     constitution_path="(no constitution found — proceed without one)"
   fi
 
-  # Resolve check commands.
-  #
-  # Ralph runs two tiers of gate:
-  #   - BASIC_CHECK_COMMAND: fast per-task smoke gate (no e2e). Run after
-  #     every individual task, must pass before marking [x].
-  #   - FINAL_CHECK_COMMAND: full gate including e2e. Run at phase boundaries
-  #     and before emitting ALL_TASKS_DONE.
-  #
-  # Breadcrumb precedence:
-  #   BASIC: .ralph/basic-check-command → "pnpm basic-check"
-  #   FINAL: .ralph/final-check-command → "pnpm all-check"
-  local basic_check_command="pnpm basic-check"
-  if [[ -f "$workspace/.ralph/basic-check-command" ]]; then
-    basic_check_command=$(cat "$workspace/.ralph/basic-check-command")
-  fi
-
-  local final_check_command="pnpm all-check"
-  if [[ -f "$workspace/.ralph/final-check-command" ]]; then
-    final_check_command=$(cat "$workspace/.ralph/final-check-command")
-  fi
+  # Load the three tier-gate commands from .ralph/command-policy [gates].
+  # The loop's startup path (ralph-setup.sh / ralph-loop.sh / ralph-once.sh /
+  # ralph-evaluate.sh) calls _validate_gates_section before reaching here,
+  # so by this point all three are guaranteed non-empty.
+  local basic_check_command full_check_command final_check_command
+  _load_gates_from_policy "$workspace" \
+    basic_check_command full_check_command final_check_command
 
   # Push policy — controls whether the agent is instructed to `git push`
   # during the loop. Breadcrumb: .ralph/push-policy containing one of:
@@ -583,6 +570,7 @@ resolve_prompt_spec() {
     SPEC_NAME "$spec_name" \
     CONSTITUTION_PATH "$constitution_path" \
     BASIC_CHECK_COMMAND "$basic_check_command" \
+    FULL_CHECK_COMMAND "$full_check_command" \
     FINAL_CHECK_COMMAND "$final_check_command" \
     GATE_RUN "$gate_run_cmd" \
     RALPH_PLUGIN_ROOT "$plugin_root" \

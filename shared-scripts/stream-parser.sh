@@ -554,7 +554,7 @@ process_line() {
             # `|| true` suppresses pipefail's propagation of grep's exit 1
             # when there's no canonical-label match (the common no-op case).
             local _gate_label
-            _gate_label=$(echo "$cmd" | grep -oE 'gate-run\.sh[[:space:]]+(basic|final|e2e|lint|custom|eval-[a-z0-9-]+)\b' 2>/dev/null | awk '{print $2}' | head -1 || true)
+            _gate_label=$(echo "$cmd" | grep -oE 'gate-run\.sh[[:space:]]+(basic|full|final|unit|integration|e2e|lint|format)\b' 2>/dev/null | awk '{print $2}' | head -1 || true)
             if [[ -n "$_gate_label" ]]; then
               update_handoff_gate_state "$_gate_label" "$exit_code" 2>/dev/null || true
             fi

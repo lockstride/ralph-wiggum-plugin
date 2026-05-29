@@ -145,6 +145,10 @@ main() {
   # Initialize .ralph before resolving the prompt (effective-prompt.md lives there)
   init_ralph_dir "$WORKSPACE"
 
+  if ! _validate_gates_section "$WORKSPACE"; then
+    exit 1
+  fi
+
   # Resolve prompt
   echo "📝 Resolving prompt source: $PROMPT_MODE${PROMPT_VALUE:+ ($PROMPT_VALUE)}"
   if ! out=$(resolve_prompt "$WORKSPACE" "$PROMPT_MODE" "$PROMPT_VALUE"); then

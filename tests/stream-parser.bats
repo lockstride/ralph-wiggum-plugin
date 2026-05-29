@@ -538,11 +538,11 @@ HOFF
   ! grep -q "label: all" "$MOCK_WORKSPACE/.ralph/handoff.md"
 }
 
-@test "gate-label extraction accepts each canonical label (0.12.4)" {
-  # 0.13.3: eval-final and eval-rework added for the acceptance-evaluation
-  # loop. eval-<lowercase> form is accepted; the test exercises both
-  # documented labels plus a third to confirm the suffix is unbounded.
-  for label in basic final e2e lint custom eval-final eval-rework eval-bench; do
+@test "gate-label extraction accepts each canonical label (0.14.0)" {
+  # 0.14.0: canonical set is 3 tier labels + 5 kind labels. Stale labels
+  # (custom, eval-*) are intentionally excluded — see the non-canonical
+  # ignore test above.
+  for label in basic full final unit integration e2e lint format; do
     cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<HOFF
 # Loop Handoff
 

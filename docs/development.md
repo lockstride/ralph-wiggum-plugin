@@ -55,7 +55,7 @@ Two watchdogs prevent the loop from hanging indefinitely.
 | Watchdog | Env var | Default | What it does |
 |---|---|---|---|
 | **Heartbeat timeout** | `RALPH_HEARTBEAT_TIMEOUT` | 300s | If the stream parser produces no output for this long, kills the agent and retries via DEFER with exponential backoff. The 0.5.3 sidecar emits a synthetic `HEARTBEAT` every 60s so this only fires when the agent is genuinely silent (not just deep in a long tool call). |
-| **Gate timeout** | `RALPH_GATE_TIMEOUT` (blanket) / `RALPH_BASIC_GATE_TIMEOUT` / `RALPH_FINAL_GATE_TIMEOUT` | 600s basic / 900s final | If a gate command doesn't finish within this time, kills it and returns exit 124. Catches hung nx daemons and build processes. Requires `timeout` (Linux) or `gtimeout` (macOS via `brew install coreutils`). |
+| **Gate timeout** | `RALPH_GATE_TIMEOUT` (blanket) / `RALPH_BASIC_GATE_TIMEOUT` / `RALPH_FULL_GATE_TIMEOUT` / `RALPH_FINAL_GATE_TIMEOUT` | 1200s all tiers | If a gate command doesn't finish within this time, kills it and returns exit 124. Catches hung nx daemons and build processes. Requires `timeout` (Linux) or `gtimeout` (macOS via `brew install coreutils`). |
 
 ## Signals the loop understands
 
@@ -77,7 +77,7 @@ The acceptance evaluator is a separate Ralph loop that runs *after* the main loo
 
 **Modes.** Per loop, the orchestrator picks one based on the current state of `.ralph/acceptance-report.md`:
 
-- **VERIFIER** — independently checks every requirement (file reads, grep for conventions, Playwright MCP for UI behavior if available, gate runs under `eval-*` labels). Records every unmet requirement as a `[ ]` line in the report's **Gaps** section. Only the verifier may flip the report's top-level `- [ ] All acceptance criteria met and verified` checkbox to `[x]`, and only after a clean independent pass.
+- **VERIFIER** — independently checks every requirement (file reads, grep for conventions, Playwright MCP for UI behavior if available, gate runs under the `final` label). Records every unmet requirement as a `[ ]` line in the report's **Gaps** section. Only the verifier may flip the report's top-level `- [ ] All acceptance criteria met and verified` checkbox to `[x]`, and only after a clean independent pass.
 - **REWORK** — works the verifier's Gaps list, resolving as many as possible and checking them off. Unresolvable ones get a `(blocked: reason)` suffix.
 
 **Exit conditions.** Cleanly when the verifier flips the top-level checkbox. Otherwise at the loop cap (default 10; override with `--eval-loops N` or `RALPH_EVAL_MAX_LOOPS` env var — the older `--eval-iterations` flag is kept as a deprecated alias).

@@ -20,6 +20,16 @@ setup() {
   # Write a mock effective prompt
   mkdir -p "$MOCK_WORKSPACE/.ralph"
   echo "Mock task body" > "$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+
+  # 0.14.0: [gates] is required for any startup that builds a prompt or
+  # runs the completion guard. Seed with sentinel commands so the build
+  # prompt's "## Gate Selection" block has actual values to interpolate.
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[gates]
+basic | mock basic-check
+full  | mock all-check
+final | mock verify:final
+EOF
 }
 
 teardown() {
@@ -58,17 +68,20 @@ teardown() {
 
 @test "build_prompt includes Gate Runner section when gate-run.sh is present (0.3.6)" {
   # gate-run.sh ships in-tree next to ralph-common.sh, so the block renders
-  # under the normal test setup. 0.12.5 trimmed this block from ~24 lines
-  # to a compact 5 — the hook now transparently routes raw `pnpm <script>`
-  # through gate-run.sh, so the agent doesn't need the full contract spelled
-  # out. Load-bearing assertions: section heading, hint that the hook does
-  # the wrapping, labels list, and the "don't pipe" rule.
+  # under the normal test setup. 0.12.5 trimmed this block; 0.14.0 swapped
+  # the label list to the new canonical set and surfaces each tier-gate
+  # command from [gates]. Load-bearing assertions: section heading, hint
+  # that the hook does the wrapping, full new label list, and the actual
+  # tier-gate commands (loaded from [gates]) are surfaced.
   local output
   output=$(build_prompt "$MOCK_WORKSPACE" 1)
 
   echo "$output" | grep -q "## Gate Runner"
   echo "$output" | grep -qE "auto-wraps|hook"
-  echo "$output" | grep -qE "basic.*final.*e2e.*lint.*custom"
+  echo "$output" | grep -qE "basic.*full.*final.*unit.*integration.*e2e.*lint.*format"
+  # The interpolated tier-gate commands appear by name
+  echo "$output" | grep -q "mock basic-check"
+  echo "$output" | grep -q "mock all-check"
   # 0.12.5: phrasing avoids the apostrophe form because bash 3.2's
   # `$( ... <<EOF heredoc ... )` parser mis-tracks single quotes when
   # the heredoc body contains them (real bug, breaks `head -N` parsing).
@@ -161,9 +174,29 @@ HOFF
   local output
   output=$(build_prompt "$MOCK_WORKSPACE" 1)
   echo "$output" | grep -q "^## Gate Selection$"
-  # Default gate guidance is the only load-bearing thing here.
-  echo "$output" | grep -q "pnpm basic-check"
+  # 0.14.0: interpolates [gates].basic + [gates].full into the block;
+  # no hardcoded dMatrix-specific commands.
+  echo "$output" | grep -q "mock basic-check"
+  echo "$output" | grep -q "mock all-check"
   echo "$output" | grep -q "\[risky\]"
+  # Regression guard: the old hardcoded literals must NOT appear.
+  ! echo "$output" | grep -q "pnpm basic-check"
+  ! echo "$output" | grep -q "pnpm all-check"
+}
+
+@test "build_prompt's Gate Selection follows [gates] override (0.14.0)" {
+  # Swap the policy mid-test to confirm interpolation, not stale literals.
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[gates]
+basic | npm run check:fast
+full  | npm run check:full
+final | npm run check:final
+EOF
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+  echo "$output" | grep -q "npm run check:fast"
+  echo "$output" | grep -q "npm run check:full"
+  ! echo "$output" | grep -q "mock basic-check"
 }
 
 @test "init_ralph_dir seeds handoff.md skeleton on first init (0.12.0)" {
@@ -337,41 +370,164 @@ SUMMARY
 }
 
 # ---------------------------------------------------------------------------
-# Completion bar — refuse `<promise>ALL_TASKS_DONE</promise>` when the
-# final gate is red OR pinned to the wrong command (0.3.3 + 0.6.4).
+# Completion bar — _complete_allowed refuses ALL_TASKS_DONE unless the
+# `full` tier gate matches [gates].full and exits 0. `final` is reserved
+# for the eval loop and plays no role here.
 # ---------------------------------------------------------------------------
-# Four representative cases. The 0.12.5 prune dropped ~7 variant tests
-# (whitespace tolerance, no-final-breadcrumb fallback, etc.) — covered
-# implicitly by the integration paths that exercise this gate.
 
-@test "_complete_allowed: green final gate → allow" {
+@test "_complete_allowed: green full gate matching [gates].full → allow" {
+  # setup() already wrote [gates].full = "mock all-check".
   mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
-  printf '0' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  printf 'mock all-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '0'              >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
   _complete_allowed "$MOCK_WORKSPACE"
 }
 
-@test "_complete_allowed: red final gate → block" {
+@test "_complete_allowed: red full gate → block" {
   mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
-  printf '124' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  printf 'mock all-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '124'            >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
   ! _complete_allowed "$MOCK_WORKSPACE"
 }
 
 @test "_complete_allowed: pinned cmd mismatch → block even when green" {
-  # The 0.6.4 spoof: agent ran `gate-run.sh final pnpm basic-check` to
-  # satisfy a label-only guard. Cheap, green, wrong.
+  # The 0.6.4 spoof, generalized to v0.14.0: agent ran a cheap command
+  # under label=full to satisfy a label-only guard. Caught by the cmd-match.
   mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
-  printf 'pnpm basic-check' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
-  printf '0'                >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  printf 'mock basic-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '0'                >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
   ! _complete_allowed "$MOCK_WORKSPACE"
 }
 
-@test "_complete_allowed: .ralph/final-check-command override is honored" {
-  # Non-pnpm projects override the canonical via the breadcrumb file.
+@test "_complete_allowed: no full gate has run yet → block" {
+  # 0.14.0 dropped the pre-0.6.4 fallback: no full-latest.cmd → not allowed.
   mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
-  printf 'cargo test --release' >"$MOCK_WORKSPACE/.ralph/final-check-command"
-  printf 'cargo test --release' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
-  printf '0'                    >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: missing [gates].full → block with clear reason" {
+  # Belt-and-suspenders: even if validation fell through (e.g. policy edited
+  # mid-run), the completion guard refuses without an explicit full tier.
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[gates]
+basic | mock basic-check
+final | mock verify:final
+EOF
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'mock all-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '0'              >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [[ "$_COMPLETE_BLOCK_REASON" == *"[gates].full"* ]]
+}
+
+@test "_complete_allowed: [gates].full override is honored" {
+  # Project ships a non-pnpm gate — completion bar follows whatever is
+  # declared, no defaults.
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[gates]
+basic | cargo test
+full  | cargo test --release
+final | cargo bench
+EOF
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'cargo test --release' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '0'                    >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
   _complete_allowed "$MOCK_WORKSPACE"
+}
+
+# ---------------------------------------------------------------------------
+# 0.14.0: _load_gates_from_policy and _validate_gates_section
+# ---------------------------------------------------------------------------
+
+@test "_load_gates_from_policy: happy path — all three tiers populated" {
+  local b f fi
+  _load_gates_from_policy "$MOCK_WORKSPACE" b f fi
+  [ "$b"  = "mock basic-check" ]
+  [ "$f"  = "mock all-check" ]
+  [ "$fi" = "mock verify:final" ]
+}
+
+@test "_load_gates_from_policy: missing file → all three empty" {
+  rm -f "$MOCK_WORKSPACE/.ralph/command-policy"
+  local b f fi
+  _load_gates_from_policy "$MOCK_WORKSPACE" b f fi
+  [ -z "$b" ]; [ -z "$f" ]; [ -z "$fi" ]
+}
+
+@test "_load_gates_from_policy: missing tier rows → that tier's slot empty" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[gates]
+basic | only basic set
+EOF
+  local b f fi
+  _load_gates_from_policy "$MOCK_WORKSPACE" b f fi
+  [ "$b" = "only basic set" ]
+  [ -z "$f" ]; [ -z "$fi" ]
+}
+
+@test "_load_gates_from_policy: whitespace tolerance around tier name and command" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[gates]
+  basic   |    spaced basic
+full|tight
+   final |   spaced final
+EOF
+  local b f fi
+  _load_gates_from_policy "$MOCK_WORKSPACE" b f fi
+  [ "$b"  = "spaced basic" ]
+  [ "$f"  = "tight" ]
+  [ "$fi" = "spaced final" ]
+}
+
+@test "_load_gates_from_policy: subsequent section header ends the [gates] scope" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[gates]
+basic | from gates
+[wrap]
+basic | this should not become [gates].basic
+EOF
+  local b f fi
+  _load_gates_from_policy "$MOCK_WORKSPACE" b f fi
+  [ "$b" = "from gates" ]
+}
+
+@test "_validate_gates_section: complete [gates] → returns 0 silently" {
+  run _validate_gates_section "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+}
+
+@test "_validate_gates_section: missing tier → returns non-zero with named tier" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[gates]
+basic | only basic
+EOF
+  run _validate_gates_section "$MOCK_WORKSPACE"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"full"* ]]
+  [[ "$output" == *"final"* ]]
+  # Errors log got an entry.
+  grep -q "incomplete \[gates\]" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "_validate_gates_section: missing file → returns non-zero" {
+  rm -f "$MOCK_WORKSPACE/.ralph/command-policy"
+  run _validate_gates_section "$MOCK_WORKSPACE"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"basic"* ]]
+  [[ "$output" == *"full"* ]]
+  [[ "$output" == *"final"* ]]
+}
+
+@test "_validate_gates_section: empty tier value → counts as missing" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[gates]
+basic |
+full  | mock all-check
+final | mock final
+EOF
+  run _validate_gates_section "$MOCK_WORKSPACE"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"basic"* ]]
 }
 
 # ---------------------------------------------------------------------------

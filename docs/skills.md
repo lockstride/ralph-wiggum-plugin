@@ -6,7 +6,7 @@ Ralph ships **four** plugin skills — one maintenance skill (`ralph-plugin-spec
 
 Gate discipline for the main implementation loop is handled by the PreToolUse guard hook and the framing prompt:
 - The hook (`ralph-guard.sh`) **transparently rewrites** raw `pnpm <wrap-target>` invocations through `gate-run.sh` via `updatedInput` (logged as 🔀 `GUARD REWRITE`), and **hard-denies** state tampering, direct test-tool invocations, and `[deny]` rules (logged as ⛔ `GUARD DENY`).
-- The framing prompt (`build_prompt()` in `ralph-common.sh`) hardcodes `basic` gate as the per-task default and `all-check` only for `[risky]` tasks.
+- The framing prompt (`build_prompt()` in `ralph-common.sh`) interpolates `[gates].basic` from `.ralph/command-policy` as the per-task default and `[gates].full` for `[risky]` tasks.
 
 No main-loop skills are needed — mechanical enforcement plus a small framing prompt is more reliable than skills the agent may or may not read.
 
@@ -40,7 +40,7 @@ These three drive the post-completion `ralph-evaluate` loop. The orchestrator + 
 
 **File:** `skills/addressing-acceptance-gaps/SKILL.md`
 
-**What it does:** Closes gaps that the verifier recorded. Reads the report's Gaps section as a work list, makes the code/test changes for each `[ ]` entry, runs targeted gates under `eval-rework` label, checks resolved gaps off in place. Does not invent new gaps (verifier's job), does not flip the top-level checkbox (verifier's job), does not over-claim resolution without evidence. Marks unresolvable gaps as `(blocked: reason)`.
+**What it does:** Closes gaps that the verifier recorded. Reads the report's Gaps section as a work list, makes the code/test changes for each `[ ]` entry, runs targeted gates under the `final` label, checks resolved gaps off in place. Does not invent new gaps (verifier's job), does not flip the top-level checkbox (verifier's job), does not over-claim resolution without evidence. Marks unresolvable gaps as `(blocked: reason)`.
 
 **When invoked:** By the orchestrator skill's REWORK mode, via Task-tool sub-agent. Triggered when the report's Gaps section contains any `[ ]` line not suffixed with `(blocked: …)`.
 

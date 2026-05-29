@@ -370,6 +370,13 @@ build_prompt() {
     handoff_block=$(cat "$workspace/.ralph/handoff.md")
   fi
 
+  # 0.14.0: Load the project's three tier-gate commands from
+  # .ralph/command-policy [gates]. Startup validation (_validate_gates_section
+  # in ralph-setup.sh) has already failed the loop if any are unset, so by
+  # the time we get here all three are guaranteed non-empty.
+  local _basic_cmd _full_cmd _final_cmd
+  _load_gates_from_policy "$workspace" _basic_cmd _full_cmd _final_cmd
+
   # 0.3.6: Surface gate-run.sh in the non-speckit framing. Speckit-mode
   # prompts get a dedicated gate-invocation contract from speckit-prompt.md,
   # but custom-prompt and PROMPT.md loops had no gate awareness at all —
@@ -389,12 +396,15 @@ build_prompt() {
 
 ## Gate Runner
 
-Run gates as documented in the project (e.g. \`pnpm basic-check\`, \`pnpm all-check\`).
+Tier-gate commands declared in .ralph/command-policy [gates]:
+- basic: \`$_basic_cmd\`
+- full:  \`$_full_cmd\`
+
 The plugin hook auto-wraps these through \`$gate_run_cmd <label> <cmd>\` and
 captures \`.ralph/gates/<label>-latest.log\` / \`.exit\` / \`.summary\` for you.
 Do not pipe or tail the output — the wrapper already bounds it. Labels:
-\`basic\` \`final\` \`e2e\` \`lint\` \`custom\`. On failure, read the log + any
-Cypress/Playwright screenshots before re-running.
+\`basic\` \`full\` \`final\` \`unit\` \`integration\` \`e2e\` \`lint\` \`format\`. On
+failure, read the log + any Cypress/Playwright screenshots before re-running.
 GATE_EOF
     )
   fi
@@ -412,25 +422,28 @@ $handoff_block
 "
   fi
 
-  # Gate selection guidance. Two short paragraphs covering the default
-  # gate, when to escalate to all-check, and where the failure summary
-  # lives.
+  # Gate selection guidance. Two short paragraphs covering which tier-gate
+  # to run when, and where the failure summary lives. The tier-gate
+  # commands are loaded from .ralph/command-policy [gates] above so this
+  # framing always matches the project's actual gates and the completion
+  # guard's expectations.
   local gate_selection_block
   gate_selection_block=$(
-    cat <<'GSEL_EOF'
+    cat <<GSEL_EOF
 
 ## Gate Selection
 
-Run `pnpm basic-check` by default after each task. Only run `pnpm all-check`
-when the current task line is marked `[risky]` in tasks.md. After a `[risky]`
-task or at the end of the loop, one `all-check` is sufficient — do not re-run
-to "double-check" green gates.
+Run \`$_basic_cmd\` by default after each task. Only run \`$_full_cmd\`
+when the current task line is marked \`[risky]\` in tasks.md. After a
+\`[risky]\` task or at the end of the loop, one \`$_full_cmd\` is sufficient
+— do not re-run to "double-check" green gates. The completion guard requires
+a green \`$_full_cmd\` under label \`full\` before \`ALL_TASKS_DONE\`.
 
-When a gate fails, the failure summary appears under `## Last gate state` in
+When a gate fails, the failure summary appears under \`## Last gate state\` in
 the handoff block above. Read it before editing. To rerun just the failing
 file, prefer the per-app targeted wrapper your project documents (e.g.
-`pnpm <app>:test-unit -- --testFile=<path>`) rather than re-running the full
-gate.
+\`pnpm <app>:test-unit -- --testFile=<path>\`) rather than re-running the
+full gate.
 GSEL_EOF
   )
 
@@ -747,8 +760,7 @@ _write_postmortem() {
 
   local f
   for f in errors.log activity.log progress.md guardrails.md effective-prompt.md \
-    loop-baseline-head loop-baseline-untracked task-file-path \
-    basic-check-command final-check-command test-command; do
+    loop-baseline-head loop-baseline-untracked task-file-path command-policy; do
     [[ -f "$ralph_dir/$f" ]] && cp "$ralph_dir/$f" "$staging/" 2>/dev/null || true
   done
 
@@ -1384,57 +1396,116 @@ run_loop() {
 # COMPLETE GUARD (0.3.3)
 # =============================================================================
 #
-# When every checkbox in tasks.md is [x], the main loop used to treat that as
-# authoritative and return 0. That let an agent "complete" a feature while
-# the most recent gate was still red — the exact "pre-existing failure" bunt
-# behaviour we want to prevent. These helpers inspect the gate-run.sh exit
-# breadcrumbs (`.ralph/gates/<label>-latest.exit`, a single decimal integer
-# written by gate-run.sh as of 0.3.3) and report whether the most recently
-# run gate is green.
-#
-# Project-agnostic: if no exit breadcrumbs exist (no gates run yet, or an
-# older plugin produced the .ralph state), the guard falls back to "allow
-# COMPLETE" — backward-compatible, no regression risk.
+# When every checkbox in tasks.md is [x], the main loop must NOT treat that
+# as authoritative on its own — that let agents "complete" a feature while
+# the most recent gate was still red. The `full` tier-gate is the bar:
+# completion is only honored when full-latest.cmd matches [gates].full from
+# .ralph/command-policy and full-latest.exit == 0. `final` is reserved for
+# the eval loop and never blocks impl-loop completion.
 
-# Emit the exit code from the most-recently-modified
-# `.ralph/gates/*-latest.exit` file. Empty string if no such file exists.
-_most_recent_gate_exit() {
+# Load the three tier-gate commands from `.ralph/command-policy` `[gates]`.
+# Sets the three out-vars (passed by name) — basic, full, final. Missing
+# keys yield empty strings; call _validate_gates_section first if you need
+# completeness guaranteed.
+#
+# The [gates] section is the single source of truth for which command runs
+# at each tier; no defaults, no breadcrumb-file fallbacks. Format:
+#   [gates]
+#   basic | <command>
+#   full  | <command>
+#   final | <command>
+_load_gates_from_policy() {
   local workspace="$1"
-  local dir="$workspace/.ralph/gates"
-  [[ -d "$dir" ]] || return 0
-  local latest=""
-  local f
-  # Portable mtime comparison via bash -nt; avoids the SC2012 ls pitfall
-  # and works on both GNU and BSD userspace (macOS).
-  for f in "$dir"/*-latest.exit; do
-    [[ -f "$f" ]] || continue
-    if [[ -z "$latest" ]] || [[ "$f" -nt "$latest" ]]; then
-      latest="$f"
-    fi
-  done
-  [[ -n "$latest" ]] || return 0
-  cat "$latest" 2>/dev/null
+  local basic_var="$2" full_var="$3" final_var="$4"
+  local policy="$workspace/.ralph/command-policy"
+
+  local basic_cmd="" full_cmd="" final_cmd=""
+
+  if [[ -f "$policy" ]]; then
+    local section="" line key value
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line%$'\r'}"
+      line="$(printf '%s' "$line" | sed -E 's/[[:space:]]+$//')"
+      case "$line" in
+        "" | \#*) continue ;;
+        "[gates]")
+          section="gates"
+          continue
+          ;;
+        "["*"]")
+          section=""
+          continue
+          ;;
+      esac
+      [[ "$section" == "gates" ]] || continue
+      [[ "$line" == *"|"* ]] || continue
+
+      key="${line%%|*}"
+      value="${line#*|}"
+      key="$(printf '%s' "$key" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+      value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+      [[ -z "$key" ]] && continue
+
+      # shellcheck disable=SC2034  # tier locals are read indirectly via eval below
+      case "$key" in
+        basic) basic_cmd="$value" ;;
+        full) full_cmd="$value" ;;
+        final) final_cmd="$value" ;;
+      esac
+    done <"$policy"
+  fi
+
+  eval "$basic_var=\$basic_cmd"
+  eval "$full_var=\$full_cmd"
+  eval "$final_var=\$final_cmd"
+}
+
+# Validate that [gates] declares all three tier commands. Returns 0 on
+# success; on failure prints a clear error to stderr naming the missing
+# tier(s), appends to .ralph/errors.log if writable, and returns 1. Called
+# at session entry — a misconfigured project must not reach the agent.
+_validate_gates_section() {
+  local workspace="$1"
+  local basic full final
+  _load_gates_from_policy "$workspace" basic full final
+
+  local missing=()
+  [[ -z "$basic" ]] && missing+=("basic")
+  [[ -z "$full" ]] && missing+=("full")
+  [[ -z "$final" ]] && missing+=("final")
+  [[ ${#missing[@]} -eq 0 ]] && return 0
+
+  local policy="$workspace/.ralph/command-policy"
+  local file_state="missing"
+  [[ -f "$policy" ]] && file_state="present but missing tier rows"
+
+  {
+    printf '\n❌ .ralph/command-policy [gates] is incomplete (%s).\n' "$file_state"
+    printf '   Missing required tier(s): %s\n' "${missing[*]}"
+    printf '   Add a [gates] section with all three of:\n'
+    printf '     basic | <command>   # per-task check, after every task\n'
+    printf '     full  | <command>   # impl-loop completion gate, after [risky] tasks\n'
+    printf '     final | <command>   # eval-loop gate (post-completion verification)\n'
+    printf '   See shared-references/templates/command-policy.md for a worked example.\n'
+  } >&2
+
+  if [[ -d "$workspace/.ralph" ]]; then
+    {
+      printf '\n[%s] FATAL: incomplete [gates] in .ralph/command-policy\n' "$(date '+%H:%M:%S')"
+      printf '  Missing tier(s): %s\n' "${missing[*]}"
+    } >>"$workspace/.ralph/errors.log" 2>/dev/null || true
+  fi
+  return 1
 }
 
 # Return 0 if the main loop is allowed to honour a tasks-complete /
-# COMPLETE signal, non-zero if it should be blocked.
+# COMPLETE signal, non-zero if it should be blocked. Implementation-loop
+# completion requires the `full` tier-gate to have run, its recorded
+# command to match `[gates].full` from .ralph/command-policy verbatim,
+# and its exit code to be 0. Anything less blocks ALL_TASKS_DONE.
 #
-# Two layers of check:
-#
-#   1. (0.6.4) Pinned-final-command bar. When .ralph/gates/final-latest.cmd
-#      exists (the agent has run a `final` gate), the canonical final
-#      command — read from .ralph/final-check-command, default
-#      "pnpm all-check" to match prompt-resolver.sh's default — must
-#      match what was actually run, AND that run's exit code must be 0.
-#      Closes the spoof where an agent runs `gate-run.sh final pnpm
-#      basic-check` to satisfy a label-only check.
-#
-#   2. Pre-0.6.4 fallback. When no `final` gate has ever been run
-#      (no final-latest.cmd breadcrumb), the most-recent gate across
-#      all labels must have exited 0. Preserves backward compat for
-#      flows that run only e2e/lint/custom gates and never invoke
-#      a `final` label, and for older plugin state lacking the .cmd
-#      breadcrumb.
+# Note: `final` is reserved for the eval loop. The impl loop never gates
+# on `final` and never invokes it.
 #
 # When this function returns non-zero, $_COMPLETE_BLOCK_REASON is set to
 # a short, human-readable phrase the caller logs verbatim — single
@@ -1445,45 +1516,34 @@ _complete_allowed() {
   local workspace="$1"
   _COMPLETE_BLOCK_REASON=""
 
-  local final_cmd_file="$workspace/.ralph/gates/final-latest.cmd"
-  local final_exit_file="$workspace/.ralph/gates/final-latest.exit"
+  local full_cmd_file="$workspace/.ralph/gates/full-latest.cmd"
+  local full_exit_file="$workspace/.ralph/gates/full-latest.exit"
 
-  if [[ -f "$final_cmd_file" ]]; then
-    # Pinned-cmd path. Default mirrors prompt-resolver.sh:resolve_prompt's
-    # FINAL_CHECK_COMMAND default ("pnpm all-check"). Keep the two in sync
-    # if either changes.
-    local pinned_cmd="pnpm all-check"
-    if [[ -f "$workspace/.ralph/final-check-command" ]]; then
-      pinned_cmd=$(tr -d '\n' <"$workspace/.ralph/final-check-command")
-      # Collapse runs of whitespace and trim, so "pnpm  all-check\n" matches
-      # "pnpm all-check".
-      pinned_cmd=$(echo "$pinned_cmd" | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//')
-    fi
-    local actual_cmd
-    actual_cmd=$(tr -d '\n' <"$final_cmd_file")
-    actual_cmd=$(echo "$actual_cmd" | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//')
-
-    if [[ "$actual_cmd" != "$pinned_cmd" ]]; then
-      _COMPLETE_BLOCK_REASON="final gate must run \"$pinned_cmd\" but last label=final ran \"$actual_cmd\""
-      return 1
-    fi
-    local final_exit=""
-    [[ -f "$final_exit_file" ]] && final_exit=$(cat "$final_exit_file" 2>/dev/null)
-    if [[ "$final_exit" != "0" ]]; then
-      _COMPLETE_BLOCK_REASON="final gate \"$pinned_cmd\" exited ${final_exit:-?}"
-      return 1
-    fi
-    return 0
+  local _basic _full _final
+  _load_gates_from_policy "$workspace" _basic _full _final
+  if [[ -z "$_full" ]]; then
+    _COMPLETE_BLOCK_REASON="no [gates].full in .ralph/command-policy"
+    return 1
   fi
 
-  # Fallback path (pre-0.6.4 behavior).
-  local exit_code
-  exit_code=$(_most_recent_gate_exit "$workspace")
-  if [[ -z "$exit_code" ]]; then
-    return 0
+  if [[ ! -f "$full_cmd_file" ]]; then
+    _COMPLETE_BLOCK_REASON="full gate \"$_full\" has not run yet"
+    return 1
   fi
-  if [[ "$exit_code" != "0" ]]; then
-    _COMPLETE_BLOCK_REASON="most recent gate exited $exit_code"
+
+  local pinned_cmd actual_cmd
+  pinned_cmd=$(printf '%s' "$_full" | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//')
+  actual_cmd=$(tr -d '\n' <"$full_cmd_file")
+  actual_cmd=$(printf '%s' "$actual_cmd" | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//')
+
+  if [[ "$actual_cmd" != "$pinned_cmd" ]]; then
+    _COMPLETE_BLOCK_REASON="full gate must run \"$pinned_cmd\" but last label=full ran \"$actual_cmd\""
+    return 1
+  fi
+  local full_exit=""
+  [[ -f "$full_exit_file" ]] && full_exit=$(cat "$full_exit_file" 2>/dev/null)
+  if [[ "$full_exit" != "0" ]]; then
+    _COMPLETE_BLOCK_REASON="full gate \"$pinned_cmd\" exited ${full_exit:-?}"
     return 1
   fi
   return 0
