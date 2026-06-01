@@ -244,18 +244,43 @@ while [[ $_lock_waited -lt $_lock_wait ]]; do
     # time-based threshold. tmux-killed sessions leave their lock for the
     # next loop, and `kill -0 <dead-pid>` returns false instantly.
     echo $$ >"$_lock_dir/pid" 2>/dev/null || true
+    # 0.14.2: record the lock creation epoch so contenders can detect PID
+    # recycling. macOS recycles PIDs aggressively — a dead gate's PID can
+    # be reassigned to an unrelated process within hours, making `kill -0`
+    # return true for a process that is NOT the original holder.
+    date +%s >"$_lock_dir/epoch" 2>/dev/null || true
     break
   fi
-  # 0.12.5: PID-aware stale-lock steal. If the lock dir has a `pid` file
-  # whose process is no longer alive, the holder is dead and we can
-  # reclaim immediately. This catches the common case where a tmux
-  # `kill-session` (or other parent-killer) leaves the lock orphaned.
+  # 0.12.5 + 0.14.2: PID-aware stale-lock steal with PID-recycling
+  # detection. Three checks in order:
+  #   1. PID dead → steal immediately (original 0.12.5 logic).
+  #   2. PID alive but started AFTER the lock epoch → PID was recycled
+  #      by the OS; the original holder is dead. Steal.
+  #   3. PID alive and started before lock epoch → genuine holder. Wait.
   if [[ -f "$_lock_dir/pid" ]]; then
     _holder_pid=$(cat "$_lock_dir/pid" 2>/dev/null || echo "")
     if [[ -n "$_holder_pid" ]] && ! kill -0 "$_holder_pid" 2>/dev/null; then
       _log_activity "🧪 GATE LOCK STOLEN label=$label — holder pid=$_holder_pid is dead"
       rm -rf "$_lock_dir"
       continue
+    fi
+    # PID is alive — check for recycling via lock epoch vs process start.
+    if [[ -n "$_holder_pid" ]] && [[ -f "$_lock_dir/epoch" ]]; then
+      _lock_epoch=$(cat "$_lock_dir/epoch" 2>/dev/null || echo "0")
+      # ps -p <pid> -o lstart= gives a human-readable start time;
+      # convert to epoch. macOS date -jf handles the ps output format.
+      _proc_lstart=$(ps -p "$_holder_pid" -o lstart= 2>/dev/null || echo "")
+      if [[ -n "$_proc_lstart" ]]; then
+        # macOS: date -jf; Linux: date -d
+        _proc_epoch=$(date -jf "%a %b %d %T %Y" "$_proc_lstart" +%s 2>/dev/null ||
+          date -d "$_proc_lstart" +%s 2>/dev/null ||
+          echo "0")
+        if [[ "$_proc_epoch" -gt "$_lock_epoch" ]]; then
+          _log_activity "🧪 GATE LOCK STOLEN label=$label — pid=$_holder_pid is alive but started after lock (lock_epoch=${_lock_epoch}, proc_epoch=${_proc_epoch}); PID was recycled"
+          rm -rf "$_lock_dir"
+          continue
+        fi
+      fi
     fi
   fi
   # Fallback time-based heuristic: if the lock dir is older than the

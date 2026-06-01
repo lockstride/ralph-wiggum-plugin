@@ -626,7 +626,13 @@ _guard_bash() {
   # NOT make a subsequent 'full' redundant — the cache must be tracked
   # per label, not globally. (Without this, [risky] tasks that need 'full'
   # after 'basic' would get incorrectly blocked.)
-  if echo "$cmd" | grep -qE 'gate-run\.sh'; then
+  #
+  # 0.14.2: Only match actual gate invocations — commands where gate-run.sh
+  # is being EXECUTED (via bash/sh), not merely referenced (ls, cat, grep,
+  # test -f, wc -l, etc.). The previous bare `grep -qE 'gate-run\.sh'`
+  # caught diagnostic reads, assigned them label "unknown", and blocked
+  # them via the per-label cache — a false positive that wasted agent turns.
+  if echo "$cmd" | grep -qE '(^|[;&|] *)(bash|sh) .*/gate-run\.sh\b'; then
     local label
     label=$(echo "$cmd" | grep -oE 'gate-run\.sh\s+(basic|full|final|unit|integration|e2e|lint|format)' | awk '{print $2}') || label="unknown"
 

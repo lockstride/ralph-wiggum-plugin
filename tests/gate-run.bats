@@ -246,6 +246,41 @@ teardown() {
   rm -rf "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
 }
 
+# -----------------------------------------------------------------------------
+# 0.14.2: PID-recycling detection via lock epoch
+# -----------------------------------------------------------------------------
+
+@test "lock with live but recycled PID is stolen via epoch check (0.14.2)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  mkdir "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
+  # Use our own PID (guaranteed alive) but set the lock epoch to well
+  # BEFORE our process started — simulating a recycled PID.
+  echo "$$" >"$MOCK_WORKSPACE/.ralph/gates/.basic.lock/pid"
+  echo "1000000000" >"$MOCK_WORKSPACE/.ralph/gates/.basic.lock/epoch"
+
+  RALPH_GATE_LOCK_WAIT=5 RALPH_GATE_STALE_LOCK_SEC=99999 \
+    run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "ran after recycle steal"
+  [ "$status" -eq 0 ]
+  grep -q "ran after recycle steal" "$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
+  grep -q "PID was recycled" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "lock with live genuine PID and valid epoch is NOT stolen (0.14.2)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  mkdir "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
+  # Use our own PID with epoch set to NOW — the process started before
+  # or at the lock epoch, so it's the genuine holder.
+  echo "$$" >"$MOCK_WORKSPACE/.ralph/gates/.basic.lock/pid"
+  echo "$(date +%s)" >"$MOCK_WORKSPACE/.ralph/gates/.basic.lock/epoch"
+
+  RALPH_GATE_LOCK_WAIT=2 RALPH_GATE_STALE_LOCK_SEC=99999 \
+    run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "should be blocked"
+  [ "$status" -eq 75 ]
+  ! grep -q "PID was recycled" "$MOCK_WORKSPACE/.ralph/activity.log" 2>/dev/null
+
+  rm -rf "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
+}
+
 @test "lock without pid file falls back to time-based steal (0.12.5)" {
   mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
   mkdir "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"

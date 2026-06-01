@@ -205,6 +205,66 @@ _run_guard() {
   echo "$output" | jq -e ".hookSpecificOutput.permissionDecisionReason | test(\"Gate 'final'\")"
 }
 
+# --- Diagnostic reads referencing gate-run.sh (0.14.2) ---
+
+@test "allows ls of gate-run.sh path without triggering gate cache (0.14.2)" {
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.unknown"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "ls $SCRIPTS_DIR/gate-run.sh"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "allows test -f of gate-run.sh path without triggering gate cache (0.14.2)" {
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.unknown"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "test -f $SCRIPTS_DIR/gate-run.sh && echo EXISTS"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "allows grep of gate-run.sh content without triggering gate cache (0.14.2)" {
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.unknown"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "grep -n 'cache' $SCRIPTS_DIR/gate-run.sh | head -40"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "allows wc -l of gate-run.sh without triggering gate cache (0.14.2)" {
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.unknown"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "wc -l $SCRIPTS_DIR/gate-run.sh"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "allows find for gate-run.sh without triggering gate cache (0.14.2)" {
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.unknown"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "find /tmp -name 'gate-run.sh' 2>/dev/null | head"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "still blocks actual gate invocation via bash gate-run.sh (0.14.2)" {
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.basic"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
 # --- Write/Edit forbidden-path denial ---
 
 @test "blocks write to .ralph/gates/" {
