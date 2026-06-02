@@ -323,6 +323,7 @@ For mode mechanics, artifacts, and limitations, see [docs/development.md → Acc
 | `RALPH_GATE_LOCK_WAIT` | `60` | Seconds to wait for a gate lock before giving up. PID-aware steal kicks in immediately when the holder is dead. |
 | `RALPH_GATE_STALE_LOCK_SEC` | `2700` | Time-based fallback: steal locks older than this (45 min) when no PID file exists (pre-0.12.5 leftover locks). |
 | `RALPH_GATE_FAIL_STREAK_THRESHOLD` | `5` | Consecutive gate failures before TURN_END |
+| `RALPH_COMPLETE_BLOCK_THRESHOLD` | `2` | Consecutive COMPLETE-BLOCKED loops with the same reason before failing loud (unsatisfiable completion bar) |
 | `RALPH_MAX_LOOPS` | `10` | Safety cap on agent respawns |
 | `RALPH_EVAL_MAX_LOOPS` | `10` | Safety cap on eval loop iterations |
 | `RALPH_SKIP_GUARDRAILS` | — | Set to `1` to omit the guardrails preamble |

@@ -237,6 +237,13 @@ main() {
   WARN_THRESHOLD="$(agent_default_warn_threshold "$RALPH_AGENT_CLI" "$MODEL")"
   local MAX_LOOPS="${EVAL_ITER_FROM_FLAG:-${RALPH_EVAL_MAX_LOOPS:-10}}"
 
+  # Tell run_ralph_loop's completion guard (_complete_allowed) that this is
+  # the eval loop, so it gates on the `final` tier-gate (this loop's bar),
+  # not `full` (the impl loop's). Without this the eval loop is unsatisfiable:
+  # it runs only `final` and wipes .ralph/gates at start, so full-latest.*
+  # never exists and completion blocks forever.
+  export RALPH_EVAL_LOOP=1
+
   export RALPH_AGENT_CLI MODEL ROTATE_THRESHOLD WARN_THRESHOLD MAX_LOOPS
 
   if [[ -z "$GROUND_TRUTH_MODE" ]]; then

@@ -1398,10 +1398,18 @@ run_loop() {
 #
 # When every checkbox in tasks.md is [x], the main loop must NOT treat that
 # as authoritative on its own — that let agents "complete" a feature while
-# the most recent gate was still red. The `full` tier-gate is the bar:
-# completion is only honored when full-latest.cmd matches [gates].full from
-# .ralph/command-policy and full-latest.exit == 0. `final` is reserved for
-# the eval loop and never blocks impl-loop completion.
+# the most recent gate was still red. The bar is the loop's own tier-gate:
+# completion is honored only when that gate's -latest.cmd matches the pinned
+# command from [gates] and its -latest.exit == 0.
+#
+# The two loops gate on DIFFERENT tiers:
+#   - impl loop  → `full`  ([gates].full,  e.g. `pnpm all-check`)
+#   - eval loop  → `final` ([gates].final, e.g. `pnpm all-check:no-cache`)
+# ralph-evaluate.sh exports RALPH_EVAL_LOOP=1 before entering run_ralph_loop;
+# _complete_allowed reads it to pick the right tier. Keying the eval loop on
+# `full` (the pre-0.14.3 behavior) was unsatisfiable: the eval loop runs only
+# `final` and wipes .ralph/gates at start, so full-latest.* never exists and
+# completion blocked forever.
 
 # Load the three tier-gate commands from `.ralph/command-policy` `[gates]`.
 # Sets the three out-vars (passed by name) — basic, full, final. Missing
@@ -1499,13 +1507,15 @@ _validate_gates_section() {
 }
 
 # Return 0 if the main loop is allowed to honour a tasks-complete /
-# COMPLETE signal, non-zero if it should be blocked. Implementation-loop
-# completion requires the `full` tier-gate to have run, its recorded
-# command to match `[gates].full` from .ralph/command-policy verbatim,
-# and its exit code to be 0. Anything less blocks ALL_TASKS_DONE.
+# COMPLETE signal, non-zero if it should be blocked. Completion requires
+# the loop's tier-gate to have run, its recorded command to match the
+# pinned `[gates]` entry from .ralph/command-policy verbatim, and its exit
+# code to be 0. Anything less blocks ALL_TASKS_DONE.
 #
-# Note: `final` is reserved for the eval loop. The impl loop never gates
-# on `final` and never invokes it.
+# The tier depends on which loop is running: the impl loop gates on `full`,
+# the eval loop on `final`. ralph-evaluate.sh exports RALPH_EVAL_LOOP=1
+# before entering run_ralph_loop to select the latter (see the COMPLETE
+# GUARD comment block above).
 #
 # When this function returns non-zero, $_COMPLETE_BLOCK_REASON is set to
 # a short, human-readable phrase the caller logs verbatim — single
@@ -1516,37 +1526,88 @@ _complete_allowed() {
   local workspace="$1"
   _COMPLETE_BLOCK_REASON=""
 
-  local full_cmd_file="$workspace/.ralph/gates/full-latest.cmd"
-  local full_exit_file="$workspace/.ralph/gates/full-latest.exit"
-
   local _basic _full _final
   _load_gates_from_policy "$workspace" _basic _full _final
-  if [[ -z "$_full" ]]; then
-    _COMPLETE_BLOCK_REASON="no [gates].full in .ralph/command-policy"
+
+  # Pick the tier this loop completes on. The eval loop runs `final` and
+  # wipes .ralph/gates at start, so it must NOT be judged against `full`.
+  local label pinned_gate
+  if [[ "${RALPH_EVAL_LOOP:-}" == "1" ]]; then
+    label="final"
+    pinned_gate="$_final"
+  else
+    label="full"
+    pinned_gate="$_full"
+  fi
+
+  local cmd_file="$workspace/.ralph/gates/${label}-latest.cmd"
+  local exit_file="$workspace/.ralph/gates/${label}-latest.exit"
+
+  if [[ -z "$pinned_gate" ]]; then
+    _COMPLETE_BLOCK_REASON="no [gates].${label} in .ralph/command-policy"
     return 1
   fi
 
-  if [[ ! -f "$full_cmd_file" ]]; then
-    _COMPLETE_BLOCK_REASON="full gate \"$_full\" has not run yet"
+  if [[ ! -f "$cmd_file" ]]; then
+    _COMPLETE_BLOCK_REASON="${label} gate \"$pinned_gate\" has not run yet"
     return 1
   fi
 
   local pinned_cmd actual_cmd
-  pinned_cmd=$(printf '%s' "$_full" | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//')
-  actual_cmd=$(tr -d '\n' <"$full_cmd_file")
+  pinned_cmd=$(printf '%s' "$pinned_gate" | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//')
+  actual_cmd=$(tr -d '\n' <"$cmd_file")
   actual_cmd=$(printf '%s' "$actual_cmd" | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//')
 
   if [[ "$actual_cmd" != "$pinned_cmd" ]]; then
-    _COMPLETE_BLOCK_REASON="full gate must run \"$pinned_cmd\" but last label=full ran \"$actual_cmd\""
+    _COMPLETE_BLOCK_REASON="${label} gate must run \"$pinned_cmd\" but last label=${label} ran \"$actual_cmd\""
     return 1
   fi
-  local full_exit=""
-  [[ -f "$full_exit_file" ]] && full_exit=$(cat "$full_exit_file" 2>/dev/null)
-  if [[ "$full_exit" != "0" ]]; then
-    _COMPLETE_BLOCK_REASON="full gate \"$pinned_cmd\" exited ${full_exit:-?}"
+  local gate_exit=""
+  [[ -f "$exit_file" ]] && gate_exit=$(cat "$exit_file" 2>/dev/null)
+  if [[ "$gate_exit" != "0" ]]; then
+    _COMPLETE_BLOCK_REASON="${label} gate \"$pinned_cmd\" exited ${gate_exit:-?}"
     return 1
   fi
   return 0
+}
+
+# Track consecutive COMPLETE-BLOCKED loops that share the SAME block reason.
+# Returns 0 (escalate) once the run has been blocked for the same reason
+# RALPH_COMPLETE_BLOCK_THRESHOLD times in a row, 1 (keep looping) otherwise.
+# A reason that keeps repeating means the bar is unsatisfiable in this phase
+# (e.g. a [gates] misconfiguration) rather than something the agent can fix
+# by looping again — so failing loud beats spinning to MAX_LOOPS. State lives
+# in the _COMPLETE_BLOCK_COUNT / _LAST_COMPLETE_BLOCK_REASON globals, reset at
+# the loop-end chokepoint (which block paths `continue` past, so any non-block
+# loop clears the streak). Default threshold 2: the first block can be benign
+# (agent signaled COMPLETE before the gate ran); a second identical one is the
+# tell that no amount of looping will clear it.
+_COMPLETE_BLOCK_COUNT=0
+_LAST_COMPLETE_BLOCK_REASON=""
+
+_complete_block_escalates() {
+  local reason="$1"
+  if [[ "$reason" == "$_LAST_COMPLETE_BLOCK_REASON" ]]; then
+    _COMPLETE_BLOCK_COUNT=$((_COMPLETE_BLOCK_COUNT + 1))
+  else
+    _COMPLETE_BLOCK_COUNT=1
+    _LAST_COMPLETE_BLOCK_REASON="$reason"
+  fi
+  [[ $_COMPLETE_BLOCK_COUNT -ge ${RALPH_COMPLETE_BLOCK_THRESHOLD:-2} ]]
+}
+
+# Log + post-mortem for an unsatisfiable completion bar, then the caller
+# returns 1 to stop the loop. Kept separate so both block sites share one
+# message. $_COMPLETE_BLOCK_REASON must still hold the (repeated) reason.
+_fail_unsatisfiable_completion() {
+  local workspace="$1" task_suffix="${2:-}"
+  log_activity "$workspace" "RALPH STOP — 🚨 UNSATISFIABLE COMPLETION BAR: blocked ${_COMPLETE_BLOCK_COUNT}× in a row with the same reason ($_COMPLETE_BLOCK_REASON). The bar cannot be met in this phase — likely a .ralph/command-policy [gates] misconfiguration, not agent error.$task_suffix"
+  log_progress "$workspace" "**Ralph stopped** — 🚨 Unsatisfiable completion bar ($_COMPLETE_BLOCK_REASON)"
+  echo "🚨 Completion blocked ${_COMPLETE_BLOCK_COUNT}× in a row with the same reason:"
+  echo "   $_COMPLETE_BLOCK_REASON"
+  echo "   This bar cannot be satisfied in the current phase. Check .ralph/command-policy"
+  echo "   [gates] and the tier-gate this loop runs (impl → full, eval → final)."
+  _write_postmortem "$workspace" "unsatisfiable-completion"
 }
 
 # =============================================================================
@@ -1590,7 +1651,12 @@ run_ralph_loop() {
   local session_id=""
   local stall_count=0         # DEFER/rate-limit consecutive count (threshold 10)
   local zero_progress_count=0 # natural-end with zero task delta (threshold 3)
-  local natural_end_count=0   # 0.6.3: any natural-end (with or without progress) — measures "agent bailed politely instead of staying in flow"
+  # 0.14.3: reset the consecutive-identical-COMPLETE-BLOCKED tracker (globals
+  # so the _complete_block_escalates helper can update them). See the helper
+  # and the loop-end chokepoint reset below.
+  _COMPLETE_BLOCK_COUNT=0
+  _LAST_COMPLETE_BLOCK_REASON=""
+  local natural_end_count=0 # 0.6.3: any natural-end (with or without progress) — measures "agent bailed politely instead of staying in flow"
   local DEFER_COUNT=0
 
   while [[ $loop_n -le $MAX_LOOPS ]]; do
@@ -1682,6 +1748,10 @@ run_ralph_loop() {
         log_activity "$workspace" "🛑 COMPLETE BLOCKED — all tasks checked but $_COMPLETE_BLOCK_REASON. Agent must satisfy the bar (or escalate via <ralph>GUTTER</ralph>) before the loop can exit.$task_suffix"
         log_progress "$workspace" "**Loop $loop_label ended** — 🛑 COMPLETE BLOCKED ($_COMPLETE_BLOCK_REASON)"
         echo "🛑 Checkboxes all [x] but $_COMPLETE_BLOCK_REASON — not honouring COMPLETE. Continuing..."
+        if _complete_block_escalates "$_COMPLETE_BLOCK_REASON"; then
+          _fail_unsatisfiable_completion "$workspace" "$task_suffix"
+          return 1
+        fi
         # Reset stall/zero-progress counters — a red-gate block is not an
         # API hiccup, and work may have progressed this loop.
         stall_count=0
@@ -1727,6 +1797,10 @@ run_ralph_loop() {
             log_activity "$workspace" "🛑 COMPLETE BLOCKED — agent signaled COMPLETE but $_COMPLETE_BLOCK_REASON.$task_suffix"
             log_progress "$workspace" "**Loop $loop_label ended** — 🛑 COMPLETE BLOCKED (agent signaled; $_COMPLETE_BLOCK_REASON)"
             echo "🛑 Agent signaled COMPLETE but $_COMPLETE_BLOCK_REASON — not honouring. Continuing..."
+            if _complete_block_escalates "$_COMPLETE_BLOCK_REASON"; then
+              _fail_unsatisfiable_completion "$workspace" "$task_suffix"
+              return 1
+            fi
             stall_count=0
             DEFER_COUNT=0
             loop_n=$((loop_n + 1))
@@ -1889,6 +1963,12 @@ run_ralph_loop() {
     if [[ "$signal" != "DEFER" ]]; then
       _auto_enrich_handoff "$workspace" 2>/dev/null || true
     fi
+
+    # 0.14.3: this iteration did NOT end in a COMPLETE BLOCKED (those paths
+    # `continue` above and never reach here), so the unsatisfiable-bar streak
+    # is broken — clear it so an unrelated future block starts a fresh count.
+    _COMPLETE_BLOCK_COUNT=0
+    _LAST_COMPLETE_BLOCK_REASON=""
 
     sleep 2
   done

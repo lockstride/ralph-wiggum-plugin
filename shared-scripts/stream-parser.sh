@@ -271,6 +271,33 @@ wrap_line() {
   done < <(printf '%s\n' "$rest" | fold -s -w "$cont_avail")
 }
 
+# 0.14.3: resolve the live task file the same way ralph-common.sh's
+# _resolve_task_file does (RALPH_TASK_FILE env > .ralph/task-file-path
+# breadcrumb). Prints the path on stdout, or nothing if none resolves to a
+# real file. Used by the SESSION START banner so task counts reflect the
+# CURRENT checkbox state, not a snapshot frozen at process launch — in
+# run-to-completion mode the bash loop launches the agent once, so the
+# static .ralph/task-summary never refreshes across internal rotations.
+_sp_resolve_task_file() {
+  if [[ -n "${RALPH_TASK_FILE:-}" ]] && [[ -f "${RALPH_TASK_FILE}" ]]; then
+    printf '%s' "$RALPH_TASK_FILE"
+    return
+  fi
+  local breadcrumb="$RALPH_DIR/task-file-path"
+  if [[ -f "$breadcrumb" ]]; then
+    local bf
+    bf=$(cat "$breadcrumb" 2>/dev/null) || bf=""
+    if [[ -n "$bf" ]] && [[ -f "$bf" ]]; then
+      printf '%s' "$bf"
+      return 0
+    fi
+  fi
+  # Nothing resolved — print nothing, succeed (caller falls back to the
+  # static task-summary). Explicit success so `set -e` doesn't abort on the
+  # `task_file=$(...)` assignment.
+  return 0
+}
+
 is_retryable_api_error() {
   local error_msg="$1"
   local lower_msg
@@ -414,22 +441,44 @@ process_line() {
       model=$(echo "$line" | jq -r '.model // "unknown"' 2>/dev/null) || model="unknown"
       log_activity "SESSION START: model=$model"
 
-      local summary_file="$RALPH_DIR/task-summary"
-      if [[ -f "$summary_file" ]]; then
-        local ts_done ts_total ts_remaining
-        ts_done=$(grep '^done=' "$summary_file" | head -1 | cut -d= -f2) || ts_done=0
-        ts_total=$(grep '^total=' "$summary_file" | head -1 | cut -d= -f2) || ts_total=0
-        ts_remaining=$(grep '^remaining=' "$summary_file" | head -1 | cut -d= -f2) || ts_remaining=0
+      # Prefer LIVE counts from the resolved task file so the banner tracks
+      # progress on every rotation; fall back to the static task-summary
+      # snapshot only when no task file resolves.
+      local ts_done ts_total ts_remaining task_file
+      task_file=$(_sp_resolve_task_file) || task_file=""
+      if [[ -n "$task_file" ]]; then
+        ts_total=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[(x| )\]' "$task_file" 2>/dev/null) || ts_total=0
+        ts_done=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[x\]' "$task_file" 2>/dev/null) || ts_done=0
+        ts_remaining=$((ts_total - ts_done))
         if [[ "$ts_total" -gt 0 ]]; then
           local timestamp
           timestamp=$(date '+%H:%M:%S')
           echo "[$timestamp] 📋 Tasks: $ts_done/$ts_total complete ($ts_remaining remaining)" >>"$RALPH_DIR/activity.log"
           local task_line
           while IFS= read -r task_line; do
+            [[ -z "$task_line" ]] && continue
             local cleaned
             cleaned=$(echo "$task_line" | sed 's/^[[:space:]]*/  /' | sed 's/\[ \]/☐/')
             wrap_line "[$timestamp]    " "$cleaned" >>"$RALPH_DIR/activity.log"
-          done < <(sed -n '/^---$/,$p' "$summary_file" | tail -n +2)
+          done < <(grep -E '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | head -10)
+        fi
+      else
+        local summary_file="$RALPH_DIR/task-summary"
+        if [[ -f "$summary_file" ]]; then
+          ts_done=$(grep '^done=' "$summary_file" | head -1 | cut -d= -f2) || ts_done=0
+          ts_total=$(grep '^total=' "$summary_file" | head -1 | cut -d= -f2) || ts_total=0
+          ts_remaining=$(grep '^remaining=' "$summary_file" | head -1 | cut -d= -f2) || ts_remaining=0
+          if [[ "$ts_total" -gt 0 ]]; then
+            local timestamp
+            timestamp=$(date '+%H:%M:%S')
+            echo "[$timestamp] 📋 Tasks: $ts_done/$ts_total complete ($ts_remaining remaining)" >>"$RALPH_DIR/activity.log"
+            local task_line
+            while IFS= read -r task_line; do
+              local cleaned
+              cleaned=$(echo "$task_line" | sed 's/^[[:space:]]*/  /' | sed 's/\[ \]/☐/')
+              wrap_line "[$timestamp]    " "$cleaned" >>"$RALPH_DIR/activity.log"
+            done < <(sed -n '/^---$/,$p' "$summary_file" | tail -n +2)
+          fi
         fi
       fi
       ;;

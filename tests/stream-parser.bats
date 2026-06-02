@@ -558,3 +558,57 @@ HOFF
   done
 }
 
+
+# ---------------------------------------------------------------------------
+# 0.14.3: SESSION START task banner reads LIVE counts from the resolved task
+# file (RALPH_TASK_FILE env > .ralph/task-file-path breadcrumb), not the
+# static .ralph/task-summary snapshot. Regression: in run-to-completion mode
+# the bash loop launches the agent once, so task-summary froze at the
+# loop-start snapshot (0/N) for the whole run despite incremental progress.
+# ---------------------------------------------------------------------------
+
+@test "SESSION START banner reflects live counts and updates across rotations (0.14.3)" {
+  local taskfile="$MOCK_WORKSPACE/tasks.md"
+  printf '%s\n' '# Tasks' '- [x] T001 done thing' '- [ ] T002 pending' '- [ ] T003 pending too' > "$taskfile"
+  echo "$taskfile" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+
+  run_parser '{"kind":"system","model":"claude-opus-4-8"}'
+  grep -q "📋 Tasks: 1/3 complete (2 remaining)" "$MOCK_WORKSPACE/.ralph/activity.log" \
+    || { echo "first banner wrong"; cat "$MOCK_WORKSPACE/.ralph/activity.log"; return 1; }
+
+  # Progress happens, then the agent rotates context (new system event).
+  printf '%s\n' '# Tasks' '- [x] T001 done thing' '- [x] T002 pending' '- [ ] T003 pending too' > "$taskfile"
+  run_parser '{"kind":"system","model":"claude-opus-4-8"}'
+  grep -q "📋 Tasks: 2/3 complete (1 remaining)" "$MOCK_WORKSPACE/.ralph/activity.log" \
+    || { echo "banner did not refresh across rotation"; cat "$MOCK_WORKSPACE/.ralph/activity.log"; return 1; }
+}
+
+@test "SESSION START banner lists remaining tasks as ☐ from the live file (0.14.3)" {
+  local taskfile="$MOCK_WORKSPACE/tasks.md"
+  printf '%s\n' '- [x] T001 done' '- [ ] T002 build the widget' > "$taskfile"
+  echo "$taskfile" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+  run_parser '{"kind":"system","model":"claude-opus-4-8"}'
+  grep -q "☐ T002 build the widget" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "SESSION START banner prefers RALPH_TASK_FILE env over breadcrumb (0.14.3)" {
+  local envfile="$MOCK_WORKSPACE/from-env.md"
+  printf '%s\n' '- [ ] E1' '- [ ] E2' '- [x] E3' > "$envfile"
+  # A stale breadcrumb that should be ignored when the env var is set.
+  echo "$MOCK_WORKSPACE/nonexistent.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+  RALPH_TASK_FILE="$envfile" run_parser '{"kind":"system","model":"claude-opus-4-8"}'
+  grep -q "📋 Tasks: 1/3 complete (2 remaining)" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "SESSION START banner falls back to task-summary when no task file resolves (0.14.3)" {
+  # No RALPH_TASK_FILE, no breadcrumb → use the static snapshot for back-compat.
+  cat > "$MOCK_WORKSPACE/.ralph/task-summary" <<'EOF'
+done=4
+total=7
+remaining=3
+---
+- [ ] T005 leftover
+EOF
+  run_parser '{"kind":"system","model":"claude-opus-4-8"}'
+  grep -q "📋 Tasks: 4/7 complete (3 remaining)" "$MOCK_WORKSPACE/.ralph/activity.log"
+}

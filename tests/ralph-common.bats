@@ -9,6 +9,10 @@ load test_helper
 setup() {
   create_mock_workspace
 
+  # Default to impl-loop context; eval-loop tests opt in explicitly. Keeps
+  # the completion guard keyed on `full` unless a test sets RALPH_EVAL_LOOP.
+  unset RALPH_EVAL_LOOP
+
   # Source ralph-common.sh (requires agent-adapter.sh first)
   source "$SCRIPTS_DIR/agent-adapter.sh"
   source "$SCRIPTS_DIR/ralph-common.sh"
@@ -371,8 +375,9 @@ SUMMARY
 
 # ---------------------------------------------------------------------------
 # Completion bar — _complete_allowed refuses ALL_TASKS_DONE unless the
-# `full` tier gate matches [gates].full and exits 0. `final` is reserved
-# for the eval loop and plays no role here.
+# loop's tier gate matches its [gates] entry and exits 0. The impl loop
+# (default) gates on `full`; the eval loop (RALPH_EVAL_LOOP=1) gates on
+# `final`. See the eval-aware block further down.
 # ---------------------------------------------------------------------------
 
 @test "_complete_allowed: green full gate matching [gates].full → allow" {
@@ -433,6 +438,90 @@ EOF
   printf 'cargo test --release' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
   printf '0'                    >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
   _complete_allowed "$MOCK_WORKSPACE"
+}
+
+# ---------------------------------------------------------------------------
+# 0.14.3: eval-aware completion bar. The eval loop (RALPH_EVAL_LOOP=1) gates
+# on `final`, not `full`. Regression guard: pre-0.14.3 the eval loop checked
+# `full`, which it never runs and wipes at start → blocked forever (livelock).
+# ---------------------------------------------------------------------------
+
+@test "_complete_allowed: eval loop honors COMPLETE on green final gate with NO full gate (0.14.3 regression)" {
+  # Exactly loop 150610's state: eval loop ran `final` (green), full-latest.*
+  # absent (eval wipes .ralph/gates). Must be ALLOWED, not blocked.
+  export RALPH_EVAL_LOOP=1
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'mock verify:final' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
+  printf '0'                 >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  # No full-latest.* on disk — the pre-fix bug blocked here.
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: eval loop blocks on red final gate" {
+  export RALPH_EVAL_LOOP=1
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'mock verify:final' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
+  printf '1'                 >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [[ "$_COMPLETE_BLOCK_REASON" == *"final gate"* ]]
+}
+
+@test "_complete_allowed: eval loop blocks when final gate has not run yet" {
+  export RALPH_EVAL_LOOP=1
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [[ "$_COMPLETE_BLOCK_REASON" == *"final gate"* ]]
+}
+
+@test "_complete_allowed: eval loop blocks on relabeled cheap command under final" {
+  # Spoof: ran the cheaper basic command but recorded it under final.
+  export RALPH_EVAL_LOOP=1
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'mock basic-check' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
+  printf '0'                >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: impl loop still blocks when only a final gate exists" {
+  # Inverse of the eval case: in impl context a green final gate must NOT
+  # satisfy the bar — impl completion is keyed on `full`.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'mock verify:final' >"$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
+  printf '0'                 >"$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [[ "$_COMPLETE_BLOCK_REASON" == *"full gate"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# 0.14.3: fail-loud on an unsatisfiable completion bar. _complete_block_escalates
+# returns 0 (escalate) once the SAME block reason repeats to the threshold,
+# 1 (keep looping) otherwise — so the loop fails loud instead of spinning to
+# MAX_LOOPS, while a one-off block (or a changing reason) keeps looping.
+# ---------------------------------------------------------------------------
+
+@test "_complete_block_escalates: first identical block does not escalate, second does" {
+  _COMPLETE_BLOCK_COUNT=0
+  _LAST_COMPLETE_BLOCK_REASON=""
+  run _complete_block_escalates "full gate has not run yet"
+  [ "$status" -ne 0 ]   # 1st: keep looping
+  # _complete_block_escalates mutates globals; `run` is a subshell, so call
+  # directly to accumulate state for the threshold check.
+  _complete_block_escalates "full gate has not run yet" || true   # count=1
+  _complete_block_escalates "full gate has not run yet"           # count=2 → escalate (exit 0)
+}
+
+@test "_complete_block_escalates: a changing reason resets the streak" {
+  _COMPLETE_BLOCK_COUNT=0
+  _LAST_COMPLETE_BLOCK_REASON=""
+  _complete_block_escalates "reason A" || true   # count=1
+  ! _complete_block_escalates "reason B"         # different → count resets to 1, no escalate
+  [ "$_COMPLETE_BLOCK_COUNT" -eq 1 ]
+}
+
+@test "_complete_block_escalates: threshold is configurable via RALPH_COMPLETE_BLOCK_THRESHOLD" {
+  _COMPLETE_BLOCK_COUNT=0
+  _LAST_COMPLETE_BLOCK_REASON=""
+  RALPH_COMPLETE_BLOCK_THRESHOLD=1 _complete_block_escalates "boom"  # escalate on first
 }
 
 # ---------------------------------------------------------------------------
