@@ -75,6 +75,19 @@ TASKS
   ! echo "$output" | grep -qE '^  tasks: '
 }
 
+@test "ralph-status: does not error when task file has no checkboxes (0.14.4)" {
+  # Regression: grep -c exits 1 on no matches, and `|| echo 0` produced
+  # "0\n0" which caused a syntax error in the arithmetic expression.
+  cat > "$MOCK_WORKSPACE/tasks.md" <<'TASKS'
+# Tasks
+TASKS
+  echo "$MOCK_WORKSPACE/tasks.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+
+  run bash "$STATUS_SCRIPT" "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q 'syntax error'
+}
+
 @test "ralph-status: shows PREVIOUS/CURRENT/NEXT sections with task ID + body (0.5.7)" {
   # Mid-stream task file: 2 done, 2 to go. Expect all three sections.
   cat > "$MOCK_WORKSPACE/tasks.md" <<'TASKS'
