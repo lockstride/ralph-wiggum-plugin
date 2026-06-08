@@ -195,6 +195,42 @@ tool_result_json() {
   fi
 }
 
+@test "successful commit with failing trailing command is not logged as COMMIT FAILED (0.14.5)" {
+  # The agent commonly chains a stop-check onto a commit:
+  #   git commit -m '…' && git log --oneline -1; ls .ralph/stop-requested
+  # The trailing `ls` exits 1 when the breadcrumbs are absent, so the
+  # COMPOUND command's exit is 1 even though the commit succeeded. The exit
+  # code must NOT be attributed to the commit.
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "git commit -m 'feat: thing' && git log --oneline -1; ls .ralph/stop-requested")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  # No false COMMIT FAILED in the activity log…
+  if grep -q "COMMIT FAILED" "$MOCK_WORKSPACE/.ralph/activity.log" 2>/dev/null; then
+    fail "trailing-command exit was mis-attributed as COMMIT FAILED"
+  fi
+  # …the commit is still recorded…
+  grep -q 'COMMIT "feat: thing"' "$MOCK_WORKSPACE/.ralph/activity.log"
+  # …and no bogus gitignored hint fires from the trailing `ls .ralph/…`.
+  if grep -qi "gitignored" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+    fail "bogus gitignored hint emitted for a trailing ls .ralph/ path"
+  fi
+}
+
+@test "terminal git commit failure is still logged as COMMIT FAILED (0.14.5 regression guard)" {
+  # When `git commit` IS the last command in the chain, a non-zero exit is
+  # genuinely the commit's and must still surface as COMMIT FAILED.
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "git add src/foo.ts && git commit -m 'feat: thing'")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  grep -q "COMMIT FAILED" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
 @test "file thrash at threshold emits GUTTER (0.10.0)" {
   local events=""
   for i in $(seq 1 5); do

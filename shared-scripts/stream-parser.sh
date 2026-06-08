@@ -357,7 +357,17 @@ track_shell_failure() {
     # and the commit fails with a generic exit 1. Log a hint so the next
     # attempt isn't a blind retry.
     if [[ "$cmd" == *"git commit"* ]]; then
-      if [[ "$cmd" == *".ralph/"* ]] || [[ "$cmd" == *"acceptance-report"* ]]; then
+      # 0.14.5: only blame gitignored staging when a .ralph/ (or
+      # acceptance-report) path is actually handed to `git add` — not merely
+      # mentioned elsewhere in the compound command. A trailing
+      # `ls .ralph/stop-requested` (a common stop-check idiom) would otherwise
+      # trigger this hint on a commit that never staged anything under .ralph/.
+      local _add_args=""
+      if [[ "$cmd" == *"git add"* ]]; then
+        _add_args="${cmd#*git add}"
+        _add_args="${_add_args%%[;&|]*}"
+      fi
+      if [[ "$_add_args" == *".ralph/"* ]] || [[ "$_add_args" == *"acceptance-report"* ]]; then
         log_error "💡 HINT: \`.ralph/\` is gitignored — \`git add\` on it leaves the index empty and commit fails with exit 1. Do not stage or commit anything under .ralph/."
       elif [[ $exit_code -eq 1 ]] && [[ "$cmd" == *"git add"* ]]; then
         log_error "💡 HINT: git commit exit 1 after \`git add\` often means a staged path is gitignored (commit aborts with empty index). Run \`git status --short\` to verify staging."
@@ -406,6 +416,29 @@ reset_failure_counters_on_task_boundary() {
   # clean commit would still poison the next 5-min window.
   : >"$WRITES_FILE"
   echo "RECOVER" 2>/dev/null || true
+}
+
+# 0.14.5: Return 0 if `git commit` is the TERMINAL command of a (possibly
+# compound) command string — i.e. the command's overall exit code is the
+# commit's own. Return 1 when chained commands follow the commit
+# (e.g. `git commit … && git log`, or `git commit … ; ls .ralph/stop-requested`),
+# because then the overall exit code belongs to that trailing command, not the
+# commit. This lets the caller avoid mis-attributing a trailing command's
+# non-zero exit to the commit (the classic false "COMMIT FAILED" from a
+# stop-check `ls` that exits 1 when the breadcrumbs are absent).
+#
+# Heuristic: everything after the last `commit` token is the "tail"; if it
+# contains a shell separator (; && || |) followed by a non-space character, a
+# trailing command exists. A `-m` message containing a separator can only
+# soften a failing terminal commit to "status unknown" (the success path never
+# consults this), so we accept that rare, harmless miss rather than parse shell
+# quoting here.
+_commit_is_terminal() {
+  local tail="${1##*commit}"
+  if [[ "$tail" =~ (\;|\&\&|\|\||\|)[[:space:]]*[^[:space:]] ]]; then
+    return 1
+  fi
+  return 0
 }
 
 track_file_write() {
@@ -546,22 +579,31 @@ process_line() {
           # 0.10.4: allow global flags between `git` and the subcommand
           # (e.g. `git -C /path commit`). Each flag is -<letter> <value>.
           if [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git([[:space:]]+-[[:alpha:]][[:space:]]+[^[:space:]]+)*[[:space:]]+commit ]]; then
+            local commit_msg=""
+            if [[ "$cmd" =~ -m[[:space:]]+[\"\']([^\"\']+)[\"\'] ]]; then
+              commit_msg="${BASH_REMATCH[1]}"
+            elif [[ "$cmd" =~ -m[[:space:]]+([^[:space:]]+) ]]; then
+              commit_msg="${BASH_REMATCH[1]}"
+            fi
+            local commit_label="COMMIT (via $cmd)"
+            [[ -n "$commit_msg" ]] && commit_label="COMMIT \"$commit_msg\""
             if [[ $exit_code -eq 0 ]]; then
-              local commit_msg=""
-              if [[ "$cmd" =~ -m[[:space:]]+[\"\']([^\"\']+)[\"\'] ]]; then
-                commit_msg="${BASH_REMATCH[1]}"
-              elif [[ "$cmd" =~ -m[[:space:]]+([^[:space:]]+) ]]; then
-                commit_msg="${BASH_REMATCH[1]}"
-              fi
-              if [[ -n "$commit_msg" ]]; then
-                log_activity "COMMIT \"$commit_msg\""
-              else
-                log_activity "COMMIT (via $cmd)"
-              fi
+              # Whole command exited 0 → the commit ran and succeeded.
+              log_activity "$commit_label"
               reset_failure_counters_on_task_boundary
-            else
+            elif _commit_is_terminal "$cmd"; then
+              # 0.14.5: `git commit` is the last command in the chain, so the
+              # non-zero exit code is the commit's own — a genuine failure.
               log_activity "COMMIT FAILED $cmd → exit $exit_code"
               track_shell_failure "$cmd" "$exit_code"
+            else
+              # 0.14.5: trailing commands follow the commit in the chain
+              # (e.g. `git commit … ; ls .ralph/stop-requested`). The overall
+              # exit code is the trailing command's, NOT the commit's, so we
+              # cannot call this a commit failure — record it as unknown rather
+              # than fire a false COMMIT FAILED (which would also bump the
+              # shell-failure counter toward GUTTER and emit a bogus hint).
+              log_activity "$commit_label (compound exit=$exit_code; commit status unknown — trailing command in chain)"
             fi
           elif [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git([[:space:]]+-[[:alpha:]][[:space:]]+[^[:space:]]+)*[[:space:]]+push ]]; then
             if [[ $exit_code -eq 0 ]]; then
