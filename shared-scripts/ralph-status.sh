@@ -235,8 +235,14 @@ if [[ "$_eval_mode" == "true" ]]; then
 elif [[ -f "$task_file_path" ]]; then
   _task_file=$(cat "$task_file_path")
   if [[ -f "$_task_file" ]]; then
-    _total=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[(x| )\]' "$_task_file" 2>/dev/null; true)
-    _done=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[x\]' "$_task_file" 2>/dev/null; true)
+    _total=$(
+      grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[(x| )\]' "$_task_file" 2>/dev/null
+      true
+    )
+    _done=$(
+      grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[x\]' "$_task_file" 2>/dev/null
+      true
+    )
     if [[ "$_total" -gt 0 ]]; then
       _remaining=$((_total - _done))
       _pct=$((_remaining * 100 / _total))
