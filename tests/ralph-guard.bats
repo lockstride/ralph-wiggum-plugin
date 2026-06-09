@@ -778,6 +778,24 @@ EOF
   ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput' 2>/dev/null
 }
 
+# 0.14.6: a multi-line `git commit -m "<body>"` whose body line starts with a
+# gated command must NOT be mis-split into a fake gate segment. The chain
+# splitter must key on shell separators only, not on literal newlines inside
+# a quoted argument. Regression for the spurious COMPLETE BLOCKED where
+# gates/<label>-latest.cmd got polluted with a commit-message line.
+@test "compound chain: multi-line commit -m body is not mis-detected as a gate (0.14.6)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[wrap]
+pnpm all-check | final
+EOF
+  # The commit body's first line literally starts with "pnpm all-check …".
+  # Old IFS=$'\n' split would have isolated that line and wrapped it.
+  run _run_guard Bash "$(printf 'git add . && git commit -q -m "chore: done\n\npnpm all-check passes end-to-end: format, lint, coverage\n(no gaps), build, e2e."')"
+  [ "$status" -eq 0 ]
+  # Must NOT rewrite the commit into a gate-run.sh invocation.
+  ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh")' 2>/dev/null
+}
+
 # =============================================================================
 # 0.12.4: pnpm exec nx → wrap target via post-rewrite normalization
 # =============================================================================

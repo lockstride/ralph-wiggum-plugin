@@ -459,11 +459,22 @@ _apply_wrap() {
   # This closes the most common bypass — chained "warm-up" commands
   # leading to a gated target.
   if echo "$cmd" | grep -qE '(&&|\|\||;)'; then
-    local IFS=$'\n'
+    # 0.14.6: split ONLY on shell separators (&&/||/;), never on literal
+    # newlines that may live inside a quoted argument such as a multi-line
+    # `git commit -m "<body>"`. The old `IFS=$'\n'` word-split on newlines
+    # too, so a commit-body line that happened to start with a gated command
+    # (e.g. "pnpm all-check …") was mis-detected as a gate target — polluting
+    # gates/<label>-latest.cmd and triggering a spurious COMPLETE BLOCKED.
+    # Use an ASCII unit-separator (0x1f) sentinel: it cannot appear in a real
+    # command line, so splitting on it isolates exactly the shell-level
+    # segments while any embedded newline stays inside its segment.
+    local _sep
+    _sep=$(printf '\037')
+    local IFS="$_sep"
     local segment seg_canonical
     local _segments_seen=""
-    # shellcheck disable=SC2046  # intentional word splitting on newlines
-    for segment in $(printf '%s' "$cmd" | sed -E 's/[[:space:]]*(&&|\|\||;)[[:space:]]*/\n/g'); do
+    # shellcheck disable=SC2046  # intentional word splitting on the sentinel
+    for segment in $(printf '%s' "$cmd" | sed -E "s/[[:space:]]*(&&|\|\||;)[[:space:]]*/$_sep/g"); do
       segment=$(printf '%s' "$segment" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
       [[ -z "$segment" ]] && continue
       seg_canonical=$(_canonicalize "$segment")
