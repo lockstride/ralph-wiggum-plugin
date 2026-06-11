@@ -231,8 +231,77 @@ tool_result_json() {
   grep -q "COMMIT FAILED" "$MOCK_WORKSPACE/.ralph/activity.log"
 }
 
-@test "file thrash at threshold emits GUTTER (0.10.0)" {
+# ---------------------------------------------------------------------------
+# Expected-nonzero diagnostic filter (0.14.7)
+#
+# Exit 1 from a command composed purely of read-only utilities (breadcrumb
+# polls, no-match greps) is informational — it must not pollute errors.log
+# or the shell-fail GUTTER counter.
+# ---------------------------------------------------------------------------
+
+@test "read-only diagnostic exiting 1 is not logged as SHELL FAIL (0.14.7)" {
+  # The canonical stop-check idiom plus a no-match grep — repeated past the
+  # shell-fail threshold (2 under test override). Neither errors.log noise
+  # nor GUTTER may result.
   local events=""
+  for _ in 1 2 3; do
+    events+=$(tool_result_json "Shell" 50 5 1 "" "ls .ralph/stop-requested .ralph/context-warning-active 2>&1")
+    events+=$'\n'
+    events+=$(tool_result_json "Shell" 50 5 1 "" "grep -n header-title apps/foo.ts | head")
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+
+  if echo "$output" | grep -q "^GUTTER$"; then
+    fail "GUTTER fired on repeated read-only diagnostics"
+  fi
+  if grep -q "SHELL FAIL" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+    fail "read-only diagnostic exit 1 was logged as SHELL FAIL"
+  fi
+}
+
+@test "mutating command exiting 1 is still logged as SHELL FAIL (0.14.7 regression guard)" {
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm basic-check 2>&1 | tail -20")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  grep -q "SHELL FAIL: pnpm basic-check" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "read-only command with non-1 exit code is still logged as SHELL FAIL (0.14.7)" {
+  # grep exits 2 on a real error (bad pattern / unreadable file) — only
+  # exit 1 ("no match" semantics) qualifies as an expected diagnostic.
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 2 "" "grep -r pattern /nonexistent-dir")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  grep -q "SHELL FAIL: grep -r pattern" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "compound chain with a mutating segment exiting 1 is still logged (0.14.7)" {
+  # A read-only prefix must not whitelist the whole chain.
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "cd /tmp; pnpm all-check 2>&1 | tail -40")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  grep -q "SHELL FAIL: cd /tmp; pnpm all-check" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "file thrash at threshold emits GUTTER (0.10.0)" {
+  # 0.14.7: thrash escalation now requires corroborating failure evidence
+  # (at least one real shell failure since the last task boundary) — seed
+  # one below the shell-fail threshold so only file-thrash can trip GUTTER.
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm basic-check")
+  events+=$'\n'
   for i in $(seq 1 5); do
     events+=$(tool_result_json "Write" 50 5 0 "/tmp/same-file.ts")
     events+=$'\n'
@@ -241,6 +310,27 @@ tool_result_json() {
   local output
   output=$(run_parser "$events")
   echo "$output" | grep -q "^GUTTER$"
+}
+
+@test "file thrash with no failed command logs WRITE TEMPO, not GUTTER (0.14.7)" {
+  # High write tempo with everything passing is normal incremental TDD
+  # editing, not stuckness. With zero shell failures in the session, the
+  # thrash threshold must downgrade to an informational activity-log line.
+  local events=""
+  for i in $(seq 1 5); do
+    events+=$(tool_result_json "Write" 50 5 0 "/tmp/green-tempo.ts")
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+  if echo "$output" | grep -q "^GUTTER$"; then
+    fail "GUTTER fired on all-green write tempo — failure-evidence gate regressed"
+  fi
+  grep -q "WRITE TEMPO: /tmp/green-tempo.ts" "$MOCK_WORKSPACE/.ralph/activity.log"
+  if grep -q "THRASHING" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+    fail "THRASHING logged to errors.log despite zero failures"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -273,7 +363,10 @@ tool_result_json() {
 @test "Edit thrash at threshold emits GUTTER (0.11.4)" {
   # Mirrors the Write-thrash test — Edit operations on the same file
   # should accumulate toward FILE_THRASH_THRESHOLD just like Writes.
+  # 0.14.7: seeded shell failure provides the required failure evidence.
   local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm basic-check")
+  events+=$'\n'
   for i in $(seq 1 5); do
     events+=$(tool_result_json "Edit" 50 5 0 "/tmp/thrash-edit.ts")
     events+=$'\n'
@@ -311,6 +404,11 @@ tool_result_json() {
   # Successful git commit — triggers reset_failure_counters_on_task_boundary
   events+=$(tool_result_json "Shell" 50 2 0 "" "git commit -m 'fix tests'")
   events+=$'\n'
+  # 0.14.7: a post-commit shell failure keeps the failure-evidence gate
+  # open, so this test still proves the WRITE counter (not the absence of
+  # failures) is what prevents GUTTER here.
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm basic-check")
+  events+=$'\n'
   for i in $(seq 1 4); do
     events+=$(tool_result_json "Edit" 50 5 0 "/tmp/same-file.ts")
     events+=$'\n'
@@ -331,7 +429,10 @@ tool_result_json() {
   # Regression guard: removing the commit from the previous test's
   # sequence — 8 edits with no commit — must still trip GUTTER once the
   # threshold (5 under test override) is crossed.
+  # 0.14.7: seeded shell failure provides the required failure evidence.
   local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "pnpm basic-check")
+  events+=$'\n'
   for i in $(seq 1 8); do
     events+=$(tool_result_json "Edit" 50 5 0 "/tmp/no-commit-thrash.ts")
     events+=$'\n'

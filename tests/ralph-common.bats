@@ -1038,3 +1038,58 @@ TASKS
   threshold=$(agent_default_rotate_threshold claude "opus[1m]")
   [ "$threshold" = "700000" ]
 }
+
+# =============================================================================
+# _check_orphaned_gates — 0.14.7 loop-boundary orphaned-gate detection
+# =============================================================================
+
+@test "_check_orphaned_gates: dead-holder lock logs GATE ORPHANED and releases lock (0.14.7)" {
+  local lock_dir="$MOCK_WORKSPACE/.ralph/gates/.full.lock"
+  mkdir -p "$lock_dir"
+  # Spawn-and-reap a process so the PID is verifiably dead.
+  sleep 0.01 &
+  local dead_pid=$!
+  wait "$dead_pid"
+  echo "$dead_pid" > "$lock_dir/pid"
+
+  _check_orphaned_gates "$MOCK_WORKSPACE"
+
+  grep -q "GATE ORPHANED label=full" "$MOCK_WORKSPACE/.ralph/activity.log"
+  [ ! -d "$lock_dir" ]
+}
+
+@test "_check_orphaned_gates: alive-holder lock is left untouched (0.14.7)" {
+  local lock_dir="$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
+  mkdir -p "$lock_dir"
+  # Our own PID is alive for the duration of the test.
+  echo "$$" > "$lock_dir/pid"
+
+  _check_orphaned_gates "$MOCK_WORKSPACE"
+
+  if grep -q "GATE ORPHANED" "$MOCK_WORKSPACE/.ralph/activity.log" 2>/dev/null; then
+    fail "GATE ORPHANED logged for an alive holder"
+  fi
+  [ -d "$lock_dir" ]
+  rm -rf "$lock_dir"
+}
+
+@test "_check_orphaned_gates: lock without pid file is left untouched (0.14.7)" {
+  # Pre-0.12.5 locks have no pid file — ownership is unverifiable, so the
+  # loop-boundary sweep must not guess; the time-based steal in gate-run.sh
+  # handles those.
+  local lock_dir="$MOCK_WORKSPACE/.ralph/gates/.final.lock"
+  mkdir -p "$lock_dir"
+
+  _check_orphaned_gates "$MOCK_WORKSPACE"
+
+  if grep -q "GATE ORPHANED" "$MOCK_WORKSPACE/.ralph/activity.log" 2>/dev/null; then
+    fail "GATE ORPHANED logged for a pid-less lock"
+  fi
+  [ -d "$lock_dir" ]
+  rm -rf "$lock_dir"
+}
+
+@test "_check_orphaned_gates: no gates dir is a no-op (0.14.7)" {
+  rm -rf "$MOCK_WORKSPACE/.ralph/gates"
+  _check_orphaned_gates "$MOCK_WORKSPACE"
+}

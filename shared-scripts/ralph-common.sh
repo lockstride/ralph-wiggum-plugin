@@ -561,6 +561,33 @@ _capture_loop_baseline() {
   rm -f "$ralph_dir/orphan-leak.md" 2>/dev/null || true
 }
 
+# 0.14.7: Loop-boundary orphaned-gate detection. A session that ends while
+# gate-run.sh is still executing kills the gate mid-run: its EXIT trap never
+# fires, so the lock dir survives with a dead holder PID, no `GATE end` line
+# is ever logged, and the gate's compute is silently discarded — the run just
+# vanishes from the activity log. Surface that as a `GATE ORPHANED` line and
+# release the dead lock so the next loop's first gate of that label starts
+# immediately instead of waiting out the stale-lock steal path. Conservative:
+# only locks whose holder PID is verifiably dead are touched — an alive
+# holder may be a backgrounded gate legitimately finishing up.
+_check_orphaned_gates() {
+  local workspace="$1"
+  local gates_dir="$workspace/.ralph/gates"
+  [[ -d "$gates_dir" ]] || return 0
+  local lock_dir label holder_pid
+  for lock_dir in "$gates_dir"/.*.lock; do
+    [[ -d "$lock_dir" ]] || continue
+    label="${lock_dir##*/.}"
+    label="${label%.lock}"
+    holder_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+    if [[ -n "$holder_pid" ]] && ! kill -0 "$holder_pid" 2>/dev/null; then
+      log_activity "$workspace" "🧪 GATE ORPHANED label=$label — session ended while the gate was running (holder pid=$holder_pid dead); result discarded, no ${label}-latest breadcrumb written; lock released"
+      rm -rf "$lock_dir" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+
 # After a loop, compare the files touched by any new commits against
 # the untracked baseline. If any committed file was untracked at loop
 # start, it's a suspected orphan leak — log a warning to activity.log and
@@ -1719,6 +1746,11 @@ run_ralph_loop() {
     if ! _check_orphan_leak "$workspace"; then
       _write_postmortem "$workspace" "orphan-leak"
     fi
+
+    # 0.14.7: surface gates the just-ended session left running (dead-holder
+    # locks) and release them. Pure telemetry + cleanup; never changes the
+    # loop signal.
+    _check_orphaned_gates "$workspace"
 
     local task_status
     task_status=$(check_task_complete "$workspace")

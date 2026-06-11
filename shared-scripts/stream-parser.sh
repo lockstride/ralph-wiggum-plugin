@@ -340,10 +340,46 @@ check_gutter() {
   fi
 }
 
+# 0.14.7: Expected-nonzero diagnostic detector. Exit 1 from a command
+# composed purely of read-only utilities is informational, not a failure:
+# `grep` exits 1 on no-match, `ls`/`cat` exit 1 on an absent path — the
+# breadcrumb-poll idioms (`ls .ralph/stop-requested`) and no-match greps
+# that dominated errors.log on otherwise-clean runs. Logging them as
+# SHELL FAIL buries real failures and pollutes the shell-fail counter.
+# Conservative by construction: only exit code 1 qualifies (2+ is a real
+# error even for grep), and every ;/&&/||/|-separated segment must start
+# with an allowlisted read-only command — anything that can mutate state
+# (git, pnpm, rm, sed -i, find -exec, …) keeps the current behavior. A
+# quoted separator (e.g. `grep "a;b"`) mis-splits toward "not a
+# diagnostic", which is the safe direction: the failure is still logged.
+_is_expected_nonzero_diagnostic() {
+  local cmd="$1" exit_code="$2"
+  [[ "$exit_code" -eq 1 ]] || return 1
+  local normalized="${cmd//"&&"/;}"
+  normalized="${normalized//"||"/;}"
+  normalized="${normalized//"|"/;}"
+  local seg first
+  while IFS= read -r seg; do
+    seg="${seg#"${seg%%[![:space:]]*}"}"
+    [[ -z "$seg" ]] && continue
+    first="${seg%%[[:space:]]*}"
+    case "$first" in
+      cd | ls | cat | grep | head | tail | wc | echo | sleep | test | \[ | true) ;;
+      *) return 1 ;;
+    esac
+  done <<<"${normalized//;/$'\n'}"
+  return 0
+}
+
 track_shell_failure() {
   local cmd="$1"
   local exit_code="$2"
   if [[ $exit_code -ne 0 ]]; then
+    # 0.14.7: skip expected-nonzero diagnostics entirely — no errors.log
+    # entry, no FAILURES_FILE count. See _is_expected_nonzero_diagnostic.
+    if _is_expected_nonzero_diagnostic "$cmd" "$exit_code"; then
+      return 0
+    fi
     local count
     local single_line_cmd
     single_line_cmd=$(echo -n "$cmd" | base64)
@@ -454,9 +490,22 @@ track_file_write() {
   ' "$WRITES_FILE")
   if [[ $count -ge $FILE_THRASH_THRESHOLD ]]; then
     local window_min=$((FILE_THRASH_WINDOW_SECONDS / 60))
-    log_error "THRASHING: $path written ${count}x in ${window_min} min"
-    log_error "⚠️ GUTTER: file thrash on $path"
-    echo "GUTTER" 2>/dev/null || true
+    # 0.14.7: write tempo alone is not stuckness. Observed GUTTER
+    # false-positives were normal incremental TDD editing — many small
+    # edits with passing test runs in between and zero failed commands
+    # since the last task boundary. Require corroborating failure
+    # evidence (FAILURES_FILE non-empty — at least one real shell
+    # failure since the last successful commit) before escalating;
+    # otherwise note the tempo in activity.log and keep going. Genuine
+    # stuck-loops always have failing commands in the window, so this
+    # only suppresses the all-green case.
+    if [[ -s "$FAILURES_FILE" ]]; then
+      log_error "THRASHING: $path written ${count}x in ${window_min} min"
+      log_error "⚠️ GUTTER: file thrash on $path"
+      echo "GUTTER" 2>/dev/null || true
+    else
+      log_activity "📝 WRITE TEMPO: $path written ${count}x in ${window_min} min (no failed commands since last commit — not thrash)"
+    fi
   fi
 }
 
