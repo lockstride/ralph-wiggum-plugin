@@ -12,3 +12,7 @@ The skill picks VERIFIER or REWORK and runs the verify/rework work in a
 sub-agent via the Task tool (`verifying-acceptance-criteria` or
 `addressing-acceptance-gaps`) — in the sub-agent, not inline in this
 orchestrator turn, so its context stays out of yours.
+
+Do not signal COMPLETE directly — loop completion keys on the acceptance
+report's top-level checkbox, which only the VERIFIER/REWORK workflow may
+flip. A green gate alone will be rejected.

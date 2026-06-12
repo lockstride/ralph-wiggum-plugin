@@ -1797,6 +1797,9 @@ run_ralph_loop() {
         continue
       fi
 
+      # 0.14.8: refresh the breadcrumb so it matches the final banner state
+      # instead of staying frozen at the loop-start snapshot.
+      _write_task_summary "$workspace"
       log_activity "$workspace" "LOOP $loop_label END — ✅ COMPLETE$task_suffix"
       log_progress "$workspace" "**Loop $loop_label ended** — ✅ TASK COMPLETE"
       echo ""
@@ -1840,6 +1843,7 @@ run_ralph_loop() {
             session_id=""
             continue
           fi
+          _write_task_summary "$workspace"
           log_activity "$workspace" "LOOP $loop_label END — ✅ COMPLETE$task_suffix"
           log_progress "$workspace" "**Loop $loop_label ended** — ✅ TASK COMPLETE (agent signaled)"
           return 0

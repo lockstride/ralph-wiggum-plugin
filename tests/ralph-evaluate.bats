@@ -235,3 +235,18 @@ teardown() {
   lines=$(wc -l < "$effective" | tr -d ' ')
   [ "$lines" -lt 80 ]
 }
+
+@test "render_orchestrator_prompt: framing warns against signaling COMPLETE directly (0.14.8)" {
+  local report="$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+  mkdir -p "$(dirname "$report")"
+  touch "$report"
+
+  render_orchestrator_prompt "$MOCK_WORKSPACE" "$MOCK_WORKSPACE/PROMPT.md" "$report" >/dev/null
+
+  local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  # test/000534 eval loop 1: the agent ran a cached gate and signaled
+  # COMPLETE without invoking the skill. The completion guard rejected it,
+  # but each miss burns a loop — the framing now states completion keys on
+  # the acceptance-report checkbox.
+  grep -q "Do not signal COMPLETE directly" "$effective"
+}

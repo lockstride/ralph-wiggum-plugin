@@ -373,6 +373,31 @@ SUMMARY
   rm -rf "$ws"
 }
 
+@test "_write_task_summary: refresh overwrites a stale loop-start snapshot (0.14.8)" {
+  # test/000534 left task-summary frozen at done=0 after COMPLETE because
+  # it was only written at session start. The COMPLETE exit paths now call
+  # _write_task_summary again; this pins the refresh semantics.
+  cat > "$MOCK_WORKSPACE/tasks.md" <<'TASKS'
+- [x] T001 first task
+- [x] T002 second task
+TASKS
+  echo "$MOCK_WORKSPACE/tasks.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+
+  cat > "$MOCK_WORKSPACE/.ralph/task-summary" <<'STALE'
+done=0
+total=2
+remaining=2
+---
+- [ ] T001 first task
+STALE
+
+  _write_task_summary "$MOCK_WORKSPACE"
+
+  grep -q "done=2" "$MOCK_WORKSPACE/.ralph/task-summary"
+  grep -q "remaining=0" "$MOCK_WORKSPACE/.ralph/task-summary"
+  ! grep -q '^\- \[ \]' "$MOCK_WORKSPACE/.ralph/task-summary"
+}
+
 # ---------------------------------------------------------------------------
 # Completion bar — _complete_allowed refuses ALL_TASKS_DONE unless the
 # loop's tier gate matches its [gates] entry and exits 0. The impl loop
