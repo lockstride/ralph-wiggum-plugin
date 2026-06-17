@@ -459,6 +459,40 @@ tool_result_json() {
   echo "$output" | grep -q "DEFER"
 }
 
+@test "emits DEFER (not GUTTER) on dropped socket API error" {
+  # Regression: the Anthropic SDK surfaces a transient drop as
+  # "The socket connection was closed unexpectedly" — the "was" between
+  # "connection" and "closed" dodged the `connection[[:space:]]*closed`
+  # pattern, so it fell through to NON-RETRYABLE → GUTTER and halted the
+  # whole runner (observed: a single drop stalled a run ~3.5h). Must DEFER.
+  local events='{"kind":"error","message":"API Error: The socket connection was closed unexpectedly."}'
+
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "^DEFER$"
+  ! echo "$output" | grep -q "^GUTTER$"
+}
+
+@test "emits DEFER on overloaded API error (529)" {
+  # Companion to the socket case: confirms the existing overloaded path
+  # still routes to DEFER, guarding against an over-broad edit.
+  local events='{"kind":"error","message":"API Error: 529 Overloaded."}'
+
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "^DEFER$"
+}
+
+@test "still emits GUTTER on a genuinely non-retryable API error" {
+  # The socket-drop widening must not turn every error into a DEFER —
+  # an auth/validation-class error has no transient marker and stays GUTTER.
+  local events='{"kind":"error","message":"API Error: 401 invalid x-api-key"}'
+
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "^GUTTER$"
+}
+
 @test "emits RECOVER on chained 'git add ... && git commit' command (0.5.4)" {
   # Spec-Kit prompt encourages: `git add <paths> && git commit -m "..."`
   # The pre-0.5.4 regex `^git[[:space:]]+commit` missed this because the

@@ -311,7 +311,17 @@ is_retryable_api_error() {
   if [[ "$lower_msg" =~ (timeout|timed[[:space:]]*out|connection[[:space:]]*timeout) ]] ||
     [[ "$lower_msg" =~ (network[[:space:]]*error|network[[:space:]]*unavailable) ]] ||
     [[ "$lower_msg" =~ (connection[[:space:]]*refused|connection[[:space:]]*reset|econnreset) ]] ||
-    [[ "$lower_msg" =~ (connection[[:space:]]*closed|connection[[:space:]]*failed|etimedout|enotfound) ]]; then
+    [[ "$lower_msg" =~ (connection[[:space:]]*closed|connection[[:space:]]*failed|etimedout|enotfound) ]] ||
+    # A dropped socket is transient, not a stuck agent. The Anthropic SDK
+    # surfaces these as "The socket connection was closed unexpectedly" —
+    # note the "was" between "connection" and "closed", which the
+    # `connection[[:space:]]*closed` pattern above does NOT match, and there
+    # is no bare `socket` token there either. Without this branch such a
+    # drop falls through to NON-RETRYABLE → GUTTER → the whole runner halts
+    # (observed: a single drop stalled a run for ~3.5h until an external
+    # keep-alive restarted it). DEFER's stall_count>=10 ceiling still trips
+    # on a genuinely dead endpoint, so this cannot loop forever.
+    [[ "$lower_msg" =~ (socket|connection[[:space:]]*was[[:space:]]*closed|closed[[:space:]]*unexpectedly|hang[[:space:]]*up|epipe) ]]; then
     return 0
   fi
   if [[ "$lower_msg" =~ (service[[:space:]]*unavailable|503) ]] ||
