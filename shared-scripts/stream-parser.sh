@@ -359,9 +359,13 @@ check_gutter() {
 # Conservative by construction: only exit code 1 qualifies (2+ is a real
 # error even for grep), and every ;/&&/||/|-separated segment must start
 # with an allowlisted read-only command — anything that can mutate state
-# (git, pnpm, rm, sed -i, find -exec, …) keeps the current behavior. A
-# quoted separator (e.g. `grep "a;b"`) mis-splits toward "not a
-# diagnostic", which is the safe direction: the failure is still logged.
+# (git, pnpm, rm, …) keeps the current behavior. `find` and `sed` are
+# read-only only in some forms, so they are allowlisted only when the
+# segment carries no mutating action (`find -exec/-execdir/-delete/-ok/
+# -okdir/-fprint*/-fls`, `sed -i/--in-place`); any such flag drops the
+# whole command back to the logged path. A quoted separator (e.g.
+# `grep "a;b"`) mis-splits toward "not a diagnostic", which is the safe
+# direction: the failure is still logged.
 _is_expected_nonzero_diagnostic() {
   local cmd="$1" exit_code="$2"
   [[ "$exit_code" -eq 1 ]] || return 1
@@ -375,6 +379,18 @@ _is_expected_nonzero_diagnostic() {
     first="${seg%%[[:space:]]*}"
     case "$first" in
       cd | ls | cat | grep | head | tail | wc | echo | sleep | test | \[ | true) ;;
+      find)
+        # Read-only search only; reject filesystem-mutating / exec actions.
+        case " $seg " in
+          *" -exec "* | *" -execdir "* | *" -delete "* | *" -ok "* | *" -okdir "* | *" -fprint"* | *" -fls "*) return 1 ;;
+        esac
+        ;;
+      sed)
+        # Read-only stream edit only; reject in-place rewrites.
+        case " $seg " in
+          *" -i"* | *" --in-place"*) return 1 ;;
+        esac
+        ;;
       *) return 1 ;;
     esac
   done <<<"${normalized//;/$'\n'}"

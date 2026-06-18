@@ -295,6 +295,61 @@ tool_result_json() {
   grep -q "SHELL FAIL: cd /tmp; pnpm all-check" "$MOCK_WORKSPACE/.ralph/errors.log"
 }
 
+@test "read-only sed -n print exiting 1 is not logged as SHELL FAIL (0.14.10)" {
+  # `sed -n '..p' missing-file` is a diagnostic read; exit 1 is informational.
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "sed -n '1,130p' apps/api/tests/unit/missing.spec.ts")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  if grep -q "SHELL FAIL" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+    fail "read-only sed -n exit 1 was logged as SHELL FAIL"
+  fi
+}
+
+@test "read-only find search exiting 1 is not logged as SHELL FAIL (0.14.10)" {
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "find packages -name '*.spec.ts' -not -path '*/node_modules/*' | head")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  if grep -q "SHELL FAIL" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+    fail "read-only find search exit 1 was logged as SHELL FAIL"
+  fi
+}
+
+@test "sed -i in-place edit exiting 1 is still logged as SHELL FAIL (0.14.10 regression guard)" {
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "sed -i 's/a/b/' apps/foo.ts")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  grep -q "SHELL FAIL: sed -i" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "find -exec exiting 1 is still logged as SHELL FAIL (0.14.10 regression guard)" {
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "find . -name '*.tmp' -exec rm {} ;")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  grep -q "SHELL FAIL: find . -name" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "find -delete exiting 1 is still logged as SHELL FAIL (0.14.10 regression guard)" {
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" "find build -type f -delete")
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  grep -q "SHELL FAIL: find build" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
 @test "file thrash at threshold emits GUTTER (0.10.0)" {
   # 0.14.7: thrash escalation now requires corroborating failure evidence
   # (at least one real shell failure since the last task boundary) — seed
