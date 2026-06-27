@@ -609,6 +609,13 @@ _guard_bash() {
   if echo "$cmd" | grep -qE 'find\s+.*\.ralph.*-delete'; then
     _block "State tampering denied: cannot delete .ralph/ contents via find -delete."
   fi
+  # Block hand-forging gate breadcrumbs. gate-run.sh is the only writer of
+  # .ralph/gates/*-latest.{exit,cmd,log,summary}; the completion guard trusts
+  # those files. An agent that can't locate gate-run.sh must not reconstruct
+  # them by redirecting into the dir (e.g. `echo 0 > .ralph/gates/final-latest.exit`).
+  if echo "$cmd" | grep -qE '(>>?|\btee\b)[[:space:]]*[^|&;]*\.ralph/gates/'; then
+    _block "State tampering denied: cannot write .ralph/gates/ breadcrumbs by hand — gate-run.sh owns them and the completion guard trusts them. Run the gate harness instead: bash \"\$(cat .ralph/gate-runner)\" <label> <command> (label in basic|full|final; command from .ralph/command-policy [gates])."
+  fi
 
   # Canonicalize once — env prefix stripped, pipes/redirects stripped, pnpm
   # run/exec normalized. Every downstream check matches against this form

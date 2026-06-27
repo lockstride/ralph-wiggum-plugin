@@ -131,15 +131,27 @@ _all_skills() {
 }
 
 @test "verifying-acceptance-criteria requires a fresh final-tier gate before flipping CLEAN" {
-  # 0.14.0: eval-* label family collapsed into 'final'. The verifier now
-  # runs the [gates].final command via gate-run.sh under label=final.
+  # 0.14.0: eval-* label family collapsed into 'final'. 0.14.11: the gate
+  # runner path is resolved from the .ralph/gate-runner breadcrumb (not
+  # guessed/hardcoded), and hand-forging breadcrumbs is forbidden.
   local skill_md="$SKILLS_DIR/verifying-acceptance-criteria/SKILL.md"
   [ -f "$skill_md" ]
-  grep -qE "gate-run\.sh +final" "$skill_md" \
-    || { echo "verifier skill missing 'gate-run.sh final ...' gate requirement" >&2; return 1; }
+  grep -qE '\.ralph/gate-runner.*" +final' "$skill_md" \
+    || { echo "verifier skill missing breadcrumb gate invocation (cat .ralph/gate-runner ... final)" >&2; return 1; }
   grep -qiE "fresh.*(final|gate)|cached.*does not satisfy|cached .*does not" "$skill_md" \
     || { echo "verifier skill missing freshness-of-gate-run requirement" >&2; return 1; }
+  grep -qiE "hand-construct|hand-forg|hand-writ" "$skill_md" \
+    || { echo "verifier skill missing the do-not-hand-forge-breadcrumbs prohibition (0.14.11)" >&2; return 1; }
   # Regression guard: the v0.13.x eval-* labels must be gone.
   ! grep -qE "eval-final|eval-rework|eval-\*" "$skill_md" \
     || { echo "verifier skill still references retired eval-* labels" >&2; return 1; }
+}
+
+@test "addressing-acceptance-gaps runs final gate via the gate-runner breadcrumb, never hand-forging (0.14.11)" {
+  local skill_md="$SKILLS_DIR/addressing-acceptance-gaps/SKILL.md"
+  [ -f "$skill_md" ]
+  grep -qE '\.ralph/gate-runner.*" +final' "$skill_md" \
+    || { echo "rework skill missing breadcrumb gate invocation (cat .ralph/gate-runner ... final)" >&2; return 1; }
+  grep -qiE "hand-construct|hand-forg|hand-writ" "$skill_md" \
+    || { echo "rework skill missing the do-not-hand-forge-breadcrumbs prohibition (0.14.11)" >&2; return 1; }
 }

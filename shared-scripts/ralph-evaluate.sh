@@ -186,6 +186,20 @@ seed_report() {
   printf '%s' "$body" >"$report"
 }
 
+# Record the absolute path to gate-run.sh in `.ralph/gate-runner` so the
+# verifier/rework sub-agents can invoke the gate harness without guessing
+# where the plugin is installed. gate-run.sh lives in the plugin install
+# (not the repo), so an agent that tries to `find` it in the workspace comes
+# up empty and may resort to hand-writing `final-latest.*` — which the
+# completion guard then trusts. The breadcrumb removes the guesswork;
+# ralph-guard.sh denies hand-forged gate breadcrumbs so the harness stays
+# the only writer.
+record_gate_runner() {
+  local workspace="$1" scripts_dir="$2"
+  mkdir -p "$workspace/.ralph"
+  printf '%s\n' "$scripts_dir/gate-run.sh" >"$workspace/.ralph/gate-runner"
+}
+
 # Render a thin framing prompt that points the agent at the
 # `running-acceptance-evaluation` skill and supplies the per-run paths
 # (ground truth, report). The orchestrator workflow itself, plus the
@@ -288,6 +302,8 @@ main() {
   # writing fresh `final-latest.*` artifacts.
   rm -rf "$WORKSPACE/.ralph/gates"
   mkdir -p "$WORKSPACE/.ralph/gates"
+
+  record_gate_runner "$WORKSPACE" "$SCRIPT_DIR"
 
   if ! render_orchestrator_prompt "$WORKSPACE" "$ground_truth" "$report" >/dev/null; then
     exit 1

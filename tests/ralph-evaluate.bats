@@ -250,3 +250,21 @@ teardown() {
   # the acceptance-report checkbox.
   grep -q "Do not signal COMPLETE directly" "$effective"
 }
+
+# -----------------------------------------------------------------------------
+# record_gate_runner (0.14.11)
+# -----------------------------------------------------------------------------
+
+@test "record_gate_runner: writes the gate-run.sh absolute path to .ralph/gate-runner" {
+  record_gate_runner "$MOCK_WORKSPACE" "/some/plugin/shared-scripts"
+  local breadcrumb="$MOCK_WORKSPACE/.ralph/gate-runner"
+  [ -f "$breadcrumb" ]
+  [ "$(cat "$breadcrumb")" = "/some/plugin/shared-scripts/gate-run.sh" ]
+}
+
+@test "record_gate_runner: creates .ralph/ when absent" {
+  rm -rf "$MOCK_WORKSPACE/.ralph"
+  record_gate_runner "$MOCK_WORKSPACE" "$SCRIPTS_DIR"
+  [ -f "$MOCK_WORKSPACE/.ralph/gate-runner" ]
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gate-runner")" = "$SCRIPTS_DIR/gate-run.sh" ]
+}

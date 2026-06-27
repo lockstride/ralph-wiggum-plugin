@@ -84,6 +84,44 @@ _run_guard() {
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
+# --- Hand-forged gate breadcrumb denial (0.14.11) ---
+
+@test "blocks redirect into .ralph/gates/ (forged exit breadcrumb)" {
+  run _run_guard Bash "echo 0 > .ralph/gates/final-latest.exit"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("State tampering")'
+}
+
+@test "blocks append into .ralph/gates/ (forged cmd breadcrumb)" {
+  run _run_guard Bash 'echo "pnpm all-check:no-cache" >> .ralph/gates/final-latest.cmd'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "blocks tee into .ralph/gates/ (forged log breadcrumb)" {
+  run _run_guard Bash "pnpm all-check 2>&1 | tee .ralph/gates/final-latest.log"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "allows reading a gate breadcrumb (no redirect)" {
+  run _run_guard Bash "cat .ralph/gates/final-latest.log"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "allows gate-run.sh final with 2>&1 (not a gates/ redirect)" {
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh final pnpm test 2>&1 | tail -5"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
 # --- Direct test tool denial ---
 
 @test "blocks direct vitest invocation" {
