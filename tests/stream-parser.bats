@@ -350,6 +350,50 @@ tool_result_json() {
   grep -q "SHELL FAIL: find build" "$MOCK_WORKSPACE/.ralph/errors.log"
 }
 
+@test "read-only grep with a double-quoted pipe in its pattern is not logged as SHELL FAIL (0.14.12)" {
+  # The diagnostic classifier replaces |/;/&&/|| with segment separators.
+  # A `|` inside a quoted alternation pattern must NOT be treated as a real
+  # pipe — otherwise a no-match exit 1 from a pure read-only grep lands in
+  # errors.log (observed in loop 130812). `\"` in the fixture is a JSON-escaped
+  # double quote, so the parser sees a real `grep -nE "test|vitest|coverage"`.
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" 'grep -nE \"test|vitest|coverage\" packages/data-sources/project.json')
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  if grep -q "SHELL FAIL" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+    fail "read-only grep with a quoted-pipe pattern exit 1 was logged as SHELL FAIL"
+  fi
+}
+
+@test "read-only compound with a quoted-pipe grep segment is not logged as SHELL FAIL (0.14.12)" {
+  # Mirrors the loop-130812 explorer command: a find|head plus a quoted-pipe
+  # grep, all read-only — exit 1 from a trailing no-match must stay quiet.
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" 'find packages -name \"*.spec.ts\" | head; grep -nE \"test|vitest|coverage\" project.json')
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  if grep -q "SHELL FAIL" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+    fail "read-only quoted-pipe compound exit 1 was logged as SHELL FAIL"
+  fi
+}
+
+@test "quoted pipe does not whitelist a following mutating segment (0.14.12 regression guard)" {
+  # Stripping quoted content must not let a real mutating command ride along:
+  # the unquoted `; pnpm build` is still a genuine, separately-classified
+  # segment and keeps the whole command on the logged path.
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 1 "" 'echo \"a|b\"; pnpm build')
+  events+=$'\n'
+
+  run_parser "$events" >/dev/null
+
+  grep -q "SHELL FAIL: echo" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
 @test "file thrash at threshold emits GUTTER (0.10.0)" {
   # 0.14.7: thrash escalation now requires corroborating failure evidence
   # (at least one real shell failure since the last task boundary) — seed

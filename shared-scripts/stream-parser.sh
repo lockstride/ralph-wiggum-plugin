@@ -363,13 +363,22 @@ check_gutter() {
 # read-only only in some forms, so they are allowlisted only when the
 # segment carries no mutating action (`find -exec/-execdir/-delete/-ok/
 # -okdir/-fprint*/-fls`, `sed -i/--in-place`); any such flag drops the
-# whole command back to the logged path. A quoted separator (e.g.
-# `grep "a;b"`) mis-splits toward "not a diagnostic", which is the safe
-# direction: the failure is still logged.
+# whole command back to the logged path. Quoted separators are stripped
+# before splitting (see below), so a `|`/`;`/`&&`/`||` inside a quoted
+# argument cannot mis-split the command.
 _is_expected_nonzero_diagnostic() {
   local cmd="$1" exit_code="$2"
   [[ "$exit_code" -eq 1 ]] || return 1
-  local normalized="${cmd//"&&"/;}"
+  # 0.14.12: drop quoted spans BEFORE splitting on shell separators so a
+  # `|`, `;`, `&&`, or `||` inside a quoted argument (e.g.
+  # `grep -nE "test|vitest|coverage"`) can't shatter a segment and force the
+  # whole command to the logged path. Only each segment's FIRST word (the
+  # command name) is inspected below, and command names are never quoted, so
+  # discarding quoted content is loss-free here. Unbalanced / escaped quotes
+  # are rare in read-only diagnostics and fall back to logging — safe.
+  local stripped
+  stripped=$(printf '%s' "$cmd" | sed -E 's/"[^"]*"//g' | sed "s/'[^']*'//g")
+  local normalized="${stripped//"&&"/;}"
   normalized="${normalized//"||"/;}"
   normalized="${normalized//"|"/;}"
   local seg first
