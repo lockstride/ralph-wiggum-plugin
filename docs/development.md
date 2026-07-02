@@ -100,7 +100,7 @@ The generation:
 1. Computes the SHA-256 of the source skill.
 2. Compares to the cached hash at `<spec_dir>/.ralph-prompt-hash`.
 3. On hash match: uses the cached prompt at `<spec_dir>/ralph-prompt.md` directly.
-4. On hash miss (or no cache): invokes `claude -p --model sonnet --effort low` with the adaptation guide (`shared-references/templates/speckit-adaptation-guide.md`) plus the source skill, expecting an adapted prompt back. Caches the result + new hash. Commits both files.
+4. On hash miss (or no cache): invokes `claude -p --model sonnet --effort medium` with the adaptation guide (`shared-references/templates/speckit-adaptation-guide.md`) plus the source skill, expecting an adapted prompt back. Caches the result + new hash. Commits both files.
 5. The cached prompt is then rendered through `_render_template`: placeholders like `{{TASK_FILE}}`, `{{GATE_RUN}}`, `{{ACTIVITY_TAIL}}` get substituted. Final output goes to `.ralph/effective-prompt.md`, which is what the agent sees on every loop.
 
 Override knobs:

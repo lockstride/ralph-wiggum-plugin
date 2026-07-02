@@ -44,6 +44,17 @@ else
 fi
 MODEL="${RALPH_MODEL:-${MODEL:-$DEFAULT_MODEL}}"
 
+# Reasoning effort (claude only) — resolved here for the loop banner and
+# activity log. agent-adapter.sh reads RALPH_EFFORT directly at
+# command-build time with the same fallback, so this stays in sync.
+# Override with RALPH_EFFORT=low|medium|high|xhigh|max. Empty for
+# cursor-agent (no effort knob).
+if type agent_default_effort >/dev/null 2>&1; then
+  EFFORT="${RALPH_EFFORT:-$(agent_default_effort "$RALPH_AGENT_CLI")}"
+else
+  EFFORT="${RALPH_EFFORT:-}"
+fi
+
 # Token thresholds — derived from CLI + model (extended [1m] vs standard)
 if type agent_default_rotate_threshold >/dev/null 2>&1; then
   ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-$(agent_default_rotate_threshold "$RALPH_AGENT_CLI" "$MODEL")}"
@@ -1138,10 +1149,11 @@ run_loop() {
   echo "Workspace: $workspace" >&2
   echo "CLI:       $RALPH_AGENT_CLI" >&2
   echo "Model:     $MODEL" >&2
+  [[ -n "$EFFORT" ]] && echo "Effort:    $EFFORT" >&2
   echo "Monitor:   tail -f $workspace/.ralph/activity.log" >&2
   echo "" >&2
 
-  log_progress "$workspace" "**Session $loop_label started** (cli: $RALPH_AGENT_CLI, model: $MODEL)"
+  log_progress "$workspace" "**Session $loop_label started** (cli: $RALPH_AGENT_CLI, model: $MODEL${EFFORT:+, effort: $EFFORT})"
 
   local invoke_cmd
   invoke_cmd=$(agent_build_cmd "$RALPH_AGENT_CLI" "$MODEL" "$prompt" "$session_id")

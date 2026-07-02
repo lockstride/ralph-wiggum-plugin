@@ -163,11 +163,13 @@ resolve_prompt_file() {
 
 # 0.12.4: Belt-and-suspenders against generator regressions.
 #
-# The Sonnet "low effort" generator empirically paraphrases away the two
-# breadcrumb checks the loop relies on for graceful yields (observed in
-# 0.12.3 — context-warning-active was silently dropped from the per-task
-# flow, causing the agent to blow past every soft warning and forcing
-# every rotation to be a hard force-kill at 100% budget).
+# The Sonnet generator can paraphrase away the two breadcrumb checks the
+# loop relies on for graceful yields (observed at "low" effort in 0.12.3 —
+# context-warning-active was silently dropped from the per-task flow,
+# causing the agent to blow past every soft warning and forcing every
+# rotation to be a hard force-kill at 100% budget). The generator now runs
+# at "medium" effort, which paraphrases less aggressively, but this
+# addendum stays as belt-and-suspenders.
 #
 # If either canonical breadcrumb is missing from the generated prompt,
 # append a forced addendum so the agent always has the instruction.
@@ -278,15 +280,15 @@ GENPROMPT
     return 1
   fi
 
-  echo "  ⚙ Generating loop prompt via $gen_cli (sonnet, low effort)..." >&2
-  _pr_log "$workspace" "PROMPT generating loop prompt via $gen_cli (sonnet, low effort)..."
+  echo "  ⚙ Generating loop prompt via $gen_cli (sonnet, medium effort)..." >&2
+  _pr_log "$workspace" "PROMPT generating loop prompt via $gen_cli (sonnet, medium effort)..."
 
   local generated
   if ! generated=$(
     unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
     echo "$gen_prompt" | $gen_cli -p \
       --model sonnet \
-      --effort low \
+      --effort medium \
       --output-format text \
       --dangerously-skip-permissions 2>/dev/null
   ); then

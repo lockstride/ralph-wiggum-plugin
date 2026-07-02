@@ -813,6 +813,50 @@ REPORT
 }
 
 # =============================================================================
+# Reasoning effort — default + RALPH_EFFORT passthrough (0.15.0)
+# =============================================================================
+
+@test "agent_default_effort defaults to xhigh for claude" {
+  [ "$(agent_default_effort claude)" = "xhigh" ]
+}
+
+@test "agent_default_effort is empty for cursor-agent (no effort knob)" {
+  [ -z "$(agent_default_effort cursor-agent)" ]
+}
+
+@test "agent_build_cmd defaults claude to --effort xhigh" {
+  local cmd
+  cmd=$(agent_build_cmd claude "sonnet" "hello")
+  echo "$cmd" | grep -q -- "--effort 'xhigh'"
+}
+
+@test "agent_build_cmd honors RALPH_EFFORT override for claude" {
+  local cmd
+  RALPH_EFFORT=max \
+    cmd=$(agent_build_cmd claude "sonnet" "hello")
+  echo "$cmd" | grep -q -- "--effort 'max'"
+  # The default must not leak through when an override is set.
+  ! echo "$cmd" | grep -q -- "--effort 'xhigh'"
+}
+
+@test "agent_build_cmd's --effort appears before --model for claude" {
+  local cmd effort_pos model_pos
+  cmd=$(agent_build_cmd claude "sonnet" "hello")
+  effort_pos=$(echo "$cmd" | grep -bo -- "--effort" | head -1 | cut -d: -f1)
+  model_pos=$(echo "$cmd" | grep -bo -- "--model" | head -1 | cut -d: -f1)
+  [ "$effort_pos" -lt "$model_pos" ]
+}
+
+@test "agent_build_cmd emits no --effort flag for cursor-agent" {
+  local cmd
+  # cursor-agent has no --effort knob; even with RALPH_EFFORT set the flag
+  # must be omitted so the invocation stays valid.
+  RALPH_EFFORT=max \
+    cmd=$(agent_build_cmd cursor-agent "composer-2" "hello")
+  ! echo "$cmd" | grep -q -- "--effort"
+}
+
+# =============================================================================
 # agent_build_cmd — plugin-dir self-registration (0.12.4)
 # =============================================================================
 # Critical bug fix: prior to 0.12.4, agent_build_cmd launched `claude -p`

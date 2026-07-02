@@ -62,7 +62,7 @@ the inventory when reviewing the loop's reliability end-to-end.
 - Drives `.ralph/acceptance-report.md` — checkbox state advances the loop. Verifier runs the project's `[gates].final` command under label `final` independently; rework loops fix logged gaps.
 
 ### Proper dynamic prompt generation
-- `prompt-resolver.sh` reads the project's `speckit-implement` skill, applies the adaptation guide, and invokes `claude -p --model sonnet --effort low` to produce a loop-adapted body.
+- `prompt-resolver.sh` reads the project's `speckit-implement` skill, applies the adaptation guide, and invokes `claude -p --model sonnet --effort medium` to produce a loop-adapted body.
 - Composite hash cache (`<sha(speckit)>:<sha(guide)>`) regenerates on either input change.
 - Safety addendum (`_ensure_breadcrumb_checks`) auto-injects the breadcrumb-check paragraph if the generator paraphrased it away.
 - Framing (`build_prompt`) owns Stop conditions, the after-commit flow, and the handoff contract — the body is purely task-execution mechanics.
@@ -326,6 +326,8 @@ For mode mechanics, artifacts, and limitations, see [docs/development.md → Acc
 | `RALPH_COMPLETE_BLOCK_THRESHOLD` | `2` | Consecutive COMPLETE-BLOCKED loops with the same reason before failing loud (unsatisfiable completion bar) |
 | `RALPH_MAX_LOOPS` | `10` | Safety cap on agent respawns |
 | `RALPH_EVAL_MAX_LOOPS` | `10` | Safety cap on eval loop iterations |
+| `RALPH_MODEL` | per-CLI (`opus[1m]` for Claude, `composer-2` for Cursor) | Work-loop model id. Same as `-m/--model`. |
+| `RALPH_EFFORT` | `xhigh` (Claude only) | Reasoning effort for the main work loop: `low\|medium\|high\|xhigh\|max`. Ignored for cursor-agent (no effort knob). The loop-prompt generator always runs at `medium` and is unaffected. |
 | `RALPH_SKIP_GUARDRAILS` | — | Set to `1` to omit the guardrails preamble |
 | `RALPH_SKIP_GENERATION` | — | Set to `1` to skip speckit prompt generation |
 

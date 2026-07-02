@@ -106,13 +106,26 @@ agent_build_cmd() {
   esc_model=$(printf '%s' "$model" | sed "$sq_esc")
   esc_session=$(printf '%s' "$session_id" | sed "$sq_esc")
 
+  # Reasoning effort (claude only). Defaults to the per-CLI default
+  # (xhigh for claude — the best setting for coding / agentic work).
+  # Override with RALPH_EFFORT=low|medium|high|xhigh|max, threaded in
+  # from ralph-setup.sh / wt-ralphspec. cursor-agent has no effort knob,
+  # so agent_default_effort returns empty and the flag is omitted.
+  local effort esc_effort
+  effort="${RALPH_EFFORT:-$(agent_default_effort "$cli")}"
+  esc_effort=$(printf '%s' "$effort" | sed "$sq_esc")
+
   case "$cli" in
     claude)
       # Claude Desktop injects ANTHROPIC_API_KEY="" and ANTHROPIC_BASE_URL into
       # child processes. An empty ANTHROPIC_API_KEY triggers API-key auth mode
       # with an invalid credential, causing 401. Unset both so the CLI falls
       # back to the logged-in OAuth session.
-      local cmd="unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL; RALPH_AGENT_GUARD=1 claude -p --output-format stream-json --verbose --dangerously-skip-permissions --effort high --model '$esc_model'"
+      local cmd="unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL; RALPH_AGENT_GUARD=1 claude -p --output-format stream-json --verbose --dangerously-skip-permissions"
+      if [[ -n "$effort" ]]; then
+        cmd="$cmd --effort '$esc_effort'"
+      fi
+      cmd="$cmd --model '$esc_model'"
       # 0.12.4: register THIS plugin so `claude -p` actually loads our
       # PreToolUse hook (ralph-guard.sh) and Stop hook (handoff-check.sh).
       # Without this, every guard / wrap / deny / protect rule is dead
@@ -323,6 +336,19 @@ agent_default_model() {
   case "$cli" in
     claude) echo "opus[1m]" ;;
     cursor-agent) echo "composer-2" ;;
+    *) echo "" ;;
+  esac
+}
+
+# Default reasoning effort per CLI. Claude's main work loop runs at
+# "xhigh" — the best setting for coding / agentic work. Override with
+# RALPH_EFFORT (low|medium|high|xhigh|max). cursor-agent has no effort
+# knob, so it returns empty and the --effort flag is omitted entirely.
+agent_default_effort() {
+  local cli
+  cli="$(agent_normalize_cli_name "$1")"
+  case "$cli" in
+    claude) echo "xhigh" ;;
     *) echo "" ;;
   esac
 }
