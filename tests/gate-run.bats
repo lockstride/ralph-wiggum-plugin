@@ -114,6 +114,26 @@ teardown() {
   grep -q "GATE end" "$MOCK_WORKSPACE/.ralph/activity.log"
 }
 
+@test "runs the gate command from the workspace root even when invoked from a subdir" {
+  # Regression (0.15.1): the ralph-guard.sh [rewrite] chain-splitter can
+  # strip a load-bearing `cd <worktree>` prefix, leaving gate-run.sh invoked
+  # from the agent's stray cwd (e.g. apps/api). The gate must still execute at
+  # the workspace root so root-scoped commands (pnpm <script>) resolve the
+  # right package.json — otherwise pnpm fast-fails with exit=254.
+  mkdir -p "$MOCK_WORKSPACE/subdir/deep"
+  cd "$MOCK_WORKSPACE/subdir/deep" || fail "cannot cd to subdir"
+
+  # RALPH_WORKSPACE points at the root (exported by create_mock_workspace)
+  # while cwd is the subdir. A root-relative side effect must land at the
+  # root, not the invocation cwd. Symlink-agnostic (relative path resolved
+  # against the command's cwd; both absolute locations are then checked).
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic touch gate-ran-here.marker
+  [ "$status" -eq 0 ]
+
+  [ -f "$MOCK_WORKSPACE/gate-ran-here.marker" ]
+  [ ! -f "$MOCK_WORKSPACE/subdir/deep/gate-ran-here.marker" ]
+}
+
 # ---------------------------------------------------------------------------
 # Per-tier gate timeout
 # ---------------------------------------------------------------------------

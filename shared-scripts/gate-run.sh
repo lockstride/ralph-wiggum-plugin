@@ -486,6 +486,25 @@ _run_with_subtree_timeout() {
   return "$rc"
 }
 
+# 0.15.1: anchor gate execution at the workspace root. The ralph-guard.sh
+# [rewrite] chain-splitter can strip a load-bearing `cd <worktree>` prefix off
+# the agent's command, otherwise leaving the bare gate to run from the agent's
+# stray cwd (e.g. apps/api) where root-scoped commands like `pnpm <script>`
+# resolve the wrong package.json and fast-fail (observed in the field as
+# exit=254). Done here in the main body — NOT inside the timeout subshell — so
+# the wrapped command stays a single exec-optimized process and the 0.6.3
+# process-group subtree-kill still reaches it. Every log/breadcrumb path above
+# is absolute, so the cwd change cannot affect them. Guarded so it's a no-op
+# when $workspace can't be resolved; this is orthogonal to the gate-without-
+# write cache (enforced earlier by the PreToolUse hook) and cannot weaken any
+# forcing function.
+if [[ -d "$workspace" ]]; then
+  cd "$workspace" || {
+    echo "gate-run.sh: cannot cd to workspace '$workspace'" >&2
+    exit 126
+  }
+fi
+
 set +e
 _run_with_subtree_timeout "$gate_timeout" "$log_file" "$@"
 cmd_status=$?
