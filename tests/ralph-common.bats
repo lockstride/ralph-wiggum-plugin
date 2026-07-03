@@ -141,6 +141,16 @@ teardown() {
   echo "$output" | grep -q "^## Git hygiene"
 }
 
+@test "build_prompt Git hygiene forbids blanket git add (orphan-leak prevention)" {
+  # The explicit-path rule is the preventive half of the orphan-leak
+  # mechanism (_check_orphan_leak flags commits that swept up files via
+  # `git add .` / -A / <dir>). Assert the rule and its anti-pattern list.
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+  echo "$output" | grep -q "Stage by explicit path"
+  echo "$output" | grep -q "git add -A"
+}
+
 # --- 0.12.0: handoff injection + Gate Selection block ---
 
 @test "build_prompt injects handoff block when handoff.md exists (0.12.0)" {

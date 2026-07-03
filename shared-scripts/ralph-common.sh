@@ -502,6 +502,7 @@ alone — the plugin maintains them.
 
 ## Git hygiene
 
+- Stage by explicit path: \`git add <path> …\`. Never \`git add .\`, \`git add -A\`, or \`git add <dir>\` — a blanket add sweeps up files that were untracked at loop start and trips the orphan-leak check.
 - Never \`git add .ralph/\` — it is gitignored.
 - Never \`--amend\`, \`--force\`, or \`reset --hard\`. Fix mistakes with a new commit.
 $gate_block
