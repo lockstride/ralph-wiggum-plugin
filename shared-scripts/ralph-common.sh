@@ -733,6 +733,37 @@ _detect_graceful_yield() {
   return 0
 }
 
+# 0.15.4: Decide whether a natural-end loop is a "zero-progress bail" — i.e.
+# whether it should count toward the 3-strike natural-end stall threshold.
+#
+# The stall detector exists to catch an agent that is *silently bailing out*:
+# ending its turn loop after loop while moving nothing forward. Task-checkbox
+# delta alone is too blunt a progress signal for that: a loop can do real work
+# — most importantly, COMMIT a fix — without flipping a checkbox in the same
+# turn. The motivating case is the eval loop committing a fix whose validating
+# heavy gate (full/final) runs in the background (0.15.3) and outlasts the
+# turn; the box only flips a later loop once the gate confirms green. Counting
+# that committing loop as a zero-progress bail stalls a run that is genuinely
+# making progress.
+#
+# A loop is a zero-progress bail only when BOTH are true: no checkbox flipped
+# (task_delta == 0) AND no new commit landed (HEAD unchanged this loop). A new
+# commit is unambiguous forward motion, so it resets the stall count.
+#
+# Args: <task_delta> <pre_head> <post_head>. Returns 0 (true — is a bail) when
+# task_delta is 0 and the heads are unchanged. When git is unavailable (either
+# head empty), falls back to the task_delta signal alone, preserving the
+# pre-0.15.4 behavior on non-git workspaces.
+_is_zero_progress_bail() {
+  local task_delta="$1" pre_head="$2" post_head="$3"
+  [[ "$task_delta" -ne 0 ]] && return 1
+  # A commit this loop (HEAD advanced) is progress, not a silent bail.
+  if [[ -n "$pre_head" && -n "$post_head" && "$pre_head" != "$post_head" ]]; then
+    return 1
+  fi
+  return 0
+}
+
 # 0.12.4: Auto-enrich handoff.md with mechanically-derivable state.
 #
 # Motivation: in practice, the agent rarely writes a "Working set" section
@@ -1720,6 +1751,12 @@ run_ralph_loop() {
     local pre_total=${pre_counts##*:}
     local pre_remaining=$((pre_total - pre_done))
 
+    # 0.15.4: snapshot HEAD at loop start so the natural-end stall detector can
+    # tell a committing loop (real progress) from a silent bail. Empty on a
+    # non-git workspace — _is_zero_progress_bail falls back to task delta then.
+    local pre_head
+    pre_head=$(cd "$workspace" && git rev-parse HEAD 2>/dev/null) || pre_head=""
+
     local loop_label
     loop_label=$(_fmt_iter "$loop_n" "$retry")
 
@@ -1976,7 +2013,14 @@ run_ralph_loop() {
         natural_end_count=$((natural_end_count + 1))
         if [[ "$task_status" == INCOMPLETE:* ]]; then
           local remaining_count=${task_status#INCOMPLETE:}
-          if [[ "$task_delta" -eq 0 ]]; then
+          # 0.15.4: a loop that committed code (HEAD advanced) made forward
+          # progress even with zero checkbox delta — e.g. an eval loop that
+          # committed a fix whose backgrounded full/final gate hasn't confirmed
+          # green yet. Only a loop that flipped no box AND landed no commit is a
+          # true silent bail toward the stall threshold.
+          local post_head
+          post_head=$(cd "$workspace" && git rev-parse HEAD 2>/dev/null) || post_head=""
+          if _is_zero_progress_bail "$task_delta" "$pre_head" "$post_head"; then
             zero_progress_count=$((zero_progress_count + 1))
           else
             zero_progress_count=0

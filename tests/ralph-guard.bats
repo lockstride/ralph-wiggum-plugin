@@ -1076,3 +1076,70 @@ EOF
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh full pnpm all-check")'
 }
+
+# --- Blanket git-add denial (0.15.4) ---
+
+@test "blocks blanket git add -A (0.15.4)" {
+  run _run_guard Bash "git add -A"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Blanket")'
+}
+
+@test "blocks git add . (0.15.4)" {
+  run _run_guard Bash "git add ."
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "blocks git add --all (0.15.4)" {
+  run _run_guard Bash "git add --all"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "blocks git add -A chained before a commit (0.15.4)" {
+  run _run_guard Bash "git add -A && git commit -m 'wip'"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "allows git add with explicit paths (0.15.4)" {
+  run _run_guard Bash "git add src/foo.ts apps/api/main.ts"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "allows git add -u (tracked modifications only) (0.15.4)" {
+  run _run_guard Bash "git add -u"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "allows git commit -am (tracked-only, not a blanket add) (0.15.4)" {
+  run _run_guard Bash "git commit -am 'wip'"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+# --- last-write-ts records only code writes, not .ralph/ state (0.15.4) ---
+
+@test "Write to allowlisted .ralph/ state file does not bump last-write-ts (0.15.4)" {
+  rm -f "$STATE_DIR/last-write-ts"
+  # acceptance-report.md is allowlisted; writing it is loop bookkeeping, not a
+  # code change, so it must not invalidate the per-label gate cache.
+  _run_guard Write "$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+  [ ! -f "$STATE_DIR/last-write-ts" ]
+}
+
+@test "Write to a code file bumps last-write-ts (0.15.4)" {
+  rm -f "$STATE_DIR/last-write-ts"
+  _run_guard Write "$MOCK_WORKSPACE/apps/api/src/app.ts"
+  [ -f "$STATE_DIR/last-write-ts" ]
+}

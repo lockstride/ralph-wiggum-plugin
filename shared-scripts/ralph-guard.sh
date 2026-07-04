@@ -635,6 +635,22 @@ _guard_bash() {
     fi
   fi
 
+  # --- Blanket git-add denial (0.15.4) ---
+  # `git add .` / `-A` / `--all` stage files that were untracked at loop start,
+  # committing orphans unrelated to the current task and tripping the
+  # orphan-leak detector. The framing prompt already asks for explicit-path
+  # staging (0.15.2), but a prompt rule alone did not stop it in practice, so
+  # make it enforceable. Deny only the blanket forms: explicit paths
+  # (`git add src/foo.ts`), `git add -u`/`--update` (tracked modifications
+  # only — no untracked files), and `git commit -a` (also tracked-only) are
+  # untouched. Matches the canonical head command, so a leading `git add -A`
+  # or `git add -A && git commit` is caught while a commit *message* mentioning
+  # "git add -A" is not.
+  if echo "$canonical" | grep -qE '^(exec )?git[[:space:]]+add([[:space:]]|$)' &&
+    echo "$canonical" | grep -qE '(^|[[:space:]])(-A|--all|\.)([[:space:]]|$)'; then
+    _block "Blanket 'git add' denied — 'git add .', '-A', and '--all' sweep up files that were untracked at loop start, committing orphans unrelated to this task and tripping the orphan-leak detector. Stage by explicit path instead: git add <path> [<path>…] (run 'git status' first to see exactly what you'd add). To stage only tracked modifications, 'git add -u' is fine."
+  fi
+
   # --- Command-policy enforcement ---
   # .ralph/command-policy: [gates] [rewrite] [deny] [wrap] [protect].
   _enforce_command_policy "$cmd" "$canonical"
@@ -753,7 +769,17 @@ _guard_write() {
   fi
 
   # --- Record WRITE event ---
-  _write_ts "$LAST_WRITE_TS"
+  # last-write-ts invalidates the per-label gate cache: a gate stays cached
+  # until the agent writes code. Only *code/artifact* writes should count.
+  # Writes that reach here under .ralph/ are the allowlisted loop bookkeeping
+  # files (handoff/errors/guardrails/diagnosis/progress/acceptance-report) —
+  # everything else under .ralph/ was denied above. Bumping the cache for
+  # those is a false "code changed" signal: in the eval loop it let the
+  # agent's own acceptance-report edits re-open the expensive final gate with
+  # no underlying code change (0.15.4). Skip the bump for .ralph/ state files.
+  if [[ "$rel_path" != .ralph/* ]]; then
+    _write_ts "$LAST_WRITE_TS"
+  fi
 }
 
 # ---------------------------------------------------------------------------

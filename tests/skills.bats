@@ -155,3 +155,17 @@ _all_skills() {
   grep -qiE "hand-construct|hand-forg|hand-writ" "$skill_md" \
     || { echo "rework skill missing the do-not-hand-forge-breadcrumbs prohibition (0.14.11)" >&2; return 1; }
 }
+
+@test "addressing-acceptance-gaps marks infra-only gaps blocked instead of spinning the heavy gate (0.15.4)" {
+  local skill_md="$SKILLS_DIR/addressing-acceptance-gaps/SKILL.md"
+  [ -f "$skill_md" ]
+  # Anti-spin: don't re-run an unconfirmable heavy gate loop after loop.
+  grep -qiE "do not re-run the same heavy gate|Spinning on an unconfirmable heavy gate" "$skill_md" \
+    || { echo "rework skill missing the anti-spin (don't re-run the heavy gate) guidance" >&2; return 1; }
+  # Heavy final gate runs backgrounded; read the verdict from the breadcrumb.
+  grep -qE "run_in_background" "$skill_md" \
+    || { echo "rework skill missing background-the-heavy-gate guidance (0.15.3/0.15.4)" >&2; return 1; }
+  # An infra/orchestration failure that isn't feature code is a legit block reason.
+  grep -qiE "infra/orchestration failure surfaced by the gate" "$skill_md" \
+    || { echo "rework skill missing the infra/orchestration block-reason (0.15.4)" >&2; return 1; }
+}

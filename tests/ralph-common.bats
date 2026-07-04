@@ -1189,3 +1189,30 @@ TASKS
   rm -rf "$MOCK_WORKSPACE/.ralph/gates"
   _check_orphaned_gates "$MOCK_WORKSPACE"
 }
+
+# --- _is_zero_progress_bail — natural-end stall accounting (0.15.4) ---
+
+@test "_is_zero_progress_bail: zero task delta + unchanged HEAD → bail (0.15.4)" {
+  # No checkbox flipped and no commit: a genuine silent bail.
+  _is_zero_progress_bail 0 abc123 abc123
+}
+
+@test "_is_zero_progress_bail: zero task delta + new commit → NOT a bail (0.15.4)" {
+  # Committed a fix this loop (HEAD advanced) even though no box flipped —
+  # e.g. an eval loop whose validating heavy gate is still backgrounded.
+  run _is_zero_progress_bail 0 abc123 def456
+  [ "$status" -eq 1 ]
+}
+
+@test "_is_zero_progress_bail: positive task delta → NOT a bail (0.15.4)" {
+  run _is_zero_progress_bail 2 abc123 abc123
+  [ "$status" -eq 1 ]
+}
+
+@test "_is_zero_progress_bail: git unavailable (empty heads) falls back to task delta (0.15.4)" {
+  # Non-git workspace: preserve pre-0.15.4 behavior — zero delta is a bail...
+  _is_zero_progress_bail 0 "" ""
+  # ...and any positive delta is not.
+  run _is_zero_progress_bail 1 "" ""
+  [ "$status" -eq 1 ]
+}
