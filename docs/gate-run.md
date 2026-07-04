@@ -185,17 +185,22 @@ Re-reading a green gate log is the second-most common waste pattern (after blind
 
 ### 4. The exit-code breadcrumb is for automation, not agents.
 
-`.ralph/gates/<label>-latest.exit` is a single-decimal breadcrumb. The impl-loop completion guard (`_complete_allowed` in `ralph-common.sh`) reads `full-latest.exit` to refuse `<promise>ALL_TASKS_DONE</promise>` when the impl-loop's `full`-tier gate is red. For a **foreground** gate it is not something an agent needs to `cat` or `Read` — the summary line `exit=<N>` is the same fact in a more readable form. The exception is a **backgrounded** heavy gate (see §6): its inline summary is never surfaced to you, so the `.exit` breadcrumb (or the `exit=<N>` line inside `<label>-latest.log`) is exactly how you read its verdict.
+`.ralph/gates/<label>-latest.exit` is a single-decimal breadcrumb. The impl-loop completion guard (`_complete_allowed` in `ralph-common.sh`) reads `full-latest.exit` to refuse `<promise>ALL_TASKS_DONE</promise>` when the impl-loop's `full`-tier gate is red. It is not something an agent normally needs to `cat` or `Read` — the waiter's summary line `exit=<N>` is the same fact in a more readable form. It matters when a verdict lands after your waiter call returned 75 (see §6): the breadcrumb is how the joining re-run — or the next loop — reads it. It is written on **every** outcome, including the runner being signalled (143).
 
 ### 5. Failure summary (0.12.0).
 
 On failure, gate-run also writes `.ralph/gates/<label>-latest.summary` — a small structured digest (failure-signature lines + any `coverage_gaps` block found in the log). `stream-parser` copies this into the `## Last gate state` section of `.ralph/handoff.md`, which the next loop's framing prompt inlines automatically. You don't need to read the summary file directly — it's delivered to you in the next prompt. On a passing gate the summary file is removed so it doesn't go stale.
 
-### 6. Heavy gates (`full`, `final`) run in the background.
+### 6. Every gate runs detached; your call is a waiter (0.16.0).
 
-`full` and `final` gates routinely run 10+ minutes — longer than a single foreground shell call survives. Run one in the foreground and the shell timeout kills it mid-run; the breadcrumb records `130` (SIGINT), which is indistinguishable from a real gate failure and is the classic trigger for a pointless re-run spiral.
+gate-run.sh does not execute the gate inside your shell call. The launcher detaches a **runner** into its own session — immune to tool-call timeouts, subagent-return reaps, tmux kills, and loop rotations — then waits up to `RALPH_GATE_WAIT` (default 570 s) for the verdict:
 
-Launch heavy gates with the Bash tool's background mode (`run_in_background: true`) so the call returns immediately and the gate keeps running. Read the verdict from `.ralph/gates/<label>-latest.exit`: it is absent until the gate finishes, and once present its single decimal is the real exit code (open `<label>-latest.log` only when that code is non-zero). Do not run a heavy gate in the foreground, and do not block a foreground call in a wait loop polling the breadcrumb — that reintroduces the very timeout kill you are avoiding. `basic` and the kind labels are fast and run in the foreground as normal.
+- **Verdict lands in time** → the call prints the usual summary and exits with the real code. Gates faster than the budget are indistinguishable from foreground execution.
+- **Budget elapses** → the call prints `STILL RUNNING` and exits **75**. Re-run the exact same command: it **joins** the in-flight gate (the per-label lock guarantees it never double-runs). Repeat until the verdict prints.
+- **Runner died without a verdict** (hard kill, crash) → exit **70**; the lock is cleaned; re-run once to relaunch fresh.
+- **Runner signalled** (TERM/INT/HUP) → breadcrumb **143**, distinguishable from a real gate failure.
+
+Call gates in the foreground with a generous tool timeout (600000 ms). Never use `run_in_background` or a Monitor for a gate, and never end a turn to "let it finish" — the gate survives regardless, and the 75/join protocol is the sanctioned wait. The exit-130 false-failure class this replaces is structurally gone: a killed waiter writes nothing; only the runner writes verdicts.
 
 ## Integration notes
 

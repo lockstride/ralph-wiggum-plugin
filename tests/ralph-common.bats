@@ -92,21 +92,27 @@ teardown() {
   echo "$output" | grep -qiE "do not pipe|never pipe"
 }
 
-@test "build_prompt Gate Runner tells agents to background heavy gates and poll the exit breadcrumb (0.15.3)" {
-  # The exit-130 churn fix: heavy gates (full/final) must be launched in the
-  # background and their verdict read from the per-label .exit breadcrumb,
-  # never run in a foreground shell call that the tool timeout kills mid-run.
+@test "build_prompt Gate Runner: foreground waiter + exit-75 join protocol (0.16.0)" {
+  # Gates run detached (the runner survives the caller); the agent's call
+  # is a foreground waiter. 75 means still-running — re-run the SAME
+  # command to join. Backgrounding a gate call is explicitly forbidden
+  # (a subagent's background tasks are reaped on return — the 0.15.3
+  # guidance died exactly that way in the field).
   local output
   output=$(build_prompt "$MOCK_WORKSPACE" 1)
 
-  # Background-launch instruction + the tool mechanism named.
-  echo "$output" | grep -qiE "background"
+  # Foreground instruction with a generous tool timeout.
+  echo "$output" | grep -qiE "foreground"
+  echo "$output" | grep -q "600000"
+  # The 75/join continuation protocol.
+  echo "$output" | grep -q "75"
+  echo "$output" | grep -qiE "join"
+  # Backgrounding is named and forbidden (assertions are single-line —
+  # the prohibition clause wraps across lines in the heredoc).
   echo "$output" | grep -q "run_in_background"
-  # The verdict is read from the per-label exit breadcrumb.
+  echo "$output" | grep -qiE "never a Monitor"
+  # The verdict breadcrumb is still named.
   echo "$output" | grep -qF ".ralph/gates/<label>-latest.exit"
-  # The foreground-timeout trap (exit 130) is called out so the agent does
-  # not misread it as a real gate failure.
-  echo "$output" | grep -q "130"
 }
 
 @test "build_prompt omits Gate Runner section when gate-run.sh is absent (0.3.6)" {
@@ -438,6 +444,17 @@ STALE
   printf 'mock all-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
   printf '0'              >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
   _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: in-flight detached full gate → block despite stale green (0.16.0)" {
+  # A detached gate is still running; the green breadcrumb on disk is from
+  # the PREVIOUS run and must not satisfy completion.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates/.full.lock"
+  echo $$ > "$MOCK_WORKSPACE/.ralph/gates/.full.lock/pid"
+  printf 'mock all-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '0'              >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [[ "$_COMPLETE_BLOCK_REASON" == *"still running"* ]]
 }
 
 @test "_complete_allowed: red full gate → block" {

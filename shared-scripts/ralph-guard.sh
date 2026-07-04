@@ -721,7 +721,26 @@ _guard_bash() {
     last_write=$(_read_ts "$LAST_WRITE_TS")
     last_gate=$(_read_ts "$last_gate_ts_file")
 
-    if [[ "$last_gate" -gt 0 ]] && [[ "$last_gate" -ge "$last_write" ]]; then
+    # 0.16.0: gates run detached; the exit-75 protocol makes re-running the
+    # same command the CONTINUATION mechanism, not a wasteful repeat. Two
+    # cases must pass the per-label cache:
+    #   1. A live runner holds the label lock → this invocation joins the
+    #      in-flight gate (gate-run.sh serializes; it never double-runs).
+    #   2. No verdict landed at/after the last recorded invocation → that
+    #      run died without a breadcrumb; a relaunch is legitimate.
+    local _inflight=0 _gate_lock="$WORKSPACE/.ralph/gates/.${label}.lock"
+    if [[ -d "$_gate_lock" ]]; then
+      local _gl_pid
+      _gl_pid=$(cat "$_gate_lock/pid" 2>/dev/null || echo "")
+      [[ "$_gl_pid" =~ ^[0-9]+$ ]] && kill -0 "$_gl_pid" 2>/dev/null && _inflight=1
+    fi
+    local _verdict_ts=0 _gate_exit_f="$WORKSPACE/.ralph/gates/${label}-latest.exit"
+    if [[ -f "$_gate_exit_f" ]]; then
+      _verdict_ts=$(stat -f '%m' "$_gate_exit_f" 2>/dev/null || stat -c '%Y' "$_gate_exit_f" 2>/dev/null || echo 0)
+    fi
+
+    if [[ $_inflight -eq 0 ]] && [[ "$_verdict_ts" -ge "$last_gate" ]] &&
+      [[ "$last_gate" -gt 0 ]] && [[ "$last_gate" -ge "$last_write" ]]; then
       _block "Gate '${label}' already ran since last code write — output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: edit code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose. (Other gate labels can still run — this cache is per-label.)"
     fi
 

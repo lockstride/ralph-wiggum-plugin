@@ -490,3 +490,91 @@ exit 1' || true
     ! -name "basic-latest.log" -type f | wc -l | tr -d ' ')
   [ "$count" -eq 2 ]
 }
+
+# -----------------------------------------------------------------------------
+# 0.16.0: detached-runner architecture
+# -----------------------------------------------------------------------------
+# The gate executes in a runner detached into its own session (reparented
+# to init from birth). The invoking call is only a waiter: nothing that
+# kills it — tool timeout, subagent-return reap, tmux exit — can reach the
+# gate, and a verdict breadcrumb is written on every runner outcome.
+
+@test "waiter returns 75 while the gate still runs; verdict lands on its own (0.16.0)" {
+  RALPH_GATE_WAIT=1 run bash "$SCRIPTS_DIR/gate-run.sh" basic bash -c 'sleep 4; exit 0'
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"STILL RUNNING"* ]]
+  # The runner outlives this call and lands the verdict by itself.
+  local i=0
+  until [ -f "$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit" ] || [ $i -ge 15 ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit")" = "0" ]
+}
+
+@test "re-running the same command joins the in-flight gate — no double-run (0.16.0)" {
+  RALPH_GATE_WAIT=0 run bash "$SCRIPTS_DIR/gate-run.sh" basic bash -c 'sleep 3; exit 7'
+  [ "$status" -eq 75 ]
+  RALPH_GATE_WAIT=20 run bash "$SCRIPTS_DIR/gate-run.sh" basic bash -c 'sleep 3; exit 7'
+  [ "$status" -eq 7 ]
+  [[ "$output" == *"joining in-flight"* ]]
+  # Exactly one run happened: one timestamped log.
+  local count
+  count=$(find "$MOCK_WORKSPACE/.ralph/gates" -name "basic-*.log" \
+    ! -name "basic-latest.log" -type f | wc -l | tr -d ' ')
+  [ "$count" -eq 1 ]
+}
+
+@test "a different command under a live label lock is refused with 75 (0.16.0)" {
+  RALPH_GATE_WAIT=0 run bash "$SCRIPTS_DIR/gate-run.sh" basic bash -c 'sleep 5; exit 0'
+  [ "$status" -eq 75 ]
+  RALPH_GATE_WAIT=5 run bash "$SCRIPTS_DIR/gate-run.sh" basic echo other-command
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"DIFFERENT command"* ]]
+  # Cleanup: stop the in-flight runner.
+  kill -TERM "$(cat "$MOCK_WORKSPACE/.ralph/gates/.basic.lock/pid" 2>/dev/null)" 2>/dev/null || true
+  sleep 1
+}
+
+@test "runner TERM writes a 143 breadcrumb, logs GATE end, releases the lock (0.16.0)" {
+  RALPH_GATE_WAIT=0 RALPH_GATE_KILL_GRACE=1 run bash "$SCRIPTS_DIR/gate-run.sh" e2e bash -c 'sleep 30'
+  [ "$status" -eq 75 ]
+  local rpid
+  rpid=$(cat "$MOCK_WORKSPACE/.ralph/gates/.e2e.lock/pid")
+  kill -TERM "$rpid"
+  local i=0
+  until [ -f "$MOCK_WORKSPACE/.ralph/gates/e2e-latest.exit" ] || [ $i -ge 15 ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gates/e2e-latest.exit")" = "143" ]
+  [ ! -d "$MOCK_WORKSPACE/.ralph/gates/.e2e.lock" ]
+  grep -q "GATE end label=e2e exit=143" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "waiter detects a hard-killed runner: exit 70, lock cleaned (0.16.0)" {
+  RALPH_GATE_WAIT=0 run bash "$SCRIPTS_DIR/gate-run.sh" e2e bash -c 'sleep 30'
+  [ "$status" -eq 75 ]
+  local rpid
+  rpid=$(cat "$MOCK_WORKSPACE/.ralph/gates/.e2e.lock/pid")
+  (
+    sleep 2
+    kill -9 "$rpid"
+  ) &
+  RALPH_GATE_WAIT=20 run bash "$SCRIPTS_DIR/gate-run.sh" e2e bash -c 'sleep 30'
+  wait
+  [ "$status" -eq 70 ]
+  [[ "$output" == *"RUNNER DIED"* ]]
+  [ ! -d "$MOCK_WORKSPACE/.ralph/gates/.e2e.lock" ]
+}
+
+@test "runner is detached from the launcher tree: ppid is init (0.16.0)" {
+  RALPH_GATE_WAIT=0 run bash "$SCRIPTS_DIR/gate-run.sh" unit bash -c 'sleep 5'
+  [ "$status" -eq 75 ]
+  local rpid
+  rpid=$(cat "$MOCK_WORKSPACE/.ralph/gates/.unit.lock/pid")
+  [ "$(ps -o ppid= -p "$rpid" | tr -d ' ')" = "1" ]
+  # Cleanup: stop the in-flight runner.
+  kill -TERM "$rpid" 2>/dev/null || true
+  sleep 1
+}

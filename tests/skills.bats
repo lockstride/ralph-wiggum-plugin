@@ -162,9 +162,12 @@ _all_skills() {
   # Anti-spin: don't re-run an unconfirmable heavy gate loop after loop.
   grep -qiE "do not re-run the same heavy gate|Spinning on an unconfirmable heavy gate" "$skill_md" \
     || { echo "rework skill missing the anti-spin (don't re-run the heavy gate) guidance" >&2; return 1; }
-  # Heavy final gate runs backgrounded; read the verdict from the breadcrumb.
-  grep -qE "run_in_background" "$skill_md" \
-    || { echo "rework skill missing background-the-heavy-gate guidance (0.15.3/0.15.4)" >&2; return 1; }
+  # Heavy final gate runs via the detached harness: foreground waiter call,
+  # exit-75 → re-run joins the in-flight gate (0.16.0).
+  grep -qiE "foreground" "$skill_md" \
+    || { echo "rework skill missing the foreground-waiter gate guidance (0.16.0)" >&2; return 1; }
+  grep -qiE "joins the in-flight" "$skill_md" \
+    || { echo "rework skill missing the exit-75 join-the-in-flight-gate protocol (0.16.0)" >&2; return 1; }
   # An infra/orchestration failure that isn't feature code is a legit block reason.
   grep -qiE "infra/orchestration failure surfaced by the gate" "$skill_md" \
     || { echo "rework skill missing the infra/orchestration block-reason (0.15.4)" >&2; return 1; }

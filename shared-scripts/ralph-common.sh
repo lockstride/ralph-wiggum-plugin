@@ -417,17 +417,16 @@ Do not pipe or tail the output — the wrapper already bounds it. Labels:
 \`basic\` \`full\` \`final\` \`unit\` \`integration\` \`e2e\` \`lint\` \`format\`. On
 failure, read the log + any Cypress/Playwright screenshots before re-running.
 
-Heavy gates (\`full\` and \`final\`) can run 10+ minutes — longer than one
-foreground shell call survives. Launch them in the BACKGROUND (Bash tool
-\`run_in_background: true\`) so the call returns at once and the gate keeps
-running, then read \`.ralph/gates/<label>-latest.exit\` for the verdict: that
-breadcrumb is absent until the gate finishes, and once it appears its single
-number IS the real exit code (open the matching \`.log\` only when it is
-non-zero). Never run a heavy gate in the foreground and never sit in a
-foreground wait loop — both get killed by the shell timeout mid-run and
-recorded as exit 130, a false failure that triggers a pointless re-run
-spiral. \`basic\` and the kind labels (unit/integration/e2e/lint/format) are
-fast — run those in the foreground.
+Gates finish reliably no matter what happens to your call: gate-run.sh
+detaches the gate into its own session, waits in-call for the verdict, and
+always leaves it in \`.ralph/gates/<label>-latest.exit\`. Run EVERY gate in
+the foreground with a generous tool timeout (600000 ms) — never
+\`run_in_background\`, never a Monitor, never end your turn to "let it
+finish". If it prints STILL RUNNING (exit 75), immediately re-run the exact
+same command — that JOINS the in-flight gate and keeps waiting (the
+per-label lock guarantees it never double-runs); repeat until a verdict
+prints. Exit 70 means the runner died without a verdict — re-run once to
+relaunch it fresh.
 GATE_EOF
     )
   fi
@@ -595,7 +594,7 @@ _capture_loop_baseline() {
 # release the dead lock so the next loop's first gate of that label starts
 # immediately instead of waiting out the stale-lock steal path. Conservative:
 # only locks whose holder PID is verifiably dead are touched — an alive
-# holder may be a backgrounded gate legitimately finishing up.
+# holder may be a detached gate legitimately finishing up.
 _check_orphaned_gates() {
   local workspace="$1"
   local gates_dir="$workspace/.ralph/gates"
@@ -1633,6 +1632,23 @@ _complete_allowed() {
     return 1
   fi
 
+  # 0.16.0: gates run detached — one may still be IN FLIGHT right now, and a
+  # stale green breadcrumb from the PREVIOUS run must not satisfy completion
+  # while the current run is undecided. The elapsed seconds are embedded in
+  # the reason so consecutive blocks read as distinct to the same-reason
+  # escalation (waiting out a long gate is transient, not an unsatisfiable
+  # bar).
+  local _lock_dir="$workspace/.ralph/gates/.${label}.lock"
+  if [[ -d "$_lock_dir" ]]; then
+    local _hpid _lock_age
+    _hpid=$(cat "$_lock_dir/pid" 2>/dev/null || echo "")
+    if [[ "$_hpid" =~ ^[0-9]+$ ]] && kill -0 "$_hpid" 2>/dev/null; then
+      _lock_age=$(($(date +%s) - $(stat -f '%m' "$_lock_dir" 2>/dev/null || stat -c '%Y' "$_lock_dir" 2>/dev/null || echo 0)))
+      _COMPLETE_BLOCK_REASON="${label} gate is still running (detached runner pid=${_hpid}, ${_lock_age}s elapsed) — wait for its verdict"
+      return 1
+    fi
+  fi
+
   if [[ ! -f "$cmd_file" ]]; then
     _COMPLETE_BLOCK_REASON="${label} gate \"$pinned_gate\" has not run yet"
     return 1
@@ -2015,7 +2031,7 @@ run_ralph_loop() {
           local remaining_count=${task_status#INCOMPLETE:}
           # 0.15.4: a loop that committed code (HEAD advanced) made forward
           # progress even with zero checkbox delta — e.g. an eval loop that
-          # committed a fix whose backgrounded full/final gate hasn't confirmed
+          # committed a fix whose detached full/final gate hasn't confirmed
           # green yet. Only a loop that flipped no box AND landed no commit is a
           # true silent bail toward the stall threshold.
           local post_head

@@ -195,6 +195,9 @@ _run_guard() {
 @test "blocks gate re-run with no write since last same-label gate (0.13.1)" {
   echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.basic"
   echo "0" > "$STATE_DIR/last-write-ts"
+  # 0.16.0: the cache only blocks COMPLETED runs — land a verdict for it.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf '1' > "$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
   run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
@@ -237,10 +240,60 @@ _run_guard() {
 @test "deny message names the specific label that was cached (0.13.1)" {
   echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.final"
   echo "0" > "$STATE_DIR/last-write-ts"
+  # 0.16.0: the cache only blocks COMPLETED runs — land a verdict for it.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf '0' > "$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
   run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh final pnpm all-check"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
   echo "$output" | jq -e ".hookSpecificOutput.permissionDecisionReason | test(\"Gate 'final'\")"
+}
+
+# --- 0.16.0: exit-75 continuation vs the per-label gate cache ---
+# Gates run detached; re-running the same command is the CONTINUATION
+# mechanism (join the in-flight gate / relaunch a died one), so the cache
+# must only block re-runs of runs that actually landed a verdict.
+
+@test "gate-cache: allows re-run while a live runner holds the label lock (0.16.0)" {
+  echo "0" > "$STATE_DIR/last-write-ts"
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.final"
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates/.final.lock"
+  echo $$ > "$MOCK_WORKSPACE/.ralph/gates/.final.lock/pid"
+  # Even with a fresh verdict on disk, a live lock means this re-run JOINS.
+  printf '0' > "$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh final pnpm all-check"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "gate-cache: allows relaunch when the prior invocation never landed a verdict (0.16.0)" {
+  echo "0" > "$STATE_DIR/last-write-ts"
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.final"
+  # No lock and no verdict → the recorded run died silently (hard kill).
+  rm -rf "$MOCK_WORKSPACE/.ralph/gates/.final.lock"
+  rm -f "$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh final pnpm all-check"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "gate-cache: stale verdict older than the invocation stamp does not block (0.16.0)" {
+  # A verdict exists but predates the last invocation — that run died.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf '124' > "$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  touch -t "$(date -v-1H '+%Y%m%d%H%M' 2>/dev/null || date -d '1 hour ago' '+%Y%m%d%H%M')" \
+    "$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.final"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh final pnpm all-check"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
 }
 
 # --- Diagnostic reads referencing gate-run.sh (0.14.2) ---
@@ -298,6 +351,9 @@ _run_guard() {
 @test "still blocks actual gate invocation via bash gate-run.sh (0.14.2)" {
   echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.basic"
   echo "0" > "$STATE_DIR/last-write-ts"
+  # 0.16.0: the cache only blocks COMPLETED runs — land a verdict for it.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf '1' > "$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
   run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
