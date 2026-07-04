@@ -185,11 +185,17 @@ Re-reading a green gate log is the second-most common waste pattern (after blind
 
 ### 4. The exit-code breadcrumb is for automation, not agents.
 
-`.ralph/gates/<label>-latest.exit` is a single-decimal breadcrumb. The impl-loop completion guard (`_complete_allowed` in `ralph-common.sh`) reads `full-latest.exit` to refuse `<promise>ALL_TASKS_DONE</promise>` when the impl-loop's `full`-tier gate is red. It is not something an agent needs to `cat` or `Read` — the summary line `exit=<N>` is the same fact in a more readable form.
+`.ralph/gates/<label>-latest.exit` is a single-decimal breadcrumb. The impl-loop completion guard (`_complete_allowed` in `ralph-common.sh`) reads `full-latest.exit` to refuse `<promise>ALL_TASKS_DONE</promise>` when the impl-loop's `full`-tier gate is red. For a **foreground** gate it is not something an agent needs to `cat` or `Read` — the summary line `exit=<N>` is the same fact in a more readable form. The exception is a **backgrounded** heavy gate (see §6): its inline summary is never surfaced to you, so the `.exit` breadcrumb (or the `exit=<N>` line inside `<label>-latest.log`) is exactly how you read its verdict.
 
 ### 5. Failure summary (0.12.0).
 
 On failure, gate-run also writes `.ralph/gates/<label>-latest.summary` — a small structured digest (failure-signature lines + any `coverage_gaps` block found in the log). `stream-parser` copies this into the `## Last gate state` section of `.ralph/handoff.md`, which the next loop's framing prompt inlines automatically. You don't need to read the summary file directly — it's delivered to you in the next prompt. On a passing gate the summary file is removed so it doesn't go stale.
+
+### 6. Heavy gates (`full`, `final`) run in the background.
+
+`full` and `final` gates routinely run 10+ minutes — longer than a single foreground shell call survives. Run one in the foreground and the shell timeout kills it mid-run; the breadcrumb records `130` (SIGINT), which is indistinguishable from a real gate failure and is the classic trigger for a pointless re-run spiral.
+
+Launch heavy gates with the Bash tool's background mode (`run_in_background: true`) so the call returns immediately and the gate keeps running. Read the verdict from `.ralph/gates/<label>-latest.exit`: it is absent until the gate finishes, and once present its single decimal is the real exit code (open `<label>-latest.log` only when that code is non-zero). Do not run a heavy gate in the foreground, and do not block a foreground call in a wait loop polling the breadcrumb — that reintroduces the very timeout kill you are avoiding. `basic` and the kind labels are fast and run in the foreground as normal.
 
 ## Integration notes
 

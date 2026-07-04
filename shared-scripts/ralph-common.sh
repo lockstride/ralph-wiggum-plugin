@@ -416,6 +416,18 @@ captures \`.ralph/gates/<label>-latest.log\` / \`.exit\` / \`.summary\` for you.
 Do not pipe or tail the output — the wrapper already bounds it. Labels:
 \`basic\` \`full\` \`final\` \`unit\` \`integration\` \`e2e\` \`lint\` \`format\`. On
 failure, read the log + any Cypress/Playwright screenshots before re-running.
+
+Heavy gates (\`full\` and \`final\`) can run 10+ minutes — longer than one
+foreground shell call survives. Launch them in the BACKGROUND (Bash tool
+\`run_in_background: true\`) so the call returns at once and the gate keeps
+running, then read \`.ralph/gates/<label>-latest.exit\` for the verdict: that
+breadcrumb is absent until the gate finishes, and once it appears its single
+number IS the real exit code (open the matching \`.log\` only when it is
+non-zero). Never run a heavy gate in the foreground and never sit in a
+foreground wait loop — both get killed by the shell timeout mid-run and
+recorded as exit 130, a false failure that triggers a pointless re-run
+spiral. \`basic\` and the kind labels (unit/integration/e2e/lint/format) are
+fast — run those in the foreground.
 GATE_EOF
     )
   fi
@@ -448,7 +460,9 @@ Run \`$_basic_cmd\` by default after each task. Only run \`$_full_cmd\`
 when the current task line is marked \`[risky]\` in tasks.md. After a
 \`[risky]\` task or at the end of the loop, one \`$_full_cmd\` is sufficient
 — do not re-run to "double-check" green gates. The completion guard requires
-a green \`$_full_cmd\` under label \`full\` before \`ALL_TASKS_DONE\`.
+a green \`$_full_cmd\` under label \`full\` before \`ALL_TASKS_DONE\`; launch
+that gate in the background and read \`.ralph/gates/full-latest.exit\` (see
+Gate Runner), not a blocking foreground call.
 
 When a gate fails, the failure summary appears under \`## Last gate state\` in
 the handoff block above. Read it before editing. To rerun just the failing

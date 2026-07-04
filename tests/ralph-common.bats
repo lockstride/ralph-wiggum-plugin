@@ -92,6 +92,23 @@ teardown() {
   echo "$output" | grep -qiE "do not pipe|never pipe"
 }
 
+@test "build_prompt Gate Runner tells agents to background heavy gates and poll the exit breadcrumb (0.15.3)" {
+  # The exit-130 churn fix: heavy gates (full/final) must be launched in the
+  # background and their verdict read from the per-label .exit breadcrumb,
+  # never run in a foreground shell call that the tool timeout kills mid-run.
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+
+  # Background-launch instruction + the tool mechanism named.
+  echo "$output" | grep -qiE "background"
+  echo "$output" | grep -q "run_in_background"
+  # The verdict is read from the per-label exit breadcrumb.
+  echo "$output" | grep -qF ".ralph/gates/<label>-latest.exit"
+  # The foreground-timeout trap (exit 130) is called out so the agent does
+  # not misread it as a real gate failure.
+  echo "$output" | grep -q "130"
+}
+
 @test "build_prompt omits Gate Runner section when gate-run.sh is absent (0.3.6)" {
   # Simulate a degraded install where gate-run.sh is missing. The block
   # must not render (it would mislead the agent about a tool it can't call).
