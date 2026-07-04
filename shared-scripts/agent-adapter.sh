@@ -239,7 +239,22 @@ foreach (try inputs catch empty) as $e (
            bytes: ($txt | length),
            lines: (if ($info.name | IN("Read","Edit","Write","NotebookEdit","MultiEdit"))
                    then ($txt | split("\n") | length) else 0 end),
-           exit_code: (if .is_error then 1 else 0 end)}
+           exit_code: (
+             # 0.16.1: gate-run runs detached (0.16.0). Its waiter's transport
+             # exit — 75 (still-running) or 70 (runner died) — is NOT the gate
+             # verdict. Claude's stream-json exposes only is_error (a boolean),
+             # so a still-running 75 would flatten to 1 and be miscounted as a
+             # false SHELL FAIL feeding the GUTTER stuck-detector. For a gate-run
+             # invocation, recover the real verdict from gate-run's own
+             # `=== GATE <label> exit=<N>` marker and treat the transport states
+             # (still-running / launched / died) as non-failures (0). Every
+             # non-gate command keeps the is_error mapping unchanged.
+             if ($info.cmd | test("gate-run")) then
+               ([$txt | match("=== GATE [a-z0-9]+ exit=([0-9]+)"; "g")]) as $m
+               | if ($m | length) > 0 then ($m[-1].captures[0].string | tonumber)
+                 elif ($txt | test("STILL RUNNING|gate launched detached|RUNNER DIED")) then 0
+                 else (if .is_error then 1 else 0 end) end
+             else (if .is_error then 1 else 0 end) end)}
       else empty end
     )
   elif $e.type == "result" then
@@ -290,7 +305,12 @@ foreach (try inputs catch empty) as $e (
       ($e.tool_call.shellToolCall.args.command // "unknown") as $cmd
       | ($e.tool_call.shellToolCall.result.exitCode // 0) as $ec
       | (($e.tool_call.shellToolCall.result.stdout // "") + ($e.tool_call.shellToolCall.result.stderr // "")) as $o
-      | {kind:"tool_result", name:"Shell", cmd:$cmd, bytes:($o | length), exit_code:$ec}
+      # 0.16.1: cursor-agent exposes the real exitCode, so completed gate
+      # verdicts already flow through correctly. Only neutralize gate-run's
+      # waiter TRANSPORT codes (75 still-running / 70 died) so they are not
+      # counted as shell failures — mirrors the Claude-branch normalization.
+      | (if ($cmd | test("gate-run")) and (($ec == 75) or ($ec == 70)) then 0 else $ec end) as $ec2
+      | {kind:"tool_result", name:"Shell", cmd:$cmd, bytes:($o | length), exit_code:$ec2}
     else empty end
   elif $e.type == "result" then
     if $e.is_error == true then
