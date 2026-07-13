@@ -142,6 +142,14 @@ _all_skills() {
     || { echo "verifier skill missing freshness-of-gate-run requirement" >&2; return 1; }
   grep -qiE "hand-construct|hand-forg|hand-writ" "$skill_md" \
     || { echo "verifier skill missing the do-not-hand-forge-breadcrumbs prohibition (0.14.11)" >&2; return 1; }
+  # Heavy final gate runs via the detached harness: foreground waiter call,
+  # exit-75 → re-run joins the in-flight gate (0.16.0). Parity with the rework
+  # skill; without this the verifier fell back to the retired background+poll
+  # pattern (observed loop 114926).
+  grep -qiE "foreground" "$skill_md" \
+    || { echo "verifier skill missing the foreground-waiter gate guidance (0.16.0)" >&2; return 1; }
+  grep -qiE "joins the in-flight" "$skill_md" \
+    || { echo "verifier skill missing the exit-75 join-the-in-flight-gate protocol (0.16.0)" >&2; return 1; }
   # Regression guard: the v0.13.x eval-* labels must be gone.
   ! grep -qE "eval-final|eval-rework|eval-\*" "$skill_md" \
     || { echo "verifier skill still references retired eval-* labels" >&2; return 1; }
