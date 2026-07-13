@@ -4,14 +4,19 @@
 # Tests verify the hash-check + generation flow, caching behavior, and
 # fallback to the built-in template.
 #
-# Generation tests that call `claude -p` use RALPH_SKIP_GENERATION=1
-# and supply fixture prompts to avoid actual API calls in CI.
+# No test in this file may invoke the real `claude` CLI: generation is
+# non-deterministic (the output would need an evaluator to grade), costs
+# money, and makes the suite flaky. Two independent guards enforce that —
+# cache-hit / RALPH_SKIP_GENERATION=1 tests never enter the generation
+# branch, and setup() installs a deterministic `claude` stub on PATH so the
+# regeneration-attribution tests that DO enter it hit the stub, not the API.
 
 load test_helper
 
 setup() {
   create_mock_workspace
   create_mock_spec "test-spec"
+  stub_claude_cli
 
   # 0.14.0: resolve_prompt_spec reads [gates] from command-policy via
   # _load_gates_from_policy (in ralph-common.sh). Source that first so
@@ -53,6 +58,27 @@ teardown() {
 
   [ -f "$MOCK_WORKSPACE/.ralph/effective-prompt.md" ]
   [ ! -f "$MOCK_SPEC_DIR/ralph-prompt.md" ]
+}
+
+@test "checkbox-honesty rule: fallback template renders it, guide carries it (0.16.3)" {
+  # 0.16.3: a task whose verification the loop cannot execute in its
+  # environment must stay unchecked and be recorded as blocked — never
+  # marked [x]. Regression guard: a loop once checked off a design-review
+  # task that needed an external design tool it couldn't reach, masking a
+  # UI that shipped off-design behind a "complete" tasks.md.
+  local out
+  out=$(resolve_prompt "$MOCK_WORKSPACE" "spec" "test-spec")
+
+  local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  [ -f "$effective" ]
+  grep -q "A checked box claims you" "$effective"
+  grep -q "record it as blocked" "$effective"
+
+  # The adaptation guide must keep the rule (rule 11) AND the example
+  # per-task flow bullet, or regenerated ralph-prompt.md files lose it.
+  local guide="$TEMPLATES_DIR/speckit-adaptation-guide.md"
+  grep -q "never marked" "$guide"
+  grep -q "A checked box claims you" "$guide"
 }
 
 @test "uses cached prompt when hash matches" {
@@ -382,8 +408,10 @@ PROMPT
 # required and no stale prompt ever runs.
 #
 # Tests below use the activity-log breadcrumb to verify the right branch
-# was taken — the actual regeneration calls `claude -p` and is exercised
-# only in end-to-end tests.
+# was taken. These attribution log lines are emitted BEFORE generation runs,
+# so the assertions are what matters; the downstream regeneration call lands
+# on the deterministic `claude` stub installed by setup() (stub_claude_cli),
+# never the real CLI.
 # -----------------------------------------------------------------------------
 
 @test "guide-only change triggers auto-regen (0.6.2)" {

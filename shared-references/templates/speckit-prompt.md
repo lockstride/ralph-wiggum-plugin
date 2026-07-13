@@ -22,7 +22,11 @@ context rotation; you handle the work.
 2. For each unchecked task in phase order:
    - Read only files the task references; implement the minimum change.
    - Run the basic gate.
-   - Mark `[x]` only after the gate exits 0.
+   - Mark `[x]` only after the gate exits 0. A checked box claims you
+     verified the work — if you cannot execute a task's verification in
+     this environment (e.g. a visual review in an external design tool),
+     leave it unchecked, record it as blocked in the handoff and
+     `.ralph/errors.log`, and continue with the remaining tasks.
    - `git add <exact paths> && git commit -m "<type>(<scope>): <desc> (T###)"`. No agent footers. No `--amend`. {{PUSH_GUIDANCE}}
    - (The framing's `## After every commit` block governs what happens
      next — yield-if-breadcrumb OR read the next task.)

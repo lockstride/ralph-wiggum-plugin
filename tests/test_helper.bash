@@ -113,6 +113,39 @@ compute_composite_cache_hash() {
   fi
 }
 
+# Install a deterministic stub `claude` at the front of PATH so tests that
+# exercise the prompt-generation path (_generate_ralph_prompt) never invoke
+# the real CLI. Real invocations are non-deterministic (the generated prompt
+# would need an evaluator to grade), cost money, and make the suite flaky.
+# The stub ignores stdin/args and prints a fixed loop prompt that satisfies
+# the generator's validation (>= 10 lines, both breadcrumb strings present),
+# so generation "succeeds" the same way every run. Call it in setup() after
+# create_mock_workspace (it writes the stub inside MOCK_WORKSPACE).
+stub_claude_cli() {
+  local bindir="$MOCK_WORKSPACE/.mockbin"
+  mkdir -p "$bindir"
+  cat > "$bindir/claude" <<'STUB'
+#!/usr/bin/env bash
+# Deterministic test stub — see stub_claude_cli in test_helper.bash.
+# No network call; emits a canned loop prompt regardless of stdin/args.
+cat <<'PROMPT'
+# Spec Kit Implementation (Loop-Adapted)
+Deterministic test stub output — not a real generation.
+## Paths
+- Tasks: {{TASK_FILE}}
+## Per-task flow
+1. Read the tasks file.
+2. For each unchecked task:
+   - Implement the minimum change; run the basic gate; mark [x] only on exit 0.
+   - After every commit, check .ralph/stop-requested then .ralph/context-warning-active.
+   - If either exists, write the handoff and yield; do not start another task.
+3. Emit ALL_TASKS_DONE when every task passes.
+PROMPT
+STUB
+  chmod +x "$bindir/claude"
+  export PATH="$bindir:$PATH"
+}
+
 # Create a mock speckit-implement skill (alternate location)
 create_mock_speckit_implement_skill() {
   mkdir -p "$MOCK_WORKSPACE/.claude/skills/speckit-implement"

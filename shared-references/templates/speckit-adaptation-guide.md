@@ -57,6 +57,12 @@ and unattended execution. Stable across versions of speckit-implement.
     agent-identifying footers.
 11. **Add completion signal.** `<promise>ALL_TASKS_DONE</promise>`
     when all `[x]` AND the `full` gate passes (under label `full`).
+    Completion claims must cover only work the loop verified: the
+    per-task flow must say that a verification the agent cannot
+    execute in its environment is never marked `[x]` — the task stays
+    unchecked, recorded as blocked in the handoff and
+    `.ralph/errors.log`, and the agent continues with the remaining
+    tasks.
 12. **DO NOT enumerate the after-commit flow.** The framing prompt
     contains a `## After every commit` block with the three-bullet
     breadcrumb check (stop-requested → context-warning-active → next
@@ -126,7 +132,11 @@ context rotation and rate limits; you handle the work.
    - Read only the files the task references.
    - Implement the minimum change. TDD where applicable.
    - Run the basic gate.
-   - Mark `[x]` only after the gate exits 0.
+   - Mark `[x]` only after the gate exits 0. A checked box claims you
+     verified the work — if you cannot execute a task's verification in
+     this environment (e.g. a visual review in an external design tool),
+     leave it unchecked, record it as blocked in the handoff and
+     `.ralph/errors.log`, and continue with the remaining tasks.
    - Commit: `git add <exact paths> && git commit -m "<type>(<scope>): <description> (T###)"`.
    - (Framing's `## After every commit` block governs what's next.)
 3. When all `[x]` AND the full gate exits 0, emit
