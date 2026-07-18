@@ -86,6 +86,12 @@ The acceptance evaluator is a separate Ralph loop that runs *after* the main loo
 - `.ralph/acceptance-report.md` — the report the orchestrator maintains. Git-ignored. Copy out after the loop exits if you want a persistent audit trail.
 - `.ralph/eval-ground-truth` — breadcrumb recording which file served as ground truth for the last eval run.
 
+**Template overrides (0.17.0).** A consuming project can reroute the eval loop through its own orchestrator without forking the loop machinery:
+- `RALPH_EVAL_FRAMING_TEMPLATE` — replaces `templates/evaluator-framing.md`. Point it at a framing that invokes the project's own orchestrator skill (e.g. a ticket-based verify/rework flow). Rendered with `{{GROUND_TRUTH_PATH}}` and `{{REPORT_PATH}}`.
+- `RALPH_EVAL_REPORT_TEMPLATE` — replaces `templates/acceptance-report-template.md` as the `seed_report` source. Rendered with `{{GROUND_TRUTH_PATH}}` only. The seeded report must keep the checkbox contract: the loop's task-counter treats every `- [ ]` / `- [x]` line as completion state, and `RALPH_EVAL_LOOP=1` still requires a fresh green `final`-tier gate at COMPLETE.
+
+Both accept absolute paths or paths relative to the workspace root, and fail loudly when set but unreadable (no silent fallback to stock templates). Both are ordinary env vars, so they survive the `ralph-setup.sh --evaluate` chain into `ralph-evaluate.sh` when set in the launching environment.
+
 **Limitations.**
 - **Sub-agent support depends on the driving CLI** (above).
 - **UI verification requires Playwright MCP.** When the MCP server isn't installed, the verifier notes the limitation in the relevant gap rather than silently skipping UI requirements.

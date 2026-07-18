@@ -17,6 +17,7 @@ setup() {
 
 teardown() {
   rm -rf "$MOCK_WORKSPACE"
+  unset RALPH_EVAL_FRAMING_TEMPLATE RALPH_EVAL_REPORT_TEMPLATE
 }
 
 # -----------------------------------------------------------------------------
@@ -249,6 +250,108 @@ teardown() {
   # but each miss burns a loop — the framing now states completion keys on
   # the acceptance-report checkbox.
   grep -q "Do not signal COMPLETE directly" "$effective"
+}
+
+# -----------------------------------------------------------------------------
+# Template overrides (0.17.0)
+#
+# RALPH_EVAL_REPORT_TEMPLATE / RALPH_EVAL_FRAMING_TEMPLATE let a consuming
+# project reroute the eval loop through its own report shape and orchestrator
+# skill (e.g. a Linear ticket ledger) without forking the loop.
+# -----------------------------------------------------------------------------
+
+@test "seed_report: RALPH_EVAL_REPORT_TEMPLATE override is used and substituted (0.17.0)" {
+  FRESH=false
+  mkdir -p "$MOCK_WORKSPACE/custom"
+  cat > "$MOCK_WORKSPACE/custom/ledger.md" <<'TPL'
+# Ticket Ledger
+- [ ] All target tickets terminal
+**Ground truth:** {{GROUND_TRUTH_PATH}}
+TPL
+
+  # Workspace-relative path resolution.
+  export RALPH_EVAL_REPORT_TEMPLATE="custom/ledger.md"
+  seed_report "$MOCK_WORKSPACE" "$MOCK_WORKSPACE/plan.md"
+
+  local report="$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+  [ -f "$report" ]
+  grep -q "Ticket Ledger" "$report"
+  grep -q "$MOCK_WORKSPACE/plan.md" "$report"
+  ! grep -q '{{GROUND_TRUTH_PATH}}' "$report"
+  # Stock template content must NOT be present.
+  ! grep -q "Acceptance Report" "$report"
+}
+
+@test "seed_report: absolute-path RALPH_EVAL_REPORT_TEMPLATE is accepted (0.17.0)" {
+  FRESH=false
+  cat > "$MOCK_WORKSPACE/abs-ledger.md" <<'TPL'
+# Ledger (absolute)
+- [ ] top
+TPL
+
+  export RALPH_EVAL_REPORT_TEMPLATE="$MOCK_WORKSPACE/abs-ledger.md"
+  seed_report "$MOCK_WORKSPACE" "$MOCK_WORKSPACE/plan.md"
+  grep -q "Ledger (absolute)" "$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+}
+
+@test "seed_report: missing RALPH_EVAL_REPORT_TEMPLATE fails loudly, no silent fallback (0.17.0)" {
+  FRESH=false
+  export RALPH_EVAL_REPORT_TEMPLATE="does/not/exist.md"
+  run seed_report "$MOCK_WORKSPACE" "$MOCK_WORKSPACE/plan.md"
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "RALPH_EVAL_REPORT_TEMPLATE override not found"
+  # The stock template must not have been seeded in its place.
+  [ ! -f "$MOCK_WORKSPACE/.ralph/acceptance-report.md" ]
+}
+
+@test "render_orchestrator_prompt: RALPH_EVAL_FRAMING_TEMPLATE override is rendered with both placeholders (0.17.0)" {
+  local report="$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+  mkdir -p "$(dirname "$report")"
+  touch "$report"
+
+  mkdir -p "$MOCK_WORKSPACE/custom"
+  cat > "$MOCK_WORKSPACE/custom/framing.md" <<'TPL'
+# Custom verify loop
+Invoke the `my-custom-orchestrator` skill.
+- Ground truth: {{GROUND_TRUTH_PATH}}
+- Ledger: {{REPORT_PATH}}
+TPL
+
+  export RALPH_EVAL_FRAMING_TEMPLATE="custom/framing.md"
+  render_orchestrator_prompt "$MOCK_WORKSPACE" "$MOCK_WORKSPACE/plan.md" "$report" >/dev/null
+
+  local effective="$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  [ -f "$effective" ]
+  grep -q "my-custom-orchestrator" "$effective"
+  grep -q "$MOCK_WORKSPACE/plan.md" "$effective"
+  grep -q "$report" "$effective"
+  ! grep -q '{{GROUND_TRUTH_PATH}}' "$effective"
+  ! grep -q '{{REPORT_PATH}}' "$effective"
+  # Stock framing content must NOT be present.
+  ! grep -q "running-acceptance-evaluation" "$effective"
+}
+
+@test "render_orchestrator_prompt: missing RALPH_EVAL_FRAMING_TEMPLATE fails loudly (0.17.0)" {
+  local report="$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+  mkdir -p "$(dirname "$report")"
+  touch "$report"
+
+  export RALPH_EVAL_FRAMING_TEMPLATE="does/not/exist.md"
+  run render_orchestrator_prompt "$MOCK_WORKSPACE" "$MOCK_WORKSPACE/plan.md" "$report"
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "RALPH_EVAL_FRAMING_TEMPLATE override not found"
+}
+
+@test "template overrides: unset env vars keep stock templates (0.17.0)" {
+  unset RALPH_EVAL_FRAMING_TEMPLATE RALPH_EVAL_REPORT_TEMPLATE
+  FRESH=false
+  local report="$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+
+  seed_report "$MOCK_WORKSPACE" "$MOCK_WORKSPACE/PROMPT.md"
+  grep -q "Acceptance Report" "$report"
+
+  render_orchestrator_prompt "$MOCK_WORKSPACE" "$MOCK_WORKSPACE/PROMPT.md" "$report" >/dev/null
+  grep -q "running-acceptance-evaluation" "$MOCK_WORKSPACE/.ralph/effective-prompt.md"
 }
 
 # -----------------------------------------------------------------------------

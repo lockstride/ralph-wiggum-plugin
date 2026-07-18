@@ -25,6 +25,18 @@
 #   --spec [name]                 Ground truth = specs/<name>/tasks.md (newest if omitted)
 #   --fresh                       Delete any existing acceptance-report.md first
 #   -h, --help                    Show this help
+#
+# Environment:
+#   RALPH_EVAL_FRAMING_TEMPLATE   Custom orchestrator framing template
+#                                 (absolute or workspace-relative path).
+#                                 Rendered with {{GROUND_TRUTH_PATH}} and
+#                                 {{REPORT_PATH}}. Default:
+#                                 templates/evaluator-framing.md.
+#   RALPH_EVAL_REPORT_TEMPLATE    Custom acceptance-report seed template
+#                                 (absolute or workspace-relative path).
+#                                 Rendered with {{GROUND_TRUTH_PATH}}.
+#                                 Default: templates/acceptance-report-template.md.
+#   RALPH_EVAL_MAX_LOOPS          Eval loop cap when -n/--loops is not given.
 
 set -euo pipefail
 
@@ -35,7 +47,7 @@ source "$SCRIPT_DIR/ralph-common.sh"
 source "$SCRIPT_DIR/prompt-resolver.sh"
 
 show_help() {
-  sed -n '3,29p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,41p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 WORKSPACE=""
@@ -157,13 +169,40 @@ resolve_ground_truth() {
 # REPORT + PROMPT SETUP
 # =============================================================================
 
+# Resolve an operator-supplied template override path (0.17.0). Accepts
+# absolute paths or paths relative to the workspace root. Echoes the
+# resolved absolute path; fails loudly when the override is set but
+# unreadable — an operator who set an override wants it used, not
+# silently swapped for the stock template.
+_resolve_eval_template_override() {
+  local workspace="$1" path="$2" label="$3"
+  if [[ "$path" != /* ]] && [[ -f "$workspace/$path" ]]; then
+    path="$workspace/$path"
+  fi
+  if [[ ! -f "$path" ]]; then
+    echo "❌ $label override not found: $path" >&2
+    return 1
+  fi
+  echo "$path"
+}
+
 # Seed .ralph/acceptance-report.md from template if missing.
 # Honors $FRESH: delete-and-recreate when true.
+# 0.17.0: RALPH_EVAL_REPORT_TEMPLATE overrides the stock template so
+# consuming projects can seed a differently-shaped report (e.g. a
+# per-ticket ledger) while keeping the loop's checkbox-completion
+# contract. Only {{GROUND_TRUTH_PATH}} is substituted.
 seed_report() {
   local workspace="$1" ground_truth="$2"
   local report="$workspace/.ralph/acceptance-report.md"
   local template
-  template="$(_default_templates_dir)/acceptance-report-template.md"
+  if [[ -n "${RALPH_EVAL_REPORT_TEMPLATE:-}" ]]; then
+    template=$(_resolve_eval_template_override "$workspace" \
+      "$RALPH_EVAL_REPORT_TEMPLATE" "RALPH_EVAL_REPORT_TEMPLATE") || return 1
+    echo "  ✓ Report template override: $template" >&2
+  else
+    template="$(_default_templates_dir)/acceptance-report-template.md"
+  fi
 
   if [[ "$FRESH" == "true" ]]; then
     rm -f "$report"
@@ -207,12 +246,22 @@ record_gate_runner() {
 # `skills/running-acceptance-evaluation/`, `skills/verifying-acceptance-criteria/`,
 # and `skills/addressing-acceptance-gaps/` (0.6.0+). The framing prompt
 # is intentionally minimal — everything load-bearing is in the skills.
+# 0.17.0: RALPH_EVAL_FRAMING_TEMPLATE overrides the stock framing so
+# consuming projects can point the loop at their own orchestrator skill
+# (e.g. a ticket-based verify/rework flow). The override is rendered
+# with the same {{GROUND_TRUTH_PATH}} / {{REPORT_PATH}} placeholders.
 render_orchestrator_prompt() {
   local workspace="$1" ground_truth="$2" report="$3"
 
   local tpl_dir framing_tpl
   tpl_dir="$(_default_templates_dir)"
-  framing_tpl="$tpl_dir/evaluator-framing.md"
+  if [[ -n "${RALPH_EVAL_FRAMING_TEMPLATE:-}" ]]; then
+    framing_tpl=$(_resolve_eval_template_override "$workspace" \
+      "$RALPH_EVAL_FRAMING_TEMPLATE" "RALPH_EVAL_FRAMING_TEMPLATE") || return 1
+    echo "  ✓ Framing template override: $framing_tpl" >&2
+  else
+    framing_tpl="$tpl_dir/evaluator-framing.md"
+  fi
 
   if [[ ! -f "$framing_tpl" ]]; then
     echo "❌ Eval framing template not found: $framing_tpl" >&2

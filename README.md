@@ -326,6 +326,8 @@ For mode mechanics, artifacts, and limitations, see [docs/development.md → Acc
 | `RALPH_COMPLETE_BLOCK_THRESHOLD` | `2` | Consecutive COMPLETE-BLOCKED loops with the same reason before failing loud (unsatisfiable completion bar) |
 | `RALPH_MAX_LOOPS` | `10` | Safety cap on agent respawns |
 | `RALPH_EVAL_MAX_LOOPS` | `10` | Safety cap on eval loop iterations |
+| `RALPH_EVAL_FRAMING_TEMPLATE` | — | Custom eval-loop framing template (absolute or workspace-relative path). Rendered with `{{GROUND_TRUTH_PATH}}` / `{{REPORT_PATH}}`. Lets a project point the eval loop at its own orchestrator skill. |
+| `RALPH_EVAL_REPORT_TEMPLATE` | — | Custom acceptance-report seed template (absolute or workspace-relative path). Rendered with `{{GROUND_TRUTH_PATH}}`. Must keep the loop's checkbox-completion contract (`- [ ]` lines drive completion). |
 | `RALPH_MODEL` | per-CLI (`opus[1m]` for Claude, `composer-2` for Cursor) | Work-loop model id. Same as `-m/--model`. |
 | `RALPH_EFFORT` | `xhigh` (Claude only) | Reasoning effort for the main work loop: `low\|medium\|high\|xhigh\|max`. Ignored for cursor-agent (no effort knob). The loop-prompt generator always runs at `medium` and is unaffected. |
 | `RALPH_SKIP_GUARDRAILS` | — | Set to `1` to omit the guardrails preamble |
