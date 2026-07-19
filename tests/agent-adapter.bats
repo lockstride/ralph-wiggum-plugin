@@ -109,3 +109,35 @@ Re-run the same command to relaunch it fresh.'
   run _cursor_exit 'some-tool --run' 75 'boom'
   [ "$output" = "75" ]
 }
+
+# --- 0.18.0: Task sub-agent (sidechain) event suppression ------------------
+#
+# A Task sub-agent's stream events carry parent_tool_use_id (and/or
+# isSidechain). Their init/result must NOT be normalized into system/result
+# kinds, or the parser logs a spurious second SESSION START/END per sub-agent
+# (observed run 140038). Top-level events (both markers absent) still pass.
+
+# Return the canonical kind(s) the claude filter emits for one native event.
+_claude_kind() { # $1=native JSON event
+  printf '%s\n' "$1" | jq -n -c -f "$CLAUDE_FILTER" | jq -rc '.kind' 2>/dev/null || true
+}
+
+@test "claude: top-level init normalizes to a system event (0.18.0)" {
+  run _claude_kind '{"type":"system","subtype":"init","model":"claude-opus-4-8"}'
+  [ "$output" = "system" ]
+}
+
+@test "claude: sub-agent init (parent_tool_use_id) is suppressed (0.18.0)" {
+  run _claude_kind '{"type":"system","subtype":"init","model":"x","parent_tool_use_id":"toolu_1"}'
+  [ -z "$output" ]
+}
+
+@test "claude: top-level result normalizes to a result event (0.18.0)" {
+  run _claude_kind '{"type":"result","duration_ms":1234}'
+  [ "$output" = "result" ]
+}
+
+@test "claude: sub-agent result (isSidechain) is suppressed (0.18.0)" {
+  run _claude_kind '{"type":"result","duration_ms":50,"isSidechain":true}'
+  [ -z "$output" ]
+}

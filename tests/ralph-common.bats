@@ -1233,3 +1233,86 @@ TASKS
   run _is_zero_progress_bail 1 "" ""
   [ "$status" -eq 1 ]
 }
+
+# --- 0.18.0: strict process-tree reaping (rotation-zombie fix) -------------
+
+@test "_descendant_pids enumerates a nested tree deepest-first (0.18.0)" {
+  # root bash → child bash → grandchild sleep. pgrep -P alone would miss the
+  # grandchild; _descendant_pids walks recursively.
+  bash -c 'bash -c "sleep 300 & wait" & wait' &
+  local root=$!
+  sleep 0.6
+  local pids
+  pids=$(_descendant_pids "$root")
+  # At least the child bash + grandchild sleep.
+  [ "$(printf '%s\n' "$pids" | grep -c '[0-9]')" -ge 2 ]
+  _reap_process_tree "$root" 1
+  pkill -f 'sleep 300' 2>/dev/null || true
+}
+
+@test "_reap_process_tree kills the whole tree incl. the grandchild agent (0.18.0)" {
+  # The exact shape that defeated the pre-0.18 one-shot `kill -- -\$pid` when
+  # the subshell was not a process-group leader: the sleep (stand-in for the
+  # claude grandchild) must die, not survive as a rotation zombie.
+  bash -c 'bash -c "sleep 300 & wait" & wait' &
+  local root=$!
+  sleep 0.6
+  local grandkids
+  grandkids=$(_descendant_pids "$root")
+  _reap_process_tree "$root" 2
+  sleep 0.3
+  # Root dead.
+  ! kill -0 "$root" 2>/dev/null
+  # Every enumerated descendant dead.
+  local p
+  for p in $grandkids; do
+    if kill -0 "$p" 2>/dev/null; then
+      pkill -f 'sleep 300' 2>/dev/null || true
+      fail "descendant $p survived the reap"
+    fi
+  done
+  pkill -f 'sleep 300' 2>/dev/null || true
+}
+
+@test "_reap_process_tree is a safe no-op on a non-numeric/dead pid (0.18.0)" {
+  run _reap_process_tree ""
+  [ "$status" -eq 0 ]
+  run _reap_process_tree "not-a-pid"
+  [ "$status" -eq 0 ]
+}
+
+@test "_reap_stray_agents kills a prior-loop agent scoped to THIS workspace (0.18.0)" {
+  # A stray whose argv carries both the "Ralph Loop" banner and this
+  # workspace path must be reaped; one for a DIFFERENT workspace must not.
+  # The trailing `; :` keeps bash from exec-replacing itself with sleep, which
+  # would drop the marker argv the sweep matches on.
+  bash -c 'sleep 300; :' "Ralph Loop 7 marker $MOCK_WORKSPACE/x" &
+  local mine=$!
+  bash -c 'sleep 300; :' "Ralph Loop 7 marker /some/other/worktree" &
+  local other=$!
+  sleep 0.5
+  _reap_stray_agents "$MOCK_WORKSPACE"
+  sleep 0.3
+  # Mine reaped; the other worktree's loop untouched.
+  if kill -0 "$mine" 2>/dev/null; then
+    kill -9 "$mine" "$other" 2>/dev/null || true
+    pkill -f 'sleep 300' 2>/dev/null || true
+    fail "in-workspace stray survived"
+  fi
+  if ! kill -0 "$other" 2>/dev/null; then
+    pkill -f 'sleep 300' 2>/dev/null || true
+    fail "a different worktree's agent was wrongly killed"
+  fi
+  kill -9 "$other" 2>/dev/null || true
+  pkill -f 'sleep 300' 2>/dev/null || true
+}
+
+@test "_write_postmortem folds the structured gutter reason into the bundle (0.18.0)" {
+  printf 'concurrent-writer' > "$MOCK_WORKSPACE/.ralph/gutter-reason"
+  _write_postmortem "$MOCK_WORKSPACE" "gutter"
+  local tarball
+  tarball=$(ls "$MOCK_WORKSPACE"/.ralph-postmortems/*-gutter.tar.gz 2>/dev/null | head -1)
+  [ -n "$tarball" ]
+  # Meta names the reason so a supervisor can classify without the transcript.
+  tar -xzOf "$tarball" ./post-mortem-meta.txt | grep -q "gutter_reason: concurrent-writer"
+}

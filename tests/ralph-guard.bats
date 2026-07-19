@@ -648,6 +648,31 @@ EOF
   fi
 }
 
+@test "[wrap] pins the gate Bash-call timeout to 600000ms (0.18.0)" {
+  # A gate wrap must also raise the Bash tool timeout to its 600000ms ceiling
+  # so the waiter's call is never cut at the 120s default — the kill window
+  # that produced the spurious exit=130 gates in run 140038. Mechanical, not
+  # advisory: enforced here, not left to the agent remembering the framing.
+  setup_wrap_policy
+  run _run_guard Bash "pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.timeout == 600000'
+}
+
+@test "[rewrite] non-gate rewrite does not pin a timeout (0.18.0)" {
+  # The 600000ms pin is gate-only. A plain [rewrite] that does not route
+  # through gate-run.sh must keep the Bash tool's own default timeout.
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[rewrite]
+^pnpm nx run ([a-z-]+):([a-z-]+)\$ | pnpm \1:\2 | drop nx run indirection
+EOF
+  run _run_guard Bash "pnpm nx run api:test-unit"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "pnpm api:test-unit"'
+  ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput | has("timeout")' 2>/dev/null
+}
+
 @test "[wrap] does not match non-listed commands" {
   setup_wrap_policy
   run _run_guard Bash "pnpm format:write"

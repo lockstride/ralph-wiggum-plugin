@@ -712,7 +712,18 @@ export RALPH_GATE_ROLE=runner RALPH_GATE_TS="$ts" \
 if command -v setsid >/dev/null 2>&1; then
   (setsid nohup bash "$_self" "$label" "$@" </dev/null >>"$log_file" 2>&1 &)
 elif command -v perl >/dev/null 2>&1; then
-  (nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "gate-run detach: exec failed: $!"' \
+  # 0.18.0: fork BEFORE setsid. POSIX::setsid() fails (returns -1) if the
+  # caller is already a process-group leader, and the pre-0.18 one-liner
+  # called it directly and ignored the result — so on any job-control layout
+  # where the backgrounded perl was a group leader, the "new session" silently
+  # never happened and the runner stayed in the caller's session, reachable by
+  # a session-scoped kill (a caller-death SIGINT then reached the wrapped test
+  # command → the spurious exit=130 gates in run 140038). A forked child is
+  # never a group leader, so setsid always succeeds; die loudly if it somehow
+  # does not, rather than degrade to a same-session runner.
+  # shellcheck disable=SC2016 # $p/$!/@ARGV are perl variables — must NOT be
+  # expanded by the shell; single quotes are correct.
+  (nohup perl -MPOSIX -e 'my $p=fork(); exit 0 if $p; POSIX::setsid()!=-1 or die "gate-run detach: setsid failed: $!"; exec @ARGV or die "gate-run detach: exec failed: $!"' \
     -- bash "$_self" "$label" "$@" </dev/null >>"$log_file" 2>&1 &)
 else
   printf '=== gate-run warning: no setsid/perl — degraded detach (reparent only) ===\n' >>"$log_file"

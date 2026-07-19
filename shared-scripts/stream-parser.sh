@@ -386,8 +386,24 @@ _is_expected_nonzero_diagnostic() {
     seg="${seg#"${seg%%[![:space:]]*}"}"
     [[ -z "$seg" ]] && continue
     first="${seg%%[[:space:]]*}"
+    # 0.18.0: peel a leading loop/branch keyword so a read-only control-flow
+    # body (`for f in …; do grep -c … "$f"; done`) is inspected on its real
+    # command, not the keyword — the `for … do grep -c` diagnostic idiom was
+    # still landing in errors.log (run 140038) because `grep -c` exits 1 on a
+    # zero count and the whole loop inherited it.
+    case "$first" in
+      do | then | else | elif)
+        seg="${seg#"$first"}"
+        seg="${seg#"${seg%%[![:space:]]*}"}"
+        first="${seg%%[[:space:]]*}"
+        ;;
+    esac
     case "$first" in
       cd | ls | cat | grep | head | tail | wc | echo | sleep | test | \[ | true) ;;
+      # Control-flow keywords are inert (they run no command themselves); a
+      # segment that IS one is read-only by construction. (`in` is never a
+      # segment-first — `for f in …` splits on `;`, so `in` stays mid-segment.)
+      for | while | until | if | do | done | then | else | elif | fi) ;;
       find)
         # Read-only search only; reject filesystem-mutating / exec actions.
         case " $seg " in
@@ -610,8 +626,28 @@ process_line() {
           log_activity "✅ Agent signaled COMPLETE"
           echo "COMPLETE" 2>/dev/null || true
         fi
-        if [[ "$text" == *"<ralph>GUTTER</ralph>"* ]]; then
-          log_activity "🚨 Agent signaled GUTTER (stuck)"
+        if [[ "$text" == *"<ralph>GUTTER"*"</ralph>"* ]]; then
+          # 0.18.0: structured gutter reason. The agent may qualify the signal
+          # as `<ralph>GUTTER reason=<slug></ralph>` (or `GUTTER: <text>`), so a
+          # supervisor around the loop can classify a mechanically-recoverable
+          # gutter (e.g. `concurrent-writer`) from one that needs a human. The
+          # bare `<ralph>GUTTER</ralph>` form still works — reason stays empty.
+          local graw reason
+          graw="${text#*<ralph>GUTTER}"
+          graw="${graw%%</ralph>*}"
+          graw="${graw#"${graw%%[![:space:]]*}"}" # ltrim
+          graw="${graw#reason=}"
+          graw="${graw#:}"
+          graw="${graw#"${graw%%[![:space:]]*}"}" # ltrim after stripping prefix
+          graw="${graw%"${graw##*[![:space:]]}"}" # rtrim
+          graw="${graw//$'\n'/ }"                 # single line
+          reason="${graw:0:200}"
+          if [[ -n "$reason" ]]; then
+            printf '%s' "$reason" >"$RALPH_DIR/gutter-reason" 2>/dev/null || true
+            log_activity "🚨 Agent signaled GUTTER (stuck) — reason: $reason"
+          else
+            log_activity "🚨 Agent signaled GUTTER (stuck)"
+          fi
           echo "GUTTER" 2>/dev/null || true
         fi
       fi

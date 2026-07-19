@@ -272,6 +272,34 @@ tool_result_json() {
   grep -q "SHELL FAIL: pnpm basic-check" "$MOCK_WORKSPACE/.ralph/errors.log"
 }
 
+@test "read-only for-loop over grep -c exiting 1 is not logged as SHELL FAIL (0.18.0)" {
+  # `for f in …; do echo …; grep -c … "$f"; done` exits 1 when the last
+  # grep -c counts zero — a read-only diagnostic idiom that still landed in
+  # errors.log pre-0.18 because the segment splitter saw the `for`/`do`
+  # keywords, not the inner read-only commands. Built via jq so the inner
+  # double quotes are JSON-escaped (the printf helper can't represent them).
+  local cmd='for f in a.ts b.ts c.ts; do echo "--- $f"; grep -c CLOCK "$f"; done'
+  local events
+  events=$(jq -cn --arg c "$cmd" '{kind:"tool_result",name:"Shell",bytes:50,lines:5,exit_code:1,path:"",cmd:$c}')
+
+  run_parser "$events" >/dev/null
+
+  if grep -q "SHELL FAIL" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+    fail "read-only for/do/grep -c loop exit 1 was logged as SHELL FAIL"
+  fi
+}
+
+@test "for-loop with a mutating body exiting 1 is still logged (0.18.0 regression guard)" {
+  # Peeling loop keywords must not whitelist a mutating inner command.
+  local cmd='for f in a b; do pnpm basic-check "$f"; done'
+  local events
+  events=$(jq -cn --arg c "$cmd" '{kind:"tool_result",name:"Shell",bytes:50,lines:5,exit_code:1,path:"",cmd:$c}')
+
+  run_parser "$events" >/dev/null
+
+  grep -q "SHELL FAIL: for f in a b" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
 @test "read-only command with non-1 exit code is still logged as SHELL FAIL (0.14.7)" {
   # grep exits 2 on a real error (bad pattern / unreadable file) — only
   # exit 1 ("no match" semantics) qualifies as an expected diagnostic.
@@ -548,6 +576,28 @@ tool_result_json() {
   local output
   output=$(run_parser "$events")
   echo "$output" | grep -q "COMPLETE"
+}
+
+@test "emits GUTTER and records the structured reason (0.18.0)" {
+  # `<ralph>GUTTER reason=<slug></ralph>` still emits the GUTTER signal AND
+  # drops the slug at .ralph/gutter-reason so an outer supervisor can classify
+  # the halt (e.g. auto-resume a concurrent-writer gutter).
+  local events='{"kind":"assistant_text","text":"Two loops on one worktree. <ralph>GUTTER reason=concurrent-writer</ralph>"}'
+
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "^GUTTER$"
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gutter-reason" 2>/dev/null)" = "concurrent-writer" ]
+}
+
+@test "bare GUTTER signal emits without a reason breadcrumb (0.18.0)" {
+  # The unqualified form must still work and must NOT leave a reason file.
+  local events='{"kind":"assistant_text","text":"Genuinely stuck. <ralph>GUTTER</ralph>"}'
+
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "^GUTTER$"
+  [ ! -f "$MOCK_WORKSPACE/.ralph/gutter-reason" ]
 }
 
 @test "emits DEFER on rate limit rejection" {

@@ -204,7 +204,12 @@ foreach (try inputs catch empty) as $e (
     )
   else . end;
   if $e.type == "system" and ($e.subtype // "") == "init" then
-    {kind:"system", model:($e.model // "unknown")}
+    # 0.18.0: a Task sub-agent's events carry parent_tool_use_id (and/or
+    # isSidechain). Suppress the sub-agent's own init so it is not logged as a
+    # second SESSION START — only the top-level session (both null/absent)
+    # counts. No-op on CLIs/versions that omit the field, so nothing regresses.
+    (if (($e.parent_tool_use_id // null) != null) or ($e.isSidechain // false) then empty
+     else {kind:"system", model:($e.model // "unknown")} end)
   elif $e.type == "assistant" then
     (($e.message.content // [])[] |
       if .type == "text" then
@@ -258,7 +263,11 @@ foreach (try inputs catch empty) as $e (
       else empty end
     )
   elif $e.type == "result" then
-    if $e.is_error == true then
+    # 0.18.0: drop a Task sub-agent's result (parent_tool_use_id / isSidechain
+    # set) so it is not logged as a second SESSION END with a sub-turn duration
+    # — only the top-level session's result marks the loop's end.
+    if (($e.parent_tool_use_id // null) != null) or ($e.isSidechain // false) then empty
+    elif $e.is_error == true then
       {kind:"error", message:($e.result // "Session failed with is_error=true")}
     else
       {kind:"result", duration_ms:($e.duration_ms // 0)}

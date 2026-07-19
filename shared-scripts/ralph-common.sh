@@ -843,9 +843,16 @@ _write_postmortem() {
 
   local f
   for f in errors.log activity.log progress.md guardrails.md effective-prompt.md \
-    loop-baseline-head loop-baseline-untracked task-file-path command-policy; do
+    loop-baseline-head loop-baseline-untracked task-file-path command-policy \
+    gutter-reason; do
     [[ -f "$ralph_dir/$f" ]] && cp "$ralph_dir/$f" "$staging/" 2>/dev/null || true
   done
+
+  # 0.18.0: surface the agent's structured gutter reason (if any) in the meta
+  # so a supervisor reading the bundle can classify the halt without parsing
+  # activity.log. Empty for non-gutter bundles and bare `<ralph>GUTTER</ralph>`.
+  local gutter_reason=""
+  [[ -f "$ralph_dir/gutter-reason" ]] && gutter_reason=$(head -1 "$ralph_dir/gutter-reason" 2>/dev/null || true)
 
   (cd "$workspace" && git log --oneline -30 2>/dev/null) >"$staging/git-log.txt" || true
   (cd "$workspace" && git status --porcelain 2>/dev/null) >"$staging/git-status.txt" || true
@@ -853,6 +860,7 @@ _write_postmortem() {
 
   {
     echo "reason: $reason"
+    [[ -n "$gutter_reason" ]] && echo "gutter_reason: $gutter_reason"
     echo "timestamp_utc: $ts"
     echo "workspace: $workspace"
     echo "ralph_agent_cli: ${RALPH_AGENT_CLI:-unknown}"
@@ -1070,6 +1078,96 @@ _probe_pipeline_stages() {
   echo "parser=$parser_state"
 }
 
+# 0.18.0: Recursive descendant enumeration. `pgrep -P` lists only DIRECT
+# children; a Ralph pipeline subshell's real agent (claude/cursor-agent) is a
+# grandchild of the subshell, and under a non-interactive shell (job control
+# off) the subshell is NOT a process-group leader — so `kill -- -$subshell`
+# never reaches the agent. Walking the tree by PID reaches it regardless of
+# process-group layout. Emits every descendant pid, deepest-first, one per
+# line, so callers can signal leaves before their parents.
+_descendant_pids() {
+  local root="$1"
+  [[ "$root" =~ ^[0-9]+$ ]] || return 0
+  local kids kid
+  kids=$(pgrep -P "$root" 2>/dev/null || true)
+  for kid in $kids; do
+    _descendant_pids "$kid"
+    printf '%s\n' "$kid"
+  done
+}
+
+# 0.18.0: Strict, process-group-agnostic reap of an agent pipeline tree.
+#
+# Replaces the pre-0.18 one-shot `kill -- -$agent_pid || kill $agent_pid` used
+# on every force-kill path (ROTATE / TURN_END / DEFER-grace / heartbeat / EOF /
+# wait-timeout). That idiom silently missed the claude grandchild whenever the
+# pipeline subshell was not a process-group leader — the rotation-zombie bug:
+# a rotated loop's agent kept running, committed, and raced the NEXT loop's
+# writes on the same worktree until the peer loop detected the interference and
+# GUTTERed (observed 2026-07-19, run 140038 — a ~4h dead halt).
+#
+# Snapshots every descendant BY PID first (a TERM'd parent may reparent its
+# children, but we already hold their pids), SIGTERMs leaves-first + the root,
+# waits a short grace, then SIGKILLs any survivor. Also hits the root's process
+# group in case it IS a leader — additive and harmless when it isn't.
+# Args: $1 root pid, $2 grace seconds (default 2).
+_reap_process_tree() {
+  local root="$1"
+  local grace="${2:-2}"
+  [[ "$root" =~ ^[0-9]+$ ]] || return 0
+  local pids pid
+  pids=$(_descendant_pids "$root")
+  for pid in $pids "$root"; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  kill -TERM -- -"$root" 2>/dev/null || true
+  local waited=0
+  while [[ $waited -lt $grace ]]; do
+    local alive=0
+    for pid in $pids "$root"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        alive=1
+        break
+      fi
+    done
+    [[ $alive -eq 0 ]] && break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  for pid in $pids "$root"; do
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+  kill -KILL -- -"$root" 2>/dev/null || true
+}
+
+# 0.18.0: Kill agent (claude/cursor-agent) processes left running for THIS
+# workspace by a PRIOR loop. A reparented agent that escaped its loop's reap
+# (e.g. the loop process itself was SIGKILLed before cleanup) is no longer a
+# descendant of any live loop pid, so a PID-tree walk can't find it — but its
+# argv still carries the workspace path (task-file / handoff / plan references
+# baked into the prompt) and the "Ralph Loop"/"Ralph Iteration" banner. Match
+# the banner cheaply (pgrep -f), then CONFIRM the workspace path is in the argv
+# before killing, so a concurrent loop in a DIFFERENT worktree is never
+# touched. Called at loop start (before the new agent spawns) and loop end —
+# in both windows any match is necessarily a stray. This is order-independent,
+# unlike the pre-0.18 `pkill -f "$workspace.*Ralph (Loop|Iteration)"`, which
+# required the workspace path to precede the banner in argv (it does not: the
+# prompt's "# Ralph Loop N" header comes first) and so never matched.
+_reap_stray_agents() {
+  local workspace="$1"
+  [[ -n "$workspace" ]] || return 0
+  local pid args
+  for pid in $(pgrep -f 'Ralph (Loop|Iteration)' 2>/dev/null || true); do
+    args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+    case "$args" in
+      *"$workspace"*)
+        log_activity "$workspace" "🧹 STRAY AGENT SWEEP — SIGKILL prior-loop agent pid $pid (escaped rotation/cleanup)"
+        kill -KILL "$pid" 2>/dev/null || true
+        ;;
+    esac
+  done
+}
+
 # Run a single agent loop. Returns the final signal on stdout
 # (ROTATE / GUTTER / COMPLETE / DEFER / empty).
 #
@@ -1106,6 +1204,9 @@ run_loop() {
   # 0.12.2: clear the context-warning breadcrumb so a fresh agent
   # doesn't immediately yield on its first task boundary.
   rm -f "$workspace/.ralph/context-warning-active" 2>/dev/null || true
+  # 0.18.0: clear any stale structured gutter reason from a prior loop that
+  # emitted the tag but then RECOVERed — it must not attach to a later gutter.
+  rm -f "$workspace/.ralph/gutter-reason" 2>/dev/null || true
 
   local fifo="$workspace/.ralph/.parser_fifo"
   local spinner_pid="" agent_pid="" norm_filter=""
@@ -1131,41 +1232,26 @@ run_loop() {
     rm -f "$orphan_claims"
   fi
 
+  # 0.18.0: argv-scoped backstop for a reparented agent whose pid the pid-based
+  # sweep above couldn't have — its owning loop was SIGKILLed before recording
+  # it. Safe here because the current loop's agent has not spawned yet, so any
+  # match is a prior-loop stray. Workspace-scoped: a concurrent loop in another
+  # worktree is never touched.
+  _reap_stray_agents "$workspace"
+
   # shellcheck disable=SC2329 # invoked indirectly via trap
   _loop_cleanup() {
-    # 0.4.0: strict reaping with explicit escalation ladder. The old
-    # path relied on a single `kill -- -$agent_pid` which silently
-    # failed to reach grandchildren under some process-group configs,
-    # leaving stale `claude` processes alive across retries. We now:
-    #   1. Enumerate current descendants of the subshell via pgrep -P.
-    #   2. SIGTERM each, wait briefly for voluntary exit.
-    #   3. SIGKILL any survivors.
-    #   4. Mop up anything still rooted at agent_pid with pkill -9.
-    #   5. Record all tracked pids to .orphan-claims.pid as a safety
-    #      net — the NEXT loop's start-sweep picks up anything that
-    #      still survived all of this.
-    local _descendants _pid
-    _descendants=$(pgrep -P "$agent_pid" 2>/dev/null || true)
-    # SIGTERM sweep
-    for _pid in $_descendants; do
-      kill "$_pid" 2>/dev/null || true
-    done
-    # Targeted subshell kill (original behaviour, kept for hitting pg leader)
-    kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
-    # Brief grace for voluntary exit
-    sleep 1
-    # SIGKILL survivors
-    for _pid in $_descendants; do
-      if kill -0 "$_pid" 2>/dev/null; then
-        kill -9 "$_pid" 2>/dev/null || true
-      fi
-    done
-    # Broad mop-up on anything still rooted at the subshell
-    pkill -9 -P "$agent_pid" 2>/dev/null || true
-
-    # Record remaining pids for the next loop's orphan sweep.
+    # 0.18.0: strict, process-group-agnostic reap via _reap_process_tree —
+    # walks the subshell's full descendant tree BY PID and SIGTERM→grace→
+    # SIGKILLs it, reaching the claude grandchild even when the subshell is
+    # not a process-group leader (the pre-0.18 `kill -- -$agent_pid` missed
+    # it — see _reap_process_tree). Then record any pid that STILL survived to
+    # .orphan-claims.pid as a safety net: the next loop's start-sweep SIGKILLs
+    # whatever outlived even this.
+    local _pid
+    _reap_process_tree "$agent_pid" 1
     : >"$orphan_claims"
-    for _pid in $_descendants $agent_pid; do
+    for _pid in $(_descendant_pids "$agent_pid") "$agent_pid"; do
       if kill -0 "$_pid" 2>/dev/null; then
         echo "$_pid" >>"$orphan_claims"
       fi
@@ -1227,6 +1313,12 @@ run_loop() {
   ) &
   agent_pid=$!
 
+  # 0.18.0: record the pipeline root immediately, so a loop process that is
+  # hard-killed (SIGKILL) before _loop_cleanup runs still leaves a breadcrumb.
+  # The next loop's pid-sweep catches this subshell; its argv-sweep
+  # (_reap_stray_agents) catches the reparented agent grandchild.
+  echo "$agent_pid" >"$orphan_claims" 2>/dev/null || true
+
   # Heartbeat timeout: if the stream-parser produces no output for
   # RALPH_HEARTBEAT_TIMEOUT seconds (default 5 min), the agent or API
   # is likely stalled. Kill the agent and emit DEFER so the loop retries
@@ -1271,7 +1363,7 @@ run_loop() {
       "ROTATE")
         [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "🔄 Context rotation triggered — stopping agent..." >&2
-        kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+        _reap_process_tree "$agent_pid"
         # 0.13.1: auto-enrich now runs at the single loop-end chokepoint
         # in run_ralph_loop (right before `sleep 2`), so every loop boundary
         # gets fresh "Last commit / Last task / Next unchecked" carry-over,
@@ -1297,7 +1389,7 @@ run_loop() {
         # context to the next session.
         [[ -t 2 ]] && printf "\r\033[K" >&2
         echo "🛑 Turn ended — killing agent and rotating to fresh context..." >&2
-        kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+        _reap_process_tree "$agent_pid"
         signal="TURN_END"
         break
         ;;
@@ -1335,7 +1427,7 @@ run_loop() {
           sleep "${RALPH_DEFER_GRACE:-30}"
           if kill -0 "$agent_pid" 2>/dev/null; then
             log_activity "$workspace" "⏰ DEFER GRACE EXPIRED — force-killing after ${RALPH_DEFER_GRACE:-30}s"
-            kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+            _reap_process_tree "$agent_pid"
           fi
         ) &
         ;;
@@ -1349,7 +1441,7 @@ run_loop() {
       [[ -t 2 ]] && printf "\r\033[K" >&2
       echo "⏰ Heartbeat timeout — no output in ${heartbeat}s, killing agent..." >&2
       log_activity "$workspace" "⏰ HEARTBEAT TIMEOUT after ${heartbeat}s — no stream-parser output"
-      kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+      _reap_process_tree "$agent_pid"
       signal="DEFER"
       ;;
     eof)
@@ -1410,7 +1502,7 @@ run_loop() {
           # distinguish which stage died first.
           echo "[$(date '+%H:%M:%S')] PIPELINE_STAGE_EXIT: claude=$claude_state jq=$jq_state parser=$parser_state (rc=$_read_rc)" \
             >>"$workspace/.ralph/errors.log"
-          kill -- -"$agent_pid" 2>/dev/null || kill "$agent_pid" 2>/dev/null || true
+          _reap_process_tree "$agent_pid"
           signal="DEFER"
         fi
       fi
@@ -1429,7 +1521,7 @@ run_loop() {
     sleep "$wait_timeout"
     if kill -0 "$agent_pid" 2>/dev/null; then
       log_activity "$workspace" "⏰ WAIT TIMEOUT — force-killing agent after ${wait_timeout}s"
-      kill -9 -- -"$agent_pid" 2>/dev/null || kill -9 "$agent_pid" 2>/dev/null || true
+      _reap_process_tree "$agent_pid" 0
     fi
   ) &
   local _wait_killer_pid=$!
@@ -1442,18 +1534,14 @@ run_loop() {
   [[ -t 2 ]] && printf "\r\033[K" >&2
   rm -f "$fifo"
 
-  # 0.4.0: mop-up any reparented-to-init claude CLI that escaped the
-  # process-group kill. The agent's argv contains the workspace path
-  # (resolved via {{TASK_FILE}} in the prompt) — scoping on that avoids
-  # killing a concurrent ralph loop in another worktree. Handles the
-  # case where kill -- -$agent_pid fails to reach a grandchild;
-  # previously those survived as orphans holding API auth state and
-  # consuming memory across retries. If anything survives even this,
-  # the next loop's orphan-sweep (orphan_claims at run_loop
-  # start) picks up the pieces.
-  # Pre-0.6.3 the marker said "Ralph Iteration"; post-0.6.3 it's "Ralph Loop".
-  # Match either so an upgrade across a long-running session still reaps.
-  pkill -9 -f "$workspace.*Ralph (Loop|Iteration)" 2>/dev/null || true
+  # 0.18.0: mop-up any reparented-to-init agent CLI that escaped the reap
+  # above. _reap_stray_agents matches the "Ralph Loop"/"Ralph Iteration" banner
+  # and CONFIRMS the workspace path is in the argv before killing — scoped so a
+  # concurrent loop in another worktree is never touched, and order-independent
+  # (the pre-0.18 `pkill -f "$workspace.*Ralph (Loop|Iteration)"` required the
+  # workspace path to precede the banner in argv; it never does, so that
+  # mop-up silently never fired — one root of the rotation-zombie escape).
+  _reap_stray_agents "$workspace"
 
   # 0.5.4: also reap the gate-run.sh subtree rooted at this workspace.
   # Gate runs spawn a deep tree (bash → pnpm → nx → vitest → N node
@@ -1980,10 +2068,22 @@ run_ralph_loop() {
         session_id=""
         ;;
       "GUTTER")
-        log_activity "$workspace" "LOOP $loop_label END — 🚨 GUTTER$task_suffix"
-        log_progress "$workspace" "**Loop $loop_label ended** — 🚨 GUTTER"
-        echo "🚨 Gutter detected. Check .ralph/errors.log for details."
+        # 0.18.0: fold the agent's structured gutter reason (if any) into the
+        # terminal log line and post-mortem so an outer supervisor can classify
+        # the halt (e.g. auto-resume a `concurrent-writer` gutter, escalate the
+        # rest) without parsing the transcript. _write_postmortem reads the
+        # breadcrumb; clear it afterward so a stale reason can't leak into a
+        # later, unrelated gutter.
+        local _gutter_reason=""
+        [[ -f "$workspace/.ralph/gutter-reason" ]] &&
+          _gutter_reason=$(head -1 "$workspace/.ralph/gutter-reason" 2>/dev/null || true)
+        local _gutter_suffix=""
+        [[ -n "$_gutter_reason" ]] && _gutter_suffix=" — reason: $_gutter_reason"
+        log_activity "$workspace" "LOOP $loop_label END — 🚨 GUTTER$task_suffix$_gutter_suffix"
+        log_progress "$workspace" "**Loop $loop_label ended** — 🚨 GUTTER$_gutter_suffix"
+        echo "🚨 Gutter detected.$_gutter_suffix Check .ralph/errors.log for details."
         _write_postmortem "$workspace" "gutter"
+        rm -f "$workspace/.ralph/gutter-reason" 2>/dev/null || true
         return 1
         ;;
       "DEFER")

@@ -578,3 +578,17 @@ exit 1' || true
   kill -TERM "$rpid" 2>/dev/null || true
   sleep 1
 }
+
+@test "perl detach forks before setsid so the new session cannot silently fail (0.18.0)" {
+  # Regression guard for run 140038: the pre-0.18 macOS detach called
+  # POSIX::setsid() directly and ignored its result. setsid() fails when the
+  # caller is already a process-group leader, so on that job-control layout the
+  # runner silently stayed in the caller's session — reachable by a
+  # caller-death SIGINT, which then hit the wrapped gate command (spurious
+  # exit=130 on four `full` gates). A pre-setsid fork guarantees the child is
+  # never a group leader, so setsid always succeeds; a bare setsid must never
+  # come back.
+  grep -Eq 'fork\(\);[^|]*POSIX::setsid\(\) *!= *-1' "$SCRIPTS_DIR/gate-run.sh"
+  # And the bare, unchecked form must be gone.
+  ! grep -Eq "perl -MPOSIX -e 'POSIX::setsid\(\);" "$SCRIPTS_DIR/gate-run.sh"
+}

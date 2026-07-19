@@ -334,9 +334,24 @@ _emit_rewrite() {
   if [[ "$orig" != "$cmd" ]]; then
     _log_intercept "🔀" "REWRITE" "$orig → $cmd"
   fi
-  # Use jq for safe JSON escaping of the command string.
-  jq -n --arg cmd "$cmd" \
-    '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":$cmd}}}' 2>/dev/null
+  # 0.18.0: when the rewrite routes through gate-run.sh, also pin the Bash
+  # tool timeout to its 600000 ms (10 min) ceiling via updatedInput. The
+  # framing prompt already ASKS the agent to set this, but the agent forgot in
+  # the field (run 140038), so the gate waiter's Bash call was cut at the 120 s
+  # default. When Claude Code kills a timed-out Bash call it signals the call's
+  # process tree; the detached runner survives, but the SIGINT still reached
+  # the wrapped test command's group and recorded a spurious exit=130 on four
+  # `full` gates. Forcing the ceiling here makes the fix mechanical, not
+  # advisory — the 120 s kill window never opens. Non-gate rewrites keep the
+  # tool's own default timeout (no timeout field emitted).
+  if [[ "$cmd" == *gate-run.sh* ]]; then
+    jq -n --arg cmd "$cmd" \
+      '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":$cmd,"timeout":600000}}}' 2>/dev/null
+  else
+    # Use jq for safe JSON escaping of the command string.
+    jq -n --arg cmd "$cmd" \
+      '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":$cmd}}}' 2>/dev/null
+  fi
   exit 0
 }
 
