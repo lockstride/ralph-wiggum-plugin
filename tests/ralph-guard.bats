@@ -1224,3 +1224,28 @@ EOF
   _run_guard Write "$MOCK_WORKSPACE/apps/api/src/app.ts"
   [ -f "$STATE_DIR/last-write-ts" ]
 }
+
+@test "allows write to .ralph/policy-proposal (0.20.0)" {
+  # The sanctioned move when command-policy ITSELF is the blocker. Without
+  # it, an agent that correctly diagnosed a stale [gates] pin had no legal
+  # action at all and the run deadlocked.
+  run _run_guard Write "$MOCK_WORKSPACE/.ralph/policy-proposal"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "still denies write to .ralph/command-policy (0.20.0)" {
+  # A loop that can rewrite its own completion bar has no bar. The proposal
+  # channel must not have opened this.
+  run _run_guard Write "$MOCK_WORKSPACE/.ralph/command-policy"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "command-policy denial points at the proposal channel (0.20.0)" {
+  run _run_guard Write "$MOCK_WORKSPACE/.ralph/command-policy"
+  echo "$output" | jq -r '.hookSpecificOutput.permissionDecisionReason' |
+    grep -q ".ralph/policy-proposal"
+}

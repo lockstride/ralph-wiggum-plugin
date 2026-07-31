@@ -46,8 +46,8 @@ the inventory when reviewing the loop's reliability end-to-end.
 ### Gate-level adherence (three-tier model)
 - Framing's `## Gate Selection` block interpolates the project's `[gates].basic` (per-task default) and `[gates].full` (on `[risky]` tasks and at end-of-loop). The `final` tier is reserved for the eval loop.
 - `gate-run.sh` enforces 8 canonical labels (3 tier labels `basic | full | final` + 5 kind labels `unit | integration | e2e | lint | format`) and writes `<label>-latest.{log,exit,cmd,summary}` per label.
-- Tier-command label-lock: each of the three `[gates]` commands must run under its own tier label. Running `[gates].full` under any other label is denied — closes the "relabel to escape the gate cache and fish for green" anti-pattern.
-- Completion guard `_complete_allowed` refuses `<promise>ALL_TASKS_DONE</promise>` unless `full-latest.cmd` matches `[gates].full` AND `full-latest.exit` is 0.
+- Tier-command label-lock, both directions. **Command→label:** each of the three `[gates]` commands must run under its own tier label — closes the "relabel to escape the gate cache and fish for green" anti-pattern. **Label→command:** a tier label refuses any command but its pinned one, exiting 64 before anything runs (nothing is executed, no breadcrumb is written). A gate under `full` that isn't `[gates].full` can never satisfy completion, so it fails in seconds instead of surfacing hours later at COMPLETE.
+- Completion guard `_complete_allowed` refuses `<promise>ALL_TASKS_DONE</promise>` unless `full-latest.cmd` matches `[gates].full` AND `full-latest.exit` is 0. A block whose cause is a `[gates]` disagreement (rather than a red or missing gate) is terminal on the **first** occurrence — the agent cannot edit `command-policy`, so looping again is guaranteed waste; it stops and writes a post-mortem instead.
 
 ### Smooth handoff between loops
 - `.ralph/handoff.md` has three managed sections:
@@ -190,6 +190,7 @@ After the loop starts, Ralph writes to `.ralph/` (git-ignored automatically):
 - `effective-prompt.md` — the rendered prompt fed to the agent at each loop start
 - `handoff.md` — rolling state document, injected into the framing prompt every loop (see [Handoff state](#handoff-state) below)
 - `gates/` — per-label logs, exit breadcrumbs, summary files, lock dirs for gate-run.sh
+- `policy-proposal` — write-only escape hatch for the agent when `command-policy` *itself* is the blocker (see [Command policy](#command-policy))
 
 **Breadcrumb files** (placed in `.ralph/`):
 
@@ -198,6 +199,7 @@ After the loop starts, Ralph writes to `.ralph/` (git-ignored automatically):
 | `command-policy` | **yes** | Single source of truth for gate tiers + routing — see [Command policy](#command-policy) below. The loop refuses to start without a `[gates]` section declaring all three of `basic`, `full`, `final`. |
 | `push-policy` | no | Push behavior: `never` (default), `per-commit`, `per-3-commits`, `phase-close`, `completion-only` |
 | `stop-requested` | no | Touch this file to signal the agent to stop after the current task |
+| `policy-proposal` | no | Written by the *agent*, never read back as policy. The one sanctioned move when `command-policy` is the thing that's wrong — the agent records the rows it believes are correct plus a one-line why, then stops. Ships in the post-mortem bundle; you decide whether to apply it. |
 
 Your commits are your durable memory. Ralph commits frequently during each loop so any involuntary kill is recoverable from the last commit.
 
@@ -245,7 +247,7 @@ pnpm format:write
 
 Section semantics:
 
-- **`[gates]`** — the project's three tier-gate commands, exactly one per tier. The framing prompt's `## Gate Selection` block, the completion guard `_complete_allowed`, and the tier-command label-lock all read this. No defaults — every project must declare its own.
+- **`[gates]`** — the project's three tier-gate commands, exactly one per tier. The framing prompt's `## Gate Selection` block, the completion guard `_complete_allowed`, and the tier-command label-lock all read this. No defaults — every project must declare its own. These pins are frozen for the run, so **never pin a tier to a command the run itself is scoped to change** (e.g. a task that rewrites `./scripts/gate.sh` to take a tier argument): author the post-change command up front, or split the work so the rewrite lands and the policy is re-authored before the rest runs. An agent that hits a stale pin cannot fix it — `command-policy` is loop-managed — so it records `.ralph/policy-proposal` and stops.
 - **`[rewrite]`** — regex match; transparently rewrites the agent's command via the hook's `updatedInput` mechanism (no block, no retry puzzle). Use for incorrect command shapes the agent reaches for.
 - **`[deny]`** — literal prefix match; blocks outright with `permissionDecision: deny`. Use for commands the agent should never run (containerized E2E, destructive ops).
 - **`[wrap]`** — free-form routing table for commands NOT in `[gates]`. Listed command is **transparently auto-rewritten** to its `gate-run.sh <label> <cmd>` form via `updatedInput`, so the loop captures tracking artifacts (latest.log / .exit / .cmd / .summary) without the agent having to remember the wrapper. The label drives the artifact namespace and timeout bucket. Missing/unrecognized label → row skipped. The matcher strips env-var prefixes AND normalizes `pnpm run X` / `pnpm exec X` to `pnpm X` before matching. Compound chains (`pnpm format:write && pnpm test-coverage`) split — if any segment matches, the chain is rewrapped on just that segment.

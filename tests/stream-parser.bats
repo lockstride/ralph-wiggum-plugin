@@ -932,3 +932,86 @@ EOF
   run_parser '{"kind":"system","model":"claude-opus-4-8"}'
   grep -q "📋 Tasks: 4/7 complete (3 remaining)" "$MOCK_WORKSPACE/.ralph/activity.log"
 }
+
+# ---------------------------------------------------------------------------
+# Read-only vocabulary (0.20.0). The every-segment rule was already right;
+# the allowlist was too small, so a long read-only diagnostic chain fell to
+# the logged path on one unlisted segment. Fixtures below are verbatim shapes
+# from the run that motivated this.
+# ---------------------------------------------------------------------------
+
+_expect_not_logged() {
+  local events
+  events=$(jq -cn --arg c "$1" \
+    '{kind:"tool_result",name:"Shell",bytes:50,lines:5,exit_code:1,path:"",cmd:$c}')
+  run_parser "$events" >/dev/null
+  if grep -q "SHELL FAIL" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+    fail "read-only chain was logged as SHELL FAIL: $1"
+  fi
+}
+
+_expect_logged() {
+  local events
+  events=$(jq -cn --arg c "$1" \
+    '{kind:"tool_result",name:"Shell",bytes:50,lines:5,exit_code:1,path:"",cmd:$c}')
+  run_parser "$events" >/dev/null
+  grep -q "SHELL FAIL" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "read-only git chain exiting 1 is not logged as SHELL FAIL (0.20.0)" {
+  _expect_not_logged 'git rev-parse HEAD && git status --porcelain | head -20 && cat .ralph/gates/final-latest.exit 2>/dev/null'
+}
+
+@test "git check-ignore answering 1 is not logged as SHELL FAIL (0.20.0)" {
+  # check-ignore exits 1 to ANSWER "not ignored" — the exit code is the
+  # result, not a failure.
+  _expect_not_logged 'git check-ignore -v .ralph/acceptance-report.md || echo "(not ignored)"'
+}
+
+@test "git -C global flag is skipped when reading the subcommand (0.20.0)" {
+  _expect_not_logged 'git -C /some/repo status --short | head'
+}
+
+@test "git list-form group verbs are read-only (0.20.0)" {
+  _expect_not_logged 'git worktree list; git stash list; git config --get user.email'
+}
+
+@test "git commit is still logged as SHELL FAIL (0.20.0 regression guard)" {
+  _expect_logged 'git status && git commit -m wip'
+}
+
+@test "git worktree add is still logged as SHELL FAIL (0.20.0 regression guard)" {
+  # Only the list/get shapes of a dual-purpose verb qualify.
+  _expect_logged 'git worktree add ../wt feature-branch'
+}
+
+@test "docker inspection probe exiting 1 is not logged as SHELL FAIL (0.20.0)" {
+  _expect_not_logged 'docker info >/dev/null 2>&1 && echo RUNNING || echo "NOT running"'
+}
+
+@test "docker ps and volume ls are read-only (0.20.0)" {
+  _expect_not_logged 'docker ps -a --format "{{.Names}}" | grep -i curve; docker volume ls | grep -i curve'
+}
+
+@test "docker compose up is still logged as SHELL FAIL (0.20.0 regression guard)" {
+  _expect_logged 'docker compose up -d'
+}
+
+@test "sort/awk/printf pipelines are read-only (0.20.0)" {
+  _expect_not_logged 'grep -rhoE "^[A-Z_]+" .env 2>/dev/null | sort -u | awk "{print \$1}"'
+}
+
+@test "a redirect into a file is a write however read-only the command (0.20.0)" {
+  # `cat > f` / `printf … > f` were judged read-only pre-0.20 because only
+  # the command name was inspected.
+  _expect_logged 'printf hello > /tmp/out.txt'
+}
+
+@test "sort -o writes in place and is still logged (0.20.0)" {
+  _expect_logged 'sort -u in.txt -o in.txt'
+}
+
+@test "discards and fd dups are not writes (0.20.0 regression guard)" {
+  # `2>/dev/null` and `2>&1` are ubiquitous in read-only diagnostics.
+  _expect_not_logged 'ls .ralph/stop-requested 2>&1; grep -c CLOCK f.ts 2>/dev/null'
+}

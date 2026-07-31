@@ -36,10 +36,14 @@
 #     kind labels: unit | integration | e2e | lint | format  (everything else
 #                  the agent might invoke; routed via [wrap])
 #
+#   A tier label must be handed the command pinned for it in [gates]; any
+#   other command exits 64 before anything runs (0.20.0).
+#
 # Exit code:
 #   The real exit code of <cmd> when the verdict lands within the wait
 #   budget. 75 while the gate is in flight (re-run to keep waiting). 70 if
-#   the runner died without a verdict. See --help for the full table.
+#   the runner died without a verdict. 64 on a usage error or a stale tier
+#   pin. See --help for the full table.
 #
 # Output:
 #   Compact summary to stdout (<= ~150 lines), full log on disk.
@@ -90,8 +94,9 @@ WHY
 
 LABELS (fixed set — pick the closest match)
   Tier labels — exactly one command each, declared in [gates] in
-  .ralph/command-policy. The tier-command label-lock requires these
-  commands to run under their own tier label:
+  .ralph/command-policy. The binding is enforced in both directions: the
+  tier-command label-lock requires these commands to run under their own tier
+  label, and a tier label refuses (exit 64) any command but its pinned one:
     basic   Per-task pre-commit gate (typically format + lint + unit).
     full    Implementation-loop completion gate (basic + integration + e2e).
     final   Eval-loop gate (post-completion acceptance verification).
@@ -118,7 +123,10 @@ EXAMPLES
 EXIT CODES
   0       The wrapped command exited 0.
   N≠0     The wrapped command exited N. Passed through verbatim.
-  64      Usage error (missing args, invalid label).
+  64      Usage error (missing args, invalid label), or a STALE TIER PIN — a
+          tier label was handed a command other than the one pinned for it in
+          .ralph/command-policy [gates]. Nothing runs and no breadcrumb is
+          written; such a run could never satisfy the completion guard.
   70      The detached runner died without writing a verdict (hard kill,
           crash, machine sleep). The lock is cleaned; re-run to relaunch
           the gate fresh.
@@ -578,6 +586,117 @@ fi
 # =============================================================================
 # LAUNCHER / WAITER ROLE (default)
 # =============================================================================
+
+# --- Tier-pin validation: label → command (0.20.0) ---------------------------
+# The completion guard (_complete_allowed in ralph-common.sh) honours a
+# tasks-complete signal only when `<label>-latest.cmd` matches the command
+# pinned for that tier in .ralph/command-policy [gates]. Nothing checked that
+# at RUN time: _write_breadcrumbs records whatever command it was handed, and
+# the tier lock in ralph-guard.sh is a command→label check ("a pinned command
+# must run under its own tier label") — which never fires for a command that
+# is not pinned at all.
+#
+# So a run whose own deliverable rewrites the gate command (curve CUR-8:
+# `./scripts/gate.sh` → `./scripts/gate.sh full`) invalidates its frozen
+# completion bar, keeps passing green gates for hours, and only discovers the
+# mismatch at COMPLETE — where the sole fix, editing .ralph/command-policy, is
+# correctly denied as loop-managed state. Deadlock.
+#
+# This is the missing direction: a tier label must run its pinned command,
+# checked before any lock, breadcrumb, or runner exists. A stale pin now costs
+# one gate invocation instead of a whole run.
+
+# Inline copy of _load_gates_from_policy. gate-run.sh is standalone and does
+# not source ralph-common.sh; keeping a small private copy mirrors the pattern
+# ralph-guard.sh already uses (_guard_load_gates). Keep all three in sync.
+_gate_load_gates() {
+  local policy="$1"
+  local basic_var="$2" full_var="$3" final_var="$4"
+  local basic_cmd="" full_cmd="" final_cmd=""
+
+  if [[ -f "$policy" ]]; then
+    local section="" line key value
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line%$'\r'}"
+      line="$(printf '%s' "$line" | sed -E 's/[[:space:]]+$//')"
+      case "$line" in
+        "" | \#*) continue ;;
+        "[gates]")
+          section="gates"
+          continue
+          ;;
+        "["*"]")
+          section=""
+          continue
+          ;;
+      esac
+      [[ "$section" == "gates" ]] || continue
+      [[ "$line" == *"|"* ]] || continue
+      key="${line%%|*}"
+      value="${line#*|}"
+      key="$(printf '%s' "$key" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+      value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+      # shellcheck disable=SC2034  # tier locals are read indirectly via eval below
+      case "$key" in
+        basic) basic_cmd="$value" ;;
+        full) full_cmd="$value" ;;
+        final) final_cmd="$value" ;;
+      esac
+    done <"$policy"
+  fi
+  eval "$basic_var=\$basic_cmd"
+  eval "$full_var=\$full_cmd"
+  eval "$final_var=\$final_cmd"
+}
+
+case "$label" in
+  basic | full | final)
+    _pin_basic=""
+    _pin_full=""
+    _pin_final=""
+    _gate_load_gates "$workspace/.ralph/command-policy" _pin_basic _pin_full _pin_final
+    case "$label" in
+      basic) _pinned_cmd="$_pin_basic" ;;
+      full) _pinned_cmd="$_pin_full" ;;
+      *) _pinned_cmd="$_pin_final" ;;
+    esac
+    # No policy file, or no row for this tier, means no bar to be stale
+    # against: gate-run.sh stays usable standalone, outside a Ralph run.
+    # (_validate_gates_section is what refuses to START a loop with an
+    # incomplete [gates] section.)
+    if [[ -n "$_pinned_cmd" ]]; then
+      # Same normalization _complete_allowed applies before comparing — a
+      # stricter one here would reject commands that DO satisfy the bar.
+      _pinned_cmd=$(printf '%s' "$_pinned_cmd" | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//')
+      if [[ "$_cmd_norm" != "$_pinned_cmd" ]]; then
+        {
+          echo "gate-run.sh: STALE TIER PIN — the '$label' gate must run the command pinned in .ralph/command-policy [gates]."
+          printf '  %-28s: %s\n' "pinned for [gates].$label" "$_pinned_cmd"
+          printf '  %-28s: %s\n' "invoked under label=$label" "$_cmd_norm"
+          echo "  Nothing ran; no breadcrumb was written, so the last real verdict is untouched."
+          echo "  The completion guard compares '$label-latest.cmd' against the pin, so a gate run"
+          echo "  under this label with any other command can never satisfy completion."
+          echo "  Two legal fixes:"
+          echo "    1. Run the pinned command verbatim: gate-run.sh $label $_pinned_cmd"
+          echo "    2. If the PIN is the stale one (the run changed the gate command itself),"
+          echo "       .ralph/command-policy is loop-managed and must not be edited — write"
+          echo "       .ralph/policy-proposal with the correct [gates] rows and a one-line why,"
+          echo "       then stop. The operator applies it; it ships in the post-mortem bundle."
+        } >&2
+        _log_activity "🧪 GATE BLOCKED label=$label — stale tier pin (pinned='$_pinned_cmd' invoked='$_cmd_norm')"
+        if [[ -d "$workspace/.ralph" ]]; then
+          {
+            printf '[%s] STALE TIER PIN: gate label=%s pinned=%s invoked=%s\n' \
+              "$(date '+%H:%M:%S')" "$label" "$_pinned_cmd" "$_cmd_norm"
+            printf '  .ralph/command-policy [gates].%s does not describe the command being run.\n' "$label"
+            printf '  Run the pinned command, or record .ralph/policy-proposal if the pin is stale.\n'
+          } >>"$workspace/.ralph/errors.log" 2>/dev/null || true
+        fi
+        exit 64
+      fi
+    fi
+    ;;
+esac
 
 # --- Join an in-flight gate of this label -----------------------------------
 # A live lock holding the SAME command means the gate is already running:

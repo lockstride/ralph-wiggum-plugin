@@ -15,10 +15,33 @@ PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPTS_DIR="$PLUGIN_ROOT/shared-scripts"
 TEMPLATES_DIR="$PLUGIN_ROOT/shared-references/templates"
 
+# Scrub any inherited git environment (0.20.0).
+#
+# `git commit` exports GIT_DIR and GIT_INDEX_FILE to its hooks, and
+# .githooks/pre-commit runs this suite. Inherited, they retarget every `git`
+# call in a mock workspace at the REAL repository: `git init` reinitializes
+# it, `git add .gitignore` stages the MOCK's file into the real index, and
+# `git commit -m init` seals whatever the in-progress commit had staged into
+# a bogus "init" commit on the branch — the staged work disappears into it
+# and the outer commit aborts with "no changes added to commit". Observed
+# exactly once, which is once more than acceptable for a test suite.
+#
+# Scrubbed twice: at load time (every .bats file does `load test_helper`), so
+# stray git calls in any test are safe, and again inside
+# create_mock_workspace, which is the one that WRITES — load-time alone would
+# miss an environment that appears later in the test.
+_scrub_git_env() {
+  unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_COMMON_DIR GIT_NAMESPACE \
+    GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_AUTHOR_DATE GIT_COMMITTER_DATE
+}
+_scrub_git_env
+
 # Create a temporary mock workspace with the minimum structure Ralph expects.
 # Sets MOCK_WORKSPACE to the created path. Cleaned up automatically by bats
 # via BATS_TMPDIR.
 create_mock_workspace() {
+  _scrub_git_env
   MOCK_WORKSPACE="$(mktemp -d "$BATS_TMPDIR/ralph-test-XXXXXX")"
   mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
 

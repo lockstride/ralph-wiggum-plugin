@@ -14,8 +14,17 @@
 #   final   eval-loop gate, post-completion          (heaviest: full acceptance)
 #
 # Loop refuses to start if any tier is missing. The tier-command label-lock
-# requires each tier command to run under its own label — sidestepping is
-# denied. Same command for two tiers is allowed.
+# binds label and command in BOTH directions: each tier command must run under
+# its own label, and each tier label refuses any command but its pinned one
+# (exit 64, nothing runs). Same command for two tiers is allowed.
+#
+# ⚠ These pins are frozen for the whole run. Never pin a tier to a command the
+# run itself is scoped to change — e.g. a task that rewrites ./scripts/gate.sh
+# to take a tier argument invalidates `full | ./scripts/gate.sh` the moment it
+# lands. Author the post-change command up front, or split the work so the
+# rewrite lands and this file is re-authored before the rest runs. An agent
+# that hits a stale pin cannot repair it (this file is loop-managed and writes
+# to it are denied): it records .ralph/policy-proposal and stops.
 
 [gates]
 basic | pnpm basic-check

@@ -366,6 +366,47 @@ check_gutter() {
 # whole command back to the logged path. Quoted separators are stripped
 # before splitting (see below), so a `|`/`;`/`&&`/`||` inside a quoted
 # argument cannot mis-split the command.
+#
+# 0.20.0: the every-segment rule was already right; the VOCABULARY was too
+# small, so long read-only diagnostic chains still landed in errors.log on one
+# unlisted segment (a run of 19 SHELL FAIL entries was mostly this). Three
+# additions, all conservative: common read-only utilities (printf/sort/awk/jq/
+# stat/…), subcommand-gated `git` and `docker` (interrogation verbs only —
+# several of which exit 1 as their ANSWER: `git check-ignore`, `git diff
+# --quiet`, `git grep`, `docker info`), and a redirect check that treats
+# `> file` as the write it is regardless of the command in front of it.
+# Fill $_SUB1 / $_SUB2 with the first two words after a segment's command
+# name, skipping the command's own leading flags (and the value of git's
+# `-C` / `-c`, which take one). `git -C /repo worktree list --porcelain`
+# yields _SUB1=worktree, _SUB2=list. $_SUB2 is verbatim — a flag can be the
+# meaningful second word (`git config --get`).
+_SUB1=""
+_SUB2=""
+_split_subcommand() {
+  local seg="$1"
+  local -a w
+  read -ra w <<<"$seg"
+  _SUB1=""
+  _SUB2=""
+  local i=1
+  while [[ $i -lt ${#w[@]} ]]; do
+    case "${w[$i]}" in
+      -C | -c)
+        i=$((i + 2))
+        ;;
+      -*)
+        i=$((i + 1))
+        ;;
+      *)
+        _SUB1="${w[$i]}"
+        [[ $((i + 1)) -lt ${#w[@]} ]] && _SUB2="${w[$((i + 1))]}"
+        return 0
+        ;;
+    esac
+  done
+  return 0
+}
+
 _is_expected_nonzero_diagnostic() {
   local cmd="$1" exit_code="$2"
   [[ "$exit_code" -eq 1 ]] || return 1
@@ -398,12 +439,75 @@ _is_expected_nonzero_diagnostic() {
         first="${seg%%[[:space:]]*}"
         ;;
     esac
+    # 0.20.0: a redirect into a FILE is a write no matter how read-only the
+    # command is (`printf … > f`, `sort … > out`, and the pre-existing
+    # `cat > f` hole). Discards (`>/dev/null`) and fd dups (`2>&1`) are not
+    # writes and stay read-only — they are ubiquitous in diagnostic idioms.
+    # Checked on a throwaway copy; quoted spans are already gone, so a `>`
+    # inside an argument cannot trip this.
+    local _redir="${seg//>&/}"
+    _redir=$(printf '%s' "$_redir" | sed -E 's/>>?[[:space:]]*\/dev\/null//g')
+    [[ "$_redir" == *">"* ]] && return 1
+
     case "$first" in
       cd | ls | cat | grep | head | tail | wc | echo | sleep | test | \[ | true) ;;
+      # 0.20.0: read-only utilities that were missing from the vocabulary, so
+      # a chain built from them (`… | sort -u`, `awk … | column -t`) fell to
+      # the logged path on one unlisted segment.
+      printf | pwd | sort | uniq | cut | tr | awk | jq | basename | dirname | \
+        stat | date | diff | column | nl | rev | file | which | type)
+        # `sort -o FILE` writes in place; everything else here cannot.
+        case " $seg " in
+          *" -o "*) return 1 ;;
+        esac
+        ;;
       # Control-flow keywords are inert (they run no command themselves); a
       # segment that IS one is read-only by construction. (`in` is never a
       # segment-first — `for f in …` splits on `;`, so `in` stays mid-segment.)
       for | while | until | if | do | done | then | else | elif | fi) ;;
+      git)
+        # 0.20.0: git is read-only in most of its interrogation forms, and
+        # several of them exit 1 to ANSWER rather than to fail — `git diff
+        # --quiet` (differences exist), `git check-ignore` (path not ignored),
+        # `git grep` (no match). Those chains dominated the false SHELL FAIL
+        # entries. Subcommand-gated: only the listed verbs qualify; anything
+        # else under git (commit, add, checkout, push, clean, reset, …) keeps
+        # the logged path.
+        _split_subcommand "$seg"
+        case "$_SUB1" in
+          status | log | show | diff | branch | describe | blame | shortlog | \
+            grep | ls-files | ls-tree | ls-remote | check-ignore | check-attr | \
+            rev-parse | rev-list | merge-base | name-rev | cat-file | \
+            for-each-ref | symbolic-ref | count-objects | verify-commit | var) ;;
+          # Verbs that both read and write depending on form: read-only only
+          # in their explicit list/get shape.
+          worktree | stash | remote | config | tag | submodule | notes | bisect)
+            case "$_SUB2" in
+              list | status | show | log | -l | -v | --list | --get | --get-all | --get-regexp) ;;
+              *) return 1 ;;
+            esac
+            ;;
+          *) return 1 ;;
+        esac
+        ;;
+      docker)
+        # Same treatment: the inspection verbs only. `docker info`/`ps` exit
+        # non-zero when the daemon is down, which is exactly what the
+        # `docker info >/dev/null 2>&1 && … || …` probe idiom asks about.
+        _split_subcommand "$seg"
+        case "$_SUB1" in
+          ps | info | images | inspect | logs | version | top | port | stats | \
+            events | history | diff | search) ;;
+          volume | network | image | container | system | node | context | \
+            compose | buildx)
+            case "$_SUB2" in
+              ls | ps | inspect | config | logs | df | version | history | top) ;;
+              *) return 1 ;;
+            esac
+            ;;
+          *) return 1 ;;
+        esac
+        ;;
       find)
         # Read-only search only; reject filesystem-mutating / exec actions.
         case " $seg " in

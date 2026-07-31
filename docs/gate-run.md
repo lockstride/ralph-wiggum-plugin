@@ -25,7 +25,7 @@ gate-run.sh -h | --help
 
 Fixed set, two families:
 
-**Tier labels** — exactly one command each, declared in `[gates]` in `.ralph/command-policy`. The tier-command label-lock requires each `[gates]` command to run under its own tier label.
+**Tier labels** — exactly one command each, declared in `[gates]` in `.ralph/command-policy`. The tier-command label-lock binds label and command in both directions: each `[gates]` command must run under its own tier label, and each tier label refuses any command but its pinned one (exit 64, before anything runs).
 
 | Label    | Typical use                                                          | Default timeout |
 | -------- | -------------------------------------------------------------------- | --------------- |
@@ -45,11 +45,13 @@ Fixed set, two families:
 
 Each label gets its own artifact namespace — `<label>-latest.{log,exit,cmd,summary}`. The `full-latest.cmd` file is what the completion guard `_complete_allowed` uses to refuse `<promise>ALL_TASKS_DONE</promise>` when the impl-loop completion command was spoofed (e.g. running a cheap command under `gate-run.sh full`). The label-lock catches spoofs the other way too — running the tier-`full` command under `gate-run.sh basic` is denied.
 
+Since 0.20.0 the mismatch is caught at the point of the run rather than at COMPLETE. `gate-run.sh full <anything but [gates].full>` exits 64 immediately: nothing executes, no breadcrumb is written, and the message names the label, the pin, and the command you passed. This closes the case where a run's *own work* invalidates the pin — a task that rewrites the gate command means every subsequent tier gate silently stops counting, and pre-0.20 that surfaced only hours later at COMPLETE, where the sole repair (editing loop-managed `.ralph/command-policy`) is denied. If the pin is the stale side, the agent records `.ralph/policy-proposal` and stops; the operator applies it.
+
 ### Exit codes
 
 - `0` — the wrapped command succeeded.
 - `N≠0` — the wrapped command exited `N`. Passed through verbatim via `PIPESTATUS`.
-- `64` — usage error (missing args, invalid label).
+- `64` — usage error (missing args, invalid label), or a **stale tier pin**: a tier label was handed a command other than the one pinned for it in `[gates]`. Nothing runs and no breadcrumb is written — such a run could never satisfy the completion guard anyway.
 - `75` — gate busy: another gate of this label is still running and the lock could not be acquired within `RALPH_GATE_LOCK_WAIT`. Transient — no breadcrumb is written; wait for the in-progress gate and retry.
 - `124` — timed out (matches the GNU/BSD `timeout` convention).
 

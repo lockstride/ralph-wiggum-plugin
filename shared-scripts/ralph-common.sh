@@ -490,6 +490,7 @@ The handoff block above is already inlined — do NOT re-read \`.ralph/handoff.m
 - \`.ralph/guardrails.md\` — lessons from past failures.
 - \`.ralph/errors.log\` — recent failures to avoid repeating.
 - \`.ralph/orphan-leak.md\` — if present, prior loop committed files that were untracked at its start; classify and proceed.
+- \`.ralph/policy-proposal\` — WRITE-only escape hatch. If \`.ralph/command-policy\` itself is the blocker (e.g. a \`[gates]\` tier pins a command this run has since changed, so the gate you must run can never satisfy completion), do NOT edit command-policy — it is loop-managed and denied. Write the \`[gates]\` rows you believe are correct plus a one-line why here, then stop. The operator applies it; it ships in the post-mortem bundle.
 
 ## Stop conditions (the only four)
 
@@ -838,19 +839,40 @@ _write_postmortem() {
   ts=$(date -u '+%Y%m%dT%H%M%SZ')
   local tarball="$pm_dir/${ts}-${reason}.tar.gz"
 
+  # 0.20.0: the loop's OWN terminal stops classify themselves. Pre-0.20 only
+  # an agent-signaled `<ralph>GUTTER reason=…</ralph>` ever wrote
+  # .ralph/gutter-reason (stream-parser.sh), so a loop-side halt shipped a
+  # bundle whose meta had `reason: unsatisfiable-completion` but no
+  # `gutter_reason:` — and a supervisor reading the bundle (or the live
+  # workspace) to decide "auto-resume or escalate?" saw an unclassified halt.
+  # Every caller already passes a stable slug as $2; reuse it as the
+  # classification. An agent-supplied reason is never overwritten — it is more
+  # specific than the stop path's own name. run_loop clears the breadcrumb at
+  # each loop start, so leaving it on disk for a live reader cannot go stale.
+  #
+  # The agent-signaled path is excluded: on a bare `<ralph>GUTTER</ralph>` the
+  # slug is just "gutter", and recording `gutter_reason: gutter` would dress an
+  # unexplained halt up as a classification. Absence there is the honest answer
+  # (supervisors render it as "unclassified").
+  if [[ "$reason" != "gutter" && ! -f "$ralph_dir/gutter-reason" ]]; then
+    printf '%s' "$reason" >"$ralph_dir/gutter-reason" 2>/dev/null || true
+  fi
+
   local staging
   staging=$(mktemp -d) || return 0
 
   local f
   for f in errors.log activity.log progress.md guardrails.md effective-prompt.md \
     loop-baseline-head loop-baseline-untracked task-file-path command-policy \
-    gutter-reason; do
+    policy-proposal gutter-reason; do
     [[ -f "$ralph_dir/$f" ]] && cp "$ralph_dir/$f" "$staging/" 2>/dev/null || true
   done
 
-  # 0.18.0: surface the agent's structured gutter reason (if any) in the meta
-  # so a supervisor reading the bundle can classify the halt without parsing
-  # activity.log. Empty for non-gutter bundles and bare `<ralph>GUTTER</ralph>`.
+  # 0.18.0: surface the structured gutter reason (if any) in the meta so a
+  # supervisor reading the bundle can classify the halt without parsing
+  # activity.log. 0.20.0: this is now the agent's reason on an agent-signaled
+  # gutter and the stop-path slug on every loop-side halt — empty only for a
+  # bare, unexplained `<ralph>GUTTER</ralph>`.
   local gutter_reason=""
   [[ -f "$ralph_dir/gutter-reason" ]] && gutter_reason=$(head -1 "$ralph_dir/gutter-reason" 2>/dev/null || true)
 
@@ -1692,11 +1714,21 @@ _validate_gates_section() {
 # When this function returns non-zero, $_COMPLETE_BLOCK_REASON is set to
 # a short, human-readable phrase the caller logs verbatim — single
 # source of truth for the BLOCKED message in activity.log/progress.md.
+#
+# 0.20.0: $_COMPLETE_BLOCK_CLASS carries WHO can clear the block.
+#   policy    — the bar disagrees with .ralph/command-policy [gates]. The
+#               agent cannot fix this: command-policy is loop-managed state
+#               and writes to it are denied. Looping again is guaranteed
+#               waste, so _complete_block_escalates trips on the FIRST one.
+#   transient — the gate is in flight, has not run yet, or is red. All three
+#               are things the agent can act on; these keep the streak rule.
 _COMPLETE_BLOCK_REASON=""
+_COMPLETE_BLOCK_CLASS=""
 
 _complete_allowed() {
   local workspace="$1"
   _COMPLETE_BLOCK_REASON=""
+  _COMPLETE_BLOCK_CLASS=""
 
   local _basic _full _final
   _load_gates_from_policy "$workspace" _basic _full _final
@@ -1717,6 +1749,7 @@ _complete_allowed() {
 
   if [[ -z "$pinned_gate" ]]; then
     _COMPLETE_BLOCK_REASON="no [gates].${label} in .ralph/command-policy"
+    _COMPLETE_BLOCK_CLASS="policy"
     return 1
   fi
 
@@ -1733,12 +1766,14 @@ _complete_allowed() {
     if [[ "$_hpid" =~ ^[0-9]+$ ]] && kill -0 "$_hpid" 2>/dev/null; then
       _lock_age=$(($(date +%s) - $(stat -f '%m' "$_lock_dir" 2>/dev/null || stat -c '%Y' "$_lock_dir" 2>/dev/null || echo 0)))
       _COMPLETE_BLOCK_REASON="${label} gate is still running (detached runner pid=${_hpid}, ${_lock_age}s elapsed) — wait for its verdict"
+      _COMPLETE_BLOCK_CLASS="transient"
       return 1
     fi
   fi
 
   if [[ ! -f "$cmd_file" ]]; then
     _COMPLETE_BLOCK_REASON="${label} gate \"$pinned_gate\" has not run yet"
+    _COMPLETE_BLOCK_CLASS="transient"
     return 1
   fi
 
@@ -1749,12 +1784,14 @@ _complete_allowed() {
 
   if [[ "$actual_cmd" != "$pinned_cmd" ]]; then
     _COMPLETE_BLOCK_REASON="${label} gate must run \"$pinned_cmd\" but last label=${label} ran \"$actual_cmd\""
+    _COMPLETE_BLOCK_CLASS="policy"
     return 1
   fi
   local gate_exit=""
   [[ -f "$exit_file" ]] && gate_exit=$(cat "$exit_file" 2>/dev/null)
   if [[ "$gate_exit" != "0" ]]; then
     _COMPLETE_BLOCK_REASON="${label} gate \"$pinned_cmd\" exited ${gate_exit:-?}"
+    _COMPLETE_BLOCK_CLASS="transient"
     return 1
   fi
   return 0
@@ -1782,6 +1819,15 @@ _complete_block_escalates() {
     _COMPLETE_BLOCK_COUNT=1
     _LAST_COMPLETE_BLOCK_REASON="$reason"
   fi
+  # 0.20.0: a policy-class block needs no confirmation. The threshold exists
+  # because a FIRST block can be benign — the agent signaled COMPLETE before
+  # the gate ran, and one more loop clears it. A [gates] disagreement is not
+  # that: .ralph/command-policy is loop-managed, writes to it are denied, and
+  # the pinned command is exactly what the guard already refused. The second
+  # loop is guaranteed to reach the identical block, so it buys nothing but a
+  # full extra gate's wall-clock (3m 7s in the run that motivated this; more
+  # on a slower gate). Fail loud on the first one instead.
+  [[ "$_COMPLETE_BLOCK_CLASS" == "policy" ]] && return 0
   [[ $_COMPLETE_BLOCK_COUNT -ge ${RALPH_COMPLETE_BLOCK_THRESHOLD:-2} ]]
 }
 
@@ -1790,12 +1836,22 @@ _complete_block_escalates() {
 # message. $_COMPLETE_BLOCK_REASON must still hold the (repeated) reason.
 _fail_unsatisfiable_completion() {
   local workspace="$1" task_suffix="${2:-}"
-  log_activity "$workspace" "RALPH STOP — 🚨 UNSATISFIABLE COMPLETION BAR: blocked ${_COMPLETE_BLOCK_COUNT}× in a row with the same reason ($_COMPLETE_BLOCK_REASON). The bar cannot be met in this phase — likely a .ralph/command-policy [gates] misconfiguration, not agent error.$task_suffix"
+  # 0.20.0: a policy-class block stops on its first occurrence, so "blocked 1×
+  # in a row" would read as a premature give-up. Say WHY it is terminal.
+  local _how="blocked ${_COMPLETE_BLOCK_COUNT}× in a row with the same reason"
+  if [[ "$_COMPLETE_BLOCK_CLASS" == "policy" ]]; then
+    _how="the bar disagrees with .ralph/command-policy [gates], which the agent cannot edit"
+  fi
+  log_activity "$workspace" "RALPH STOP — 🚨 UNSATISFIABLE COMPLETION BAR: $_how ($_COMPLETE_BLOCK_REASON). The bar cannot be met in this phase — likely a .ralph/command-policy [gates] misconfiguration, not agent error.$task_suffix"
   log_progress "$workspace" "**Ralph stopped** — 🚨 Unsatisfiable completion bar ($_COMPLETE_BLOCK_REASON)"
-  echo "🚨 Completion blocked ${_COMPLETE_BLOCK_COUNT}× in a row with the same reason:"
+  echo "🚨 Completion is unsatisfiable — $_how:"
   echo "   $_COMPLETE_BLOCK_REASON"
   echo "   This bar cannot be satisfied in the current phase. Check .ralph/command-policy"
   echo "   [gates] and the tier-gate this loop runs (impl → full, eval → final)."
+  if [[ "$_COMPLETE_BLOCK_CLASS" == "policy" ]]; then
+    echo "   If the agent left .ralph/policy-proposal, it names the [gates] rows it believes"
+    echo "   are stale — review and apply them before re-running."
+  fi
   _write_postmortem "$workspace" "unsatisfiable-completion"
 }
 

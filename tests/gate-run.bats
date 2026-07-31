@@ -592,3 +592,102 @@ exit 1' || true
   # And the bare, unchecked form must be gone.
   ! grep -Eq "perl -MPOSIX -e 'POSIX::setsid\(\);" "$SCRIPTS_DIR/gate-run.sh"
 }
+
+# ---------------------------------------------------------------------------
+# Tier-pin validation: label → command (0.20.0)
+#
+# The completion guard honours a tier gate only when <label>-latest.cmd equals
+# the [gates] pin. Pre-0.20 nothing checked that at run time, so a run whose
+# own deliverable changed the gate command (curve CUR-8) kept passing gates
+# against an invalidated bar and only discovered it hours later at COMPLETE —
+# where the sole fix, editing loop-managed .ralph/command-policy, is denied.
+# ---------------------------------------------------------------------------
+
+_seed_gates_policy() {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[gates]
+basic | ${1:-mock basic-check}
+full  | ${2:-mock all-check}
+final | ${3:-mock verify:final}
+EOF
+}
+
+@test "tier label running its pinned command is allowed (0.20.0)" {
+  _seed_gates_policy "true" "true" "true"
+  run bash "$SCRIPTS_DIR/gate-run.sh" full true
+  [ "$status" -eq 0 ]
+}
+
+@test "tier label running a DIFFERENT command exits 64 (0.20.0)" {
+  # The exact CUR-8 shape: policy pins the argless script, the agent runs the
+  # tiered one.
+  _seed_gates_policy "./scripts/gate.sh" "./scripts/gate.sh" "./scripts/gate.sh"
+  run bash "$SCRIPTS_DIR/gate-run.sh" full ./scripts/gate.sh full
+  [ "$status" -eq 64 ]
+}
+
+@test "stale-pin error names the label, the pin, and the invoked command (0.20.0)" {
+  _seed_gates_policy "./scripts/gate.sh" "./scripts/gate.sh" "./scripts/gate.sh"
+  run bash "$SCRIPTS_DIR/gate-run.sh" full ./scripts/gate.sh full
+  echo "$output" | grep -q "STALE TIER PIN"
+  echo "$output" | grep -q "\[gates\].full"
+  echo "$output" | grep -q "pinned for .*: ./scripts/gate.sh$"
+  echo "$output" | grep -q "invoked under label=full *: ./scripts/gate.sh full"
+  # And it names the sanctioned escape hatch for a pin that is itself stale.
+  echo "$output" | grep -q ".ralph/policy-proposal"
+}
+
+@test "stale pin writes no breadcrumb and leaves no lock (0.20.0)" {
+  # Nothing ran, so the previous real verdict must survive untouched and a
+  # re-run of the correct command must not find a lock in its way.
+  _seed_gates_policy "true" "true" "true"
+  printf 'true'  > "$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '0'     > "$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+
+  run bash "$SCRIPTS_DIR/gate-run.sh" full false
+  [ "$status" -eq 64 ]
+
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd")" = "true" ]
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gates/full-latest.exit")" = "0" ]
+  [ ! -d "$MOCK_WORKSPACE/.ralph/gates/.full.lock" ]
+}
+
+@test "stale pin is recorded in activity.log and errors.log (0.20.0)" {
+  _seed_gates_policy "true" "true" "true"
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic false
+  [ "$status" -eq 64 ]
+  grep -q "GATE BLOCKED label=basic — stale tier pin" "$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -q "STALE TIER PIN: gate label=basic" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "whitespace differences alone do not trip the tier pin (0.20.0)" {
+  # Normalization must match _complete_allowed's, or a gate that DOES satisfy
+  # the completion bar would be refused here.
+  _seed_gates_policy "true" "echo  a   b" "true"
+  run bash "$SCRIPTS_DIR/gate-run.sh" full echo a b
+  [ "$status" -eq 0 ]
+}
+
+@test "kind labels are not pinned and run any command (0.20.0)" {
+  # Only the three tier labels own a [gates] command; unit/lint/e2e/… are
+  # free-form by design.
+  _seed_gates_policy "true" "true" "true"
+  run bash "$SCRIPTS_DIR/gate-run.sh" unit echo anything
+  [ "$status" -eq 0 ]
+}
+
+@test "no command-policy means no pin to be stale against (0.20.0)" {
+  # gate-run.sh stays usable standalone, outside a Ralph run.
+  [ ! -f "$MOCK_WORKSPACE/.ralph/command-policy" ]
+  run bash "$SCRIPTS_DIR/gate-run.sh" full true
+  [ "$status" -eq 0 ]
+}
+
+@test "a policy with no row for this tier does not block it (0.20.0)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[gates]
+basic | mock basic-check
+EOF
+  run bash "$SCRIPTS_DIR/gate-run.sh" full true
+  [ "$status" -eq 0 ]
+}

@@ -1316,3 +1316,108 @@ TASKS
   # Meta names the reason so a supervisor can classify without the transcript.
   tar -xzOf "$tarball" ./post-mortem-meta.txt | grep -q "gutter_reason: concurrent-writer"
 }
+
+# ---------------------------------------------------------------------------
+# Halt classification (0.20.0)
+#
+# Pre-0.20 only an agent-signaled `<ralph>GUTTER reason=…</ralph>` ever wrote
+# .ralph/gutter-reason, so a loop-side stop shipped a post-mortem whose meta
+# had `reason: unsatisfiable-completion` but no `gutter_reason:` — and a
+# supervisor deciding "auto-resume or escalate?" saw an unclassified halt.
+# ---------------------------------------------------------------------------
+
+@test "_write_postmortem: a loop-side stop classifies itself (0.20.0)" {
+  _write_postmortem "$MOCK_WORKSPACE" "unsatisfiable-completion"
+
+  local pm
+  pm=$(ls "$MOCK_WORKSPACE"/.ralph-postmortems/*-unsatisfiable-completion.tar.gz)
+  [ -f "$pm" ]
+  tar -xzOf "$pm" ./post-mortem-meta.txt | grep -q "^gutter_reason: unsatisfiable-completion$"
+  # And the live breadcrumb exists for a supervisor reading the workspace.
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gutter-reason")" = "unsatisfiable-completion" ]
+}
+
+@test "_write_postmortem: an agent-supplied reason is never overwritten (0.20.0)" {
+  # The agent's own reason is more specific than the stop path's name.
+  printf 'concurrent-writer' > "$MOCK_WORKSPACE/.ralph/gutter-reason"
+  _write_postmortem "$MOCK_WORKSPACE" "stall-natural"
+
+  local pm
+  pm=$(ls "$MOCK_WORKSPACE"/.ralph-postmortems/*-stall-natural.tar.gz)
+  tar -xzOf "$pm" ./post-mortem-meta.txt | grep -q "^gutter_reason: concurrent-writer$"
+}
+
+@test "_write_postmortem: a bare agent GUTTER stays unclassified (0.20.0)" {
+  # `gutter_reason: gutter` would dress an unexplained halt up as a
+  # classification. Absence is the honest answer.
+  _write_postmortem "$MOCK_WORKSPACE" "gutter"
+
+  local pm
+  pm=$(ls "$MOCK_WORKSPACE"/.ralph-postmortems/*-gutter.tar.gz)
+  ! tar -xzOf "$pm" ./post-mortem-meta.txt | grep -q "^gutter_reason:"
+  [ ! -f "$MOCK_WORKSPACE/.ralph/gutter-reason" ]
+}
+
+@test "_write_postmortem: bundles .ralph/policy-proposal (0.20.0)" {
+  printf '[gates]\nfull | ./scripts/gate.sh full\n' \
+    > "$MOCK_WORKSPACE/.ralph/policy-proposal"
+  _write_postmortem "$MOCK_WORKSPACE" "unsatisfiable-completion"
+
+  local pm
+  pm=$(ls "$MOCK_WORKSPACE"/.ralph-postmortems/*-unsatisfiable-completion.tar.gz)
+  tar -tzf "$pm" | grep -q "policy-proposal"
+  tar -xzOf "$pm" ./policy-proposal | grep -q "./scripts/gate.sh full"
+}
+
+# ---------------------------------------------------------------------------
+# Completion-block classes (0.20.0) — a bar the agent cannot clear stops on
+# the first block; one it can still gets its confirmation loop.
+# ---------------------------------------------------------------------------
+
+@test "_complete_allowed: a pin mismatch is class=policy (0.20.0)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'mock basic-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '0'                >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [ "$_COMPLETE_BLOCK_CLASS" = "policy" ]
+}
+
+@test "_complete_allowed: a red gate is class=transient (0.20.0)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'mock all-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '1'              >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [ "$_COMPLETE_BLOCK_CLASS" = "transient" ]
+}
+
+@test "_complete_block_escalates: a policy block escalates immediately (0.20.0)" {
+  # The agent cannot edit .ralph/command-policy, so a second identical loop
+  # buys nothing but another full gate's wall-clock.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'mock basic-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '0'                >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  _complete_block_escalates "$_COMPLETE_BLOCK_REASON"
+}
+
+@test "_complete_block_escalates: a transient block still needs two (0.20.0)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'mock all-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '1'              >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  ! _complete_block_escalates "$_COMPLETE_BLOCK_REASON"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  _complete_block_escalates "$_COMPLETE_BLOCK_REASON"
+}
+
+@test "_fail_unsatisfiable_completion: a policy stop names the proposal channel (0.20.0)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'mock basic-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '0'                >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  run _fail_unsatisfiable_completion "$MOCK_WORKSPACE"
+  echo "$output" | grep -q "cannot edit"
+  echo "$output" | grep -q ".ralph/policy-proposal"
+  # "blocked 1× in a row" would read as a premature give-up.
+  ! echo "$output" | grep -q "blocked 1×"
+}

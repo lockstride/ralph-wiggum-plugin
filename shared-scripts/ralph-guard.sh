@@ -782,8 +782,17 @@ _guard_write() {
   # Block writes to .ralph/ except allowlisted files
   if [[ "$rel_path" == .ralph/* ]]; then
     case "$rel_path" in
-      .ralph/handoff.md | .ralph/errors.log | .ralph/guardrails.md | .ralph/diagnosis.md | .ralph/progress.md | .ralph/acceptance-report.md)
+      .ralph/handoff.md | .ralph/errors.log | .ralph/guardrails.md | .ralph/diagnosis.md | .ralph/progress.md | .ralph/acceptance-report.md | .ralph/policy-proposal)
         # Allowed.
+        # 0.20.0: policy-proposal is the sanctioned answer to "the pinned
+        # command in .ralph/command-policy is the thing that's wrong". An
+        # agent that diagnosed a stale [gates] pin used to have NO legal move:
+        # command-policy is loop-managed and editing it is denied (correctly —
+        # a loop that can rewrite its own completion bar has no bar), so the
+        # run deadlocked. This is a proposal channel, not policy: nothing
+        # reads it back, the guard and the gate cache are unchanged, and the
+        # operator decides whether to apply it. It ships in the post-mortem
+        # bundle (_write_postmortem) so the decision has the evidence.
         # acceptance-report.md is writable because it is the eval loop's
         # primary output: the orchestrator (running-acceptance-evaluation)
         # appends History lines, and the verifier sub-agent
@@ -792,7 +801,7 @@ _guard_write() {
         # so writing it never leaks into git history.
         ;;
       *)
-        _block "Write to '$rel_path' denied. Files under .ralph/ (except handoff.md, errors.log, guardrails.md, diagnosis.md, progress.md, acceptance-report.md) are managed by the loop."
+        _block "Write to '$rel_path' denied. Files under .ralph/ (except handoff.md, errors.log, guardrails.md, diagnosis.md, progress.md, acceptance-report.md, policy-proposal) are managed by the loop. If you believe .ralph/command-policy itself is wrong (e.g. a [gates] tier pins a command this run has since changed), do NOT edit it — write .ralph/policy-proposal with the rows you believe are correct and a one-line why, then stop. The operator applies it."
         ;;
     esac
   fi
