@@ -1,6 +1,6 @@
 # Plugin skills (operator reference)
 
-Ralph ships **four** plugin skills — one maintenance skill (`ralph-plugin-speckit-update`) and three for the post-completion acceptance evaluator (orchestrator + verifier + rework). This doc is the *operator* view: what each skill does, when it's invoked, and how to override or disable. The agent-facing content lives in each skill's `SKILL.md`.
+Ralph ships **six** plugin skills — three maintenance skills (`ralph-plugin-speckit-update`, `ralph-wiggum-plugin-update`, `eval-ralph`) and three for the post-completion acceptance evaluator (orchestrator + verifier + rework). This doc is the *operator* view: what each skill does, when it's invoked, and how to override or disable. The agent-facing content lives in each skill's `SKILL.md`.
 
 > **Skills require plugin install.** Standalone-script users (Install Options A and B in the README) get the loop infrastructure, but the agent does NOT discover plugin skills. Install via the marketplace to unlock skill behavior. See [README → Install](../README.md#install).
 
@@ -53,6 +53,28 @@ These three drive the post-completion `ralph-evaluate` loop. The orchestrator + 
 **What it does:** Maintenance skill for updating the plugin's own Spec Kit integration files when a new Spec Kit version is released. Covers the adaptation guide, prompt-resolver, fallback prompt template, docs, and tests.
 
 **When invoked:** By the operator (you) when Spec Kit releases a new tagged version.
+
+## `ralph-wiggum-plugin-update`
+
+**File:** `skills/ralph-wiggum-plugin-update/SKILL.md` · **Invoke:** `/ralph-wiggum-plugin-update [patch|minor|major] [change note]`
+
+**What it does:** The plugin's own release workflow — implement a change, add or update bats tests, infer the version bump, bump `.claude-plugin/plugin.json`, commit with a Conventional Commit, push, tag, publish the GitHub release, and refresh the local install via `ralph --update`. `ralph-plugin-speckit-update` defers to this skill for its versioning and release steps.
+
+**When invoked:** By the operator (you) when changing the plugin. Typically invoked from another project, so it resolves the development clone itself.
+
+## `eval-ralph`
+
+**File:** `skills/eval-ralph/SKILL.md` · **Invoke:** `/eval-ralph [loop-fragment] [specific question]`
+
+**What it does:** Post-mortems a *completed* Ralph run from its `.ralph/` breadcrumbs — throughput and wall-clock, what went well or poorly, whether recent plugin changes actually fired (per-change, with log evidence), and mechanistic traces of gate/guard/cache behavior. Read-only; it starts no loop.
+
+**When invoked:** By the operator, usually with a loop fragment (`evaluate loop 152651`). Distinct from `/ralph-evaluate`, which *launches* the acceptance-evaluation loop.
+
+## Locating the plugin clone
+
+`ralph-wiggum-plugin-update` and `eval-ralph` both need the plugin's **development clone** while running from somewhere else entirely. Both follow `shared-references/locating-the-plugin-clone.md`: `$RALPH_PLUGIN_DIR` → `~/development/ralph-wiggum-plugin` → search verified by git remote → ask. Set `RALPH_PLUGIN_DIR` if your clone lives elsewhere.
+
+The reference also carries the guardrail that matters once these skills ship *inside* the plugin they operate on: `${CLAUDE_PLUGIN_ROOT}` is the **installed** copy, and writes there are wiped by the next `ralph --update`.
 
 ## How skills are wired into the loop
 

@@ -124,6 +124,31 @@ _all_skills() {
   [ -f "$SKILLS_DIR/verifying-acceptance-criteria/SKILL.md" ]
   [ -f "$SKILLS_DIR/addressing-acceptance-gaps/SKILL.md" ]
   [ -f "$SKILLS_DIR/ralph-plugin-speckit-update/SKILL.md" ]
+  [ -f "$SKILLS_DIR/ralph-wiggum-plugin-update/SKILL.md" ]
+  [ -f "$SKILLS_DIR/eval-ralph/SKILL.md" ]
+}
+
+@test "clone-resolving skills never hardcode an absolute home path (0.19.0)" {
+  # ralph-wiggum-plugin-update and eval-ralph run from an arbitrary cwd and must
+  # resolve the dev clone via shared-references/locating-the-plugin-clone.md.
+  # A literal /Users/<name>/ or /home/<name>/ path is machine-specific and wrong
+  # for every other operator.
+  for skill in ralph-wiggum-plugin-update eval-ralph; do
+    if grep -qE '(/Users|/home)/[a-zA-Z0-9._-]+/' "$SKILLS_DIR/$skill/SKILL.md"; then
+      echo "$skill/SKILL.md hardcodes an absolute home path" >&2
+      grep -nE '(/Users|/home)/[a-zA-Z0-9._-]+/' "$SKILLS_DIR/$skill/SKILL.md" >&2
+      return 1
+    fi
+  done
+}
+
+@test "clone-resolving skills point at the shared resolution reference (0.19.0)" {
+  for skill in ralph-wiggum-plugin-update eval-ralph; do
+    grep -q "locating-the-plugin-clone.md" "$SKILLS_DIR/$skill/SKILL.md" || {
+      echo "$skill/SKILL.md does not reference locating-the-plugin-clone.md" >&2
+      return 1
+    }
+  done
 }
 
 @test "ralph-plugin-speckit-update skill is present" {
