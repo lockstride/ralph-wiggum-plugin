@@ -136,6 +136,7 @@ ralph-wiggum-plugin/
 │   ├── gate-run.sh              # Verification-gate wrapper
 │   ├── ralph-evaluate.sh        # Acceptance evaluator
 │   ├── ralph-status.sh          # Operator status snapshot
+│   ├── ralph-supervise.sh       # Wraps a run: notify + auto-resume-once
 │   └── ralph-retry.sh           # DEFER retry orchestration
 ├── shared-references/templates/
 │   ├── speckit-prompt.md        # Cache-miss fallback for spec mode
