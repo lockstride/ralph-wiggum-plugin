@@ -642,6 +642,69 @@ tool_result_json() {
   echo "$output" | grep -q "^GUTTER$"
 }
 
+@test "emits DEFER (not GUTTER) on a subscription session-limit error" {
+  # Regression: a subscription quota is worded as a *named* limit — the
+  # `hit your limit` pattern needs those words adjacent, and "session" sits
+  # between them, so this fell through to NON-RETRYABLE → GUTTER. Observed
+  # 2026-08-01: four concurrent loops all died on a session limit that reset
+  # 68 minutes later, two seconds after the structured rate_limit event had
+  # already said "back off and retry automatically".
+  local msg="You've hit your session limit · resets 4am (America/New_York)"
+  local events
+  events=$(printf '{"kind":"error","message":%s}' "$(printf '%s' "$msg" | jq -R -s .)")
+
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "^DEFER$"
+  ! echo "$output" | grep -q "^GUTTER$"
+}
+
+@test "emits DEFER on the other named-quota wordings" {
+  # Same class, different nouns — all clear by themselves, none may GUTTER.
+  local msg
+  for msg in \
+    "You've hit your weekly limit · resets Monday" \
+    "You've hit your usage limit for this week" \
+    "Daily limit reached — limit will reset at midnight UTC"; do
+    local events output
+    events=$(printf '{"kind":"error","message":%s}' "$(printf '%s' "$msg" | jq -R -s .)")
+    output=$(run_parser "$events")
+    echo "$output" | grep -q "^DEFER$" || {
+      echo "expected DEFER for: $msg" >&2
+      return 1
+    }
+    ! echo "$output" | grep -q "^GUTTER$" || {
+      echo "unexpected GUTTER for: $msg" >&2
+      return 1
+    }
+  done
+}
+
+@test "rate_limit event persists resets_at for the loop's quota wait" {
+  # The epoch used to be printed and thrown away, leaving the DEFER handler
+  # with only its 300s-capped backoff — which always expired before a
+  # multi-hour reset and killed the run as a STALL. Persist it so the loop
+  # can sleep exactly as long as the limit actually lasts.
+  local future
+  future=$(($(date +%s) + 3600))
+  local events
+  events=$(printf '{"kind":"rate_limit","status":"rejected","resets_at":%s}' "$future")
+
+  run_parser "$events" >/dev/null
+
+  [ -f "$MOCK_WORKSPACE/.ralph/rate-limit-resets-at" ]
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/rate-limit-resets-at")" = "$future" ]
+}
+
+@test "rate_limit event within quota writes no reset file" {
+  # status != rejected is informational; it must not arm a quota wait.
+  local events='{"kind":"rate_limit","status":"allowed","resets_at":0}'
+
+  run_parser "$events" >/dev/null
+
+  [ ! -f "$MOCK_WORKSPACE/.ralph/rate-limit-resets-at" ]
+}
+
 @test "emits RECOVER on chained 'git add ... && git commit' command (0.5.4)" {
   # Spec-Kit prompt encourages: `git add <paths> && git commit -m "..."`
   # The pre-0.5.4 regex `^git[[:space:]]+commit` missed this because the

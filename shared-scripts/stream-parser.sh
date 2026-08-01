@@ -305,6 +305,16 @@ is_retryable_api_error() {
 
   if [[ "$lower_msg" =~ (rate[[:space:]]*limit|rate_limit|rate-limit) ]] ||
     [[ "$lower_msg" =~ (quota[[:space:]]*exceeded|quota[[:space:]]*limit|hit[[:space:]]*your[[:space:]]*limit) ]] ||
+    # A subscription quota is worded as a *named* limit — "You've hit your
+    # session limit · resets 4am", also weekly/usage/daily/monthly. The
+    # `hit your limit` pattern above requires the words adjacent, so the noun
+    # in between made every one of these NON-RETRYABLE → GUTTER, halting the
+    # runner on a condition that clears by itself (observed 2026-08-01: four
+    # concurrent loops all died at a session limit that reset 68 min later,
+    # two seconds after the structured rate_limit event had correctly said
+    # "back off and retry automatically").
+    [[ "$lower_msg" =~ (session|usage|weekly|daily|monthly)[[:space:]]*limit ]] ||
+    [[ "$lower_msg" =~ (limit[[:space:]]*(will[[:space:]]*)?reset|resets[[:space:]]*(at|in)) ]] ||
     [[ "$lower_msg" =~ (too[[:space:]]*many[[:space:]]*requests|429|http[[:space:]]*429) ]]; then
     return 0
   fi
@@ -894,6 +904,12 @@ process_line() {
         resets_at=$(echo "$line" | jq -r '.resets_at // 0' 2>/dev/null) || resets_at=0
         local resets_human=""
         if [[ $resets_at -gt 0 ]]; then
+          # Hand the reset time to the loop's DEFER handler, which waits for it
+          # instead of running the escalating backoff. Without this the epoch
+          # was printed and discarded, so the generic backoff (max 300s, stall
+          # ceiling 10 ≈ 33 min of waiting) always expired first on a
+          # multi-hour subscription limit and the run died as a STALL.
+          printf '%s\n' "$resets_at" >"$RALPH_DIR/rate-limit-resets-at" 2>/dev/null || true
           resets_human=$(date -r "$resets_at" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null) || resets_human="unix $resets_at"
         fi
         log_error "RATE LIMITED: API rejected the request. Resets at: ${resets_human:-unknown}"

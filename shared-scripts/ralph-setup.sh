@@ -450,6 +450,14 @@ main() {
 
   init_ralph_dir "$WORKSPACE"
 
+  # Clear any stop breadcrumb left by a PREVIOUS run before this one starts.
+  # The marker is consumed after run_ralph_loop returns, so a run that dies
+  # before reaching that check (or one that exits early because every task is
+  # already `[x]`) leaves it behind — and it then suppresses the acceptance
+  # chain on every subsequent resume, silently. Only a marker written during
+  # THIS run may mean "the operator stopped this run".
+  rm -f "$WORKSPACE/.ralph/.loop-stopped-by-user" 2>/dev/null || true
+
   # Refuse to start the loop if the project hasn't declared its three
   # tier-gate commands in .ralph/command-policy [gates]. The framing prompt,
   # completion guard, and label-lock all key on these — running without

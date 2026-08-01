@@ -1903,6 +1903,7 @@ run_ralph_loop() {
   _LAST_COMPLETE_BLOCK_REASON=""
   local natural_end_count=0 # 0.6.3: any natural-end (with or without progress) — measures "agent bailed politely instead of staying in flow"
   local DEFER_COUNT=0
+  local QUOTA_WAIT_COUNT=0 # deferrals slept off against an API-reported reset time
 
   while [[ $loop_n -le $MAX_LOOPS ]]; do
     local pre_counts
@@ -2150,24 +2151,56 @@ run_ralph_loop() {
         log_activity "$workspace" "LOOP $loop_label END — ⏸️ DEFERRED$task_suffix"
         log_progress "$workspace" "**Loop $loop_label ended** — ⏸️ DEFERRED"
         DEFER_COUNT=$((DEFER_COUNT + 1))
-        stall_count=$((stall_count + 1))
         # 0.3.7: bump the per-loop retry counter. Loop number stays the
         # same (DEFER means "retry this loop"), but the retry suffix
         # surfaces progress in activity.log/progress.md.
         retry=$((retry + 1))
-        if [[ $stall_count -ge 10 ]]; then
-          log_activity "$workspace" "RALPH STOP — 🚨 STALL: $stall_count consecutive empty/deferred loops"
-          log_progress "$workspace" "**Ralph stopped** — 🚨 STALL: $stall_count consecutive empty/deferred loops, likely rate limited"
-          echo "🚨 Stall detected: $stall_count consecutive loops with no progress (likely rate limited)."
-          echo "   Wait for your rate limit to reset and re-run."
-          _write_postmortem "$workspace" "stall-defer"
-          return 1
+
+        # When the API reported exactly when quota returns, wait for that
+        # rather than the escalating backoff below — a session/weekly limit
+        # clears hours out, far past the backoff's 300s ceiling, so the stall
+        # threshold would always trip first and kill a run that only needed to
+        # sleep. These waits do not count toward stall_count (we know why we
+        # are waiting), but are capped in both duration and number so a
+        # genuinely stuck account still terminates.
+        local resets_file="$workspace/.ralph/rate-limit-resets-at"
+        local resets_at=0
+        if [[ -f "$resets_file" ]]; then
+          resets_at=$(tr -dc '0-9' <"$resets_file" 2>/dev/null) || resets_at=0
+          [[ -z "$resets_at" ]] && resets_at=0
         fi
-        local defer_delay
-        defer_delay=$((15 * (1 << (DEFER_COUNT > 6 ? 6 : DEFER_COUNT - 1))))
-        [[ $defer_delay -gt 300 ]] && defer_delay=300
-        echo "⏸️  Waiting ${defer_delay}s before retrying (attempt $DEFER_COUNT)..."
-        sleep "$defer_delay"
+        local now_ts
+        now_ts=$(date +%s)
+        if [[ $resets_at -gt $now_ts ]] &&
+          [[ $QUOTA_WAIT_COUNT -lt ${RALPH_QUOTA_WAIT_MAX:-8} ]]; then
+          rm -f "$resets_file" 2>/dev/null || true
+          QUOTA_WAIT_COUNT=$((QUOTA_WAIT_COUNT + 1))
+          local quota_wait=$((resets_at - now_ts + 15))
+          local quota_max="${RALPH_RATE_LIMIT_MAX_WAIT:-21600}"
+          [[ $quota_wait -gt $quota_max ]] && quota_wait=$quota_max
+          local resets_human
+          resets_human=$(date -r "$resets_at" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null) ||
+            resets_human="unix $resets_at"
+          log_activity "$workspace" "⏳ QUOTA WAIT — sleeping ${quota_wait}s until the API-reported reset ($resets_human), attempt $QUOTA_WAIT_COUNT/${RALPH_QUOTA_WAIT_MAX:-8}"
+          log_progress "$workspace" "**Quota wait** — sleeping until $resets_human, then resuming automatically"
+          echo "⏳ Quota resets at $resets_human — waiting ${quota_wait}s, then resuming..."
+          sleep "$quota_wait"
+        else
+          stall_count=$((stall_count + 1))
+          if [[ $stall_count -ge 10 ]]; then
+            log_activity "$workspace" "RALPH STOP — 🚨 STALL: $stall_count consecutive empty/deferred loops"
+            log_progress "$workspace" "**Ralph stopped** — 🚨 STALL: $stall_count consecutive empty/deferred loops, likely rate limited"
+            echo "🚨 Stall detected: $stall_count consecutive loops with no progress (likely rate limited)."
+            echo "   Wait for your rate limit to reset and re-run."
+            _write_postmortem "$workspace" "stall-defer"
+            return 1
+          fi
+          local defer_delay
+          defer_delay=$((15 * (1 << (DEFER_COUNT > 6 ? 6 : DEFER_COUNT - 1))))
+          [[ $defer_delay -gt 300 ]] && defer_delay=300
+          echo "⏸️  Waiting ${defer_delay}s before retrying (attempt $DEFER_COUNT)..."
+          sleep "$defer_delay"
+        fi
         ;;
       *)
         # Natural end (no signal). The agent ended its turn without emitting
