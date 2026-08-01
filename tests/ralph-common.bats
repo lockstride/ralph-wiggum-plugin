@@ -1146,10 +1146,41 @@ TASKS
   [ "$threshold" = "148750" ]
 }
 
-@test "1M-model rotate threshold is unchanged at 700000" {
+@test "1M-model rotate threshold is 300000 (0.22.0)" {
   local threshold
   threshold=$(agent_default_rotate_threshold claude "opus[1m]")
-  [ "$threshold" = "700000" ]
+  [ "$threshold" = "300000" ]
+}
+
+# Pinned, not derived: 7/8 of 300000 would be 262500, leaving only 37.5K to
+# land the work. 250000 gives the agent a flat 50K to yield gracefully.
+@test "1M-model warn threshold is pinned at 250000, not 7/8 of rotate (0.22.0)" {
+  local warn
+  warn=$(agent_default_warn_threshold claude "opus[1m]")
+  [ "$warn" = "250000" ]
+  [ "$warn" != "262500" ]
+}
+
+@test "1M warn/rotate pinning applies to any [1m] model, not just opus (0.22.0)" {
+  [ "$(agent_default_rotate_threshold claude "sonnet[1m]")" = "300000" ]
+  [ "$(agent_default_warn_threshold claude "sonnet[1m]")" = "250000" ]
+}
+
+# The tier suffix is matched case-sensitively; an uppercase [1M] silently
+# falls back to the 200K branch, which is a real footgun when hand-passing
+# -m from a launcher script.
+@test "uppercase [1M] does NOT get the 1M thresholds (0.22.0)" {
+  [ "$(agent_default_rotate_threshold claude "opus[1M]")" = "170000" ]
+}
+
+# The [1m] suffix is a context tier, not a version pin — the alias stays
+# versionless so the loop always resolves to the current Opus.
+@test "claude default model is the versionless opus[1m] alias" {
+  local model
+  model=$(agent_default_model claude)
+  [ "$model" = "opus[1m]" ]
+  # No pinned version digits (e.g. opus-4-8) may creep into the default.
+  [[ ! "$model" =~ [0-9]-[0-9] ]]
 }
 
 # =============================================================================

@@ -356,9 +356,12 @@ agent_normalize() {
   jq -n --unbuffered -c "$filter" 2>/dev/null || true
 }
 
-# Default model alias per CLI. Claude defaults to opus[1m] for the
-# extended 1M-token context window. Use RALPH_MODEL to override
-# (e.g. "sonnet[1m]", "opus", "sonnet" for 200K standard window).
+# Default model alias per CLI. Claude defaults to opus[1m] — a versionless
+# alias, so the loop always gets the current Opus. The [1m] suffix is a
+# CONTEXT TIER, not a version pin: it unlocks the extended 1M-token window.
+# We don't rotate anywhere near 1M (see agent_default_rotate_threshold), but
+# the tier is what makes a >200K budget legal at all. Use RALPH_MODEL to
+# override (e.g. "sonnet[1m]", "opus", "sonnet" for 200K standard window).
 agent_default_model() {
   local cli
   cli="$(agent_normalize_cli_name "$1")"
@@ -383,8 +386,17 @@ agent_default_effort() {
 }
 
 # Default rotate threshold based on CLI and model (in tokens).
-# Models with the [1m] suffix have a 1M-token context window and
-# rotate at 700K. Standard models (200K window) rotate at 150K.
+#
+# Models with the [1m] suffix have a 1M-token context window but rotate at
+# 300K — the window is the ceiling, not the target. Past a few hundred K the
+# agent's recall and instruction-following degrade well before the hard
+# limit, so the previous 700K budget bought tokens we couldn't use. 300K
+# still fits a whole spec in one loop and leaves 700K deliberately unspent.
+#
+# Standard models (200K window) rotate at 170K.
+#
+# NOTE: the suffix match is case-sensitive — "opus[1M]" takes the standard
+# branch. Pass the tier lowercase, exactly as the Claude CLI spells it.
 agent_default_rotate_threshold() {
   local cli model
   cli="$(agent_normalize_cli_name "$1")"
@@ -393,7 +405,7 @@ agent_default_rotate_threshold() {
   case "$cli" in
     claude)
       if [[ "$model" == *"[1m]"* ]]; then
-        echo "700000"
+        echo "300000"
       else
         echo "170000"
       fi
@@ -403,8 +415,24 @@ agent_default_rotate_threshold() {
   esac
 }
 
+# Warn threshold — where the loop *requests* a rotation by touching
+# .ralph/context-warning-active, so the agent yields at its next post-commit
+# check instead of being force-killed at ROTATE_THRESHOLD.
+#
+# 1M-tier models pin this at 250K against a 300K ceiling rather than taking
+# the generic 7/8, which would leave only 37.5K to land the work. A flat 50K
+# landing zone is what makes the difference between a 🤝 GRACEFUL YIELD and a
+# 🔄 ROTATE force-kill on a long loop.
 agent_default_warn_threshold() {
-  local rotate
-  rotate="$(agent_default_rotate_threshold "$1" "${2:-}")"
+  local cli model rotate
+  cli="$(agent_normalize_cli_name "$1")"
+  model="${2:-}"
+
+  if [[ "$cli" == "claude" && "$model" == *"[1m]"* ]]; then
+    echo "250000"
+    return
+  fi
+
+  rotate="$(agent_default_rotate_threshold "$cli" "$model")"
   echo $((rotate * 7 / 8))
 }

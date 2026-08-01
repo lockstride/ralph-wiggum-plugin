@@ -273,7 +273,7 @@ The stream parser emits signals that the main loop uses to decide when to rotate
 | Signal | Trigger | Effect |
 |---|---|---|
 | `ROTATE` | Token usage ≥ `ROTATE_THRESHOLD` | Hard rotation — agent killed mid-task |
-| `WARN` | Tokens ≥ `WARN_THRESHOLD` (87.5%) | Touches `.ralph/context-warning-active`; agent is supposed to yield at next post-commit check |
+| `WARN` | Tokens ≥ `WARN_THRESHOLD` (250K of 300K on a `[1m]` model; 87.5% of rotate elsewhere) | Touches `.ralph/context-warning-active`; agent is supposed to yield at next post-commit check |
 | `TURN_END` | 5 consecutive gate failures (configurable via `RALPH_GATE_FAIL_STREAK_THRESHOLD`) | Rotation; next loop reads the freshly-written handoff block |
 | `GUTTER` | Stuck pattern (repeated failures, file thrashing) or agent self-signal `<ralph>GUTTER</ralph>` | Rotation with diagnostic post-mortem |
 | `COMPLETE` | Agent emits `<promise>ALL_TASKS_DONE</promise>` | Loop exits successfully; chains `--evaluate` if set |
@@ -330,7 +330,9 @@ For mode mechanics, artifacts, and limitations, see [docs/development.md → Acc
 | `RALPH_EVAL_MAX_LOOPS` | `10` | Safety cap on eval loop iterations |
 | `RALPH_EVAL_FRAMING_TEMPLATE` | — | Custom eval-loop framing template (absolute or workspace-relative path). Rendered with `{{GROUND_TRUTH_PATH}}` / `{{REPORT_PATH}}`. Lets a project point the eval loop at its own orchestrator skill. |
 | `RALPH_EVAL_REPORT_TEMPLATE` | — | Custom acceptance-report seed template (absolute or workspace-relative path). Rendered with `{{GROUND_TRUTH_PATH}}`. Must keep the loop's checkbox-completion contract (`- [ ]` lines drive completion). |
-| `RALPH_MODEL` | per-CLI (`opus[1m]` for Claude, `composer-2` for Cursor) | Work-loop model id. Same as `-m/--model`. |
+| `RALPH_MODEL` | per-CLI (`opus[1m]` for Claude, `composer-2` for Cursor) | Work-loop model id. Same as `-m/--model`. The Claude default is a **versionless** alias, so the loop always resolves to the current Opus; `[1m]` is a context *tier* (unlocks the 1M window), not a version pin. |
+| `ROTATE_THRESHOLD` | `300000` on a `[1m]` model, `170000` otherwise (Claude); `150000` for cursor-agent | Hard cap — the loop force-kills the agent and rotates context. The 1M window is a ceiling, not a target; stopping at 300K keeps recall sharp and leaves the rest unspent. |
+| `WARN_THRESHOLD` | `250000` on a `[1m]` model, else `ROTATE_THRESHOLD × 7/8` | Rotation *requested* — the loop touches `.ralph/context-warning-active` and the agent yields at its next post-commit check. On 1M models this is pinned rather than derived, so there is a flat 50K landing zone before the hard cap. |
 | `RALPH_EFFORT` | `xhigh` (Claude only) | Reasoning effort for the main work loop: `low\|medium\|high\|xhigh\|max`. Ignored for cursor-agent (no effort knob). The loop-prompt generator always runs at `medium` and is unaffected. |
 | `RALPH_SKIP_GUARDRAILS` | — | Set to `1` to omit the guardrails preamble |
 | `RALPH_SKIP_GENERATION` | — | Set to `1` to skip speckit prompt generation |
