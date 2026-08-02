@@ -234,6 +234,7 @@ if [[ "$_eval_mode" == "true" ]]; then
   fi
 elif [[ -f "$task_file_path" ]]; then
   _task_file=$(cat "$task_file_path")
+  [[ "$_task_file" = /* ]] || _task_file="$workspace/$_task_file"
   if [[ -f "$_task_file" ]]; then
     _total=$(
       grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[(x| )\]' "$_task_file" 2>/dev/null
@@ -357,6 +358,7 @@ if [[ "$_eval_mode" == "true" ]]; then
   fi
 elif [[ -f "$task_file_path" ]]; then
   task_file=$(cat "$task_file_path")
+  [[ "$task_file" = /* ]] || task_file="$workspace/$task_file"
   if [[ -f "$task_file" ]]; then
     _prev_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[x\]' "$task_file" 2>/dev/null | tail -1 || true)
     _curr_task=$(grep -nE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null | head -1 || true)

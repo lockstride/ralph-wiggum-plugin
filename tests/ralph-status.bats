@@ -75,6 +75,46 @@ TASKS
   ! echo "$output" | grep -qE '^  tasks: '
 }
 
+@test "ralph-status: resolves a workspace-relative task-file-path against workspace, not caller cwd (path-resolution fix)" {
+  # Regression: task-file-path stores the plan path relative to the
+  # workspace (e.g. "specs/plan.md"), but the TASKS section used to test
+  # -f against that relative string as-is, which resolves against the
+  # *caller's* cwd. Invoking ralph-status.sh from outside the workspace
+  # silently fell through to whatever file happened to exist at that
+  # relative path from the caller's cwd (or found nothing), instead of
+  # the real plan inside the workspace.
+  mkdir -p "$MOCK_WORKSPACE/specs"
+  cat > "$MOCK_WORKSPACE/specs/plan.md" <<'TASKS'
+# Tasks
+- [x] T001 done one
+- [x] T002 done two
+- [x] T003 done three
+- [ ] T004 still open
+TASKS
+  echo "specs/plan.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+
+  # Seed an unrelated same-named file at the *caller's* cwd, all unchecked,
+  # to prove the script doesn't accidentally read it.
+  local caller_cwd
+  caller_cwd="$(mktemp -d "$BATS_TMPDIR/ralph-caller-XXXXXX")"
+  mkdir -p "$caller_cwd/specs"
+  cat > "$caller_cwd/specs/plan.md" <<'TASKS'
+# Tasks
+- [ ] T001 wrong file, unchecked
+- [ ] T002 wrong file, unchecked
+- [ ] T003 wrong file, unchecked
+- [ ] T004 wrong file, unchecked
+TASKS
+
+  run bash -c "cd '$caller_cwd' && bash '$STATUS_SCRIPT' '$MOCK_WORKSPACE'"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qE '📋 TASKS: 3 / 4 complete  \(1 remaining, 25%\)'
+  echo "$output" | grep -qE 'CURRENT'
+  echo "$output" | grep -q 'T004 still open'
+
+  rm -rf "$caller_cwd"
+}
+
 @test "ralph-status: does not error when task file has no checkboxes (0.14.4)" {
   # Regression: grep -c exits 1 on no matches, and `|| echo 0` produced
   # "0\n0" which caused a syntax error in the arithmetic expression.
