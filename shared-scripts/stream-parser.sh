@@ -41,6 +41,12 @@ BYTES_WRITTEN=0
 ASSISTANT_CHARS=0
 SHELL_OUTPUT_CHARS=0
 PROMPT_CHARS=3000 # rough estimate of the framing prompt + state files
+# 0.23.0: bytes belonging to a Task sub-agent, tracked SEPARATELY. Delegated
+# work never enters the orchestrator's context window, so charging it to the
+# rotation budget makes a delegating loop look far fuller than it is and can
+# rotate it early for no reason. Excluded from calc_tokens, still reported on
+# the TOKENS line so the work stays visible to an operator.
+SIDECHAIN_CHARS=0
 WARN_SENT=0
 TOOL_CALL_COUNT=0
 RATE_LIMITED=0
@@ -229,7 +235,12 @@ log_token_status() {
     status_msg="$status_msg - approaching limit"
   fi
 
-  local breakdown="[read:$((BYTES_READ / 1024))KB write:$((BYTES_WRITTEN / 1024))KB assist:$((ASSISTANT_CHARS / 1024))KB shell:$((SHELL_OUTPUT_CHARS / 1024))KB]"
+  local breakdown="[read:$((BYTES_READ / 1024))KB write:$((BYTES_WRITTEN / 1024))KB assist:$((ASSISTANT_CHARS / 1024))KB shell:$((SHELL_OUTPUT_CHARS / 1024))KB"
+  # 0.23.0: only present when the loop actually delegated, so a non-delegating
+  # run's line is byte-identical to before. `sub:` is outside the rotation
+  # total on purpose — it is the sub-agents' context, not this session's.
+  [[ $SIDECHAIN_CHARS -gt 0 ]] && breakdown="$breakdown sub:$((SIDECHAIN_CHARS / 1024))KB"
+  breakdown="$breakdown]"
   echo "[$timestamp] $emoji $status_msg $breakdown" >>"$RALPH_DIR/activity.log"
   # 0.4.0: emit heartbeat so the main loop's read timer resets on every
   # token-status update (fires every 30s on any claude activity).
@@ -429,6 +440,11 @@ _is_expected_nonzero_diagnostic() {
   # are rare in read-only diagnostics and fall back to logging — safe.
   local stripped
   stripped=$(printf '%s' "$cmd" | sed -E 's/"[^"]*"//g' | sed "s/'[^']*'//g")
+  # The literal `$(` that opens a command substitution, held in a variable so
+  # the case pattern below reads cleanly. Single quotes are the point: this must
+  # never expand.
+  # shellcheck disable=SC2016
+  local capture_open='=$('
   local normalized="${stripped//"&&"/;}"
   normalized="${normalized//"||"/;}"
   normalized="${normalized//"|"/;}"
@@ -442,13 +458,39 @@ _is_expected_nonzero_diagnostic() {
     # command, not the keyword — the `for … do grep -c` diagnostic idiom was
     # still landing in errors.log (run 140038) because `grep -c` exits 1 on a
     # zero count and the whole loop inherited it.
-    case "$first" in
-      do | then | else | elif)
-        seg="${seg#"$first"}"
-        seg="${seg#"${seg%%[![:space:]]*}"}"
-        first="${seg%%[[:space:]]*}"
-        ;;
-    esac
+    #
+    # 0.23.0: peel REPEATEDLY, and peel `{` and leading variable assignments
+    # too. The single 0.18.0 peel only covered the one-line loop form. A
+    # readiness probe written across several lines puts `do` alone on its own
+    # segment, its body in `api=$(curl …)` shape, and a grouped condition
+    # contributes a `{ [ … ]` segment — each of which fell to the logged path
+    # on a keyword rather than on a command. Peeling is strictly safer than
+    # allowlisting the keyword: whatever it fronts still has to clear the
+    # vocabulary below, so `{ rm -rf /` is inspected on `rm`, and rejected.
+    while [[ -n "$first" ]]; do
+      case "$first" in
+        do | then | else | elif | "{")
+          seg="${seg#"$first"}"
+          ;;
+        # `NAME=value cmd …` (env prefix) and `NAME=$(cmd …)` (capture) both
+        # front a real command — inspect that, not the assignment. For a
+        # capture, splice the inner command name back on so it lands as the
+        # segment's first word; its trailing `)` is inert for every check
+        # below, all of which key on the first word or on flag substrings.
+        [A-Za-z_]*=*)
+          seg="${seg#"$first"}"
+          case "$first" in
+            *"$capture_open"*) seg="${first#*"$capture_open"} $seg" ;;
+          esac
+          ;;
+        *) break ;;
+      esac
+      seg="${seg#"${seg%%[![:space:]]*}"}"
+      first="${seg%%[[:space:]]*}"
+    done
+    # A segment that was nothing but keywords and/or assignments (`do`, `x=5`)
+    # runs no command of its own, so there is nothing here to judge.
+    [[ -z "$first" ]] && continue
     # 0.20.0: a redirect into a FILE is a write no matter how read-only the
     # command is (`printf … > f`, `sort … > out`, and the pre-existing
     # `cat > f` hole). Discards (`>/dev/null`) and fd dups (`2>&1`) are not
@@ -474,7 +516,51 @@ _is_expected_nonzero_diagnostic() {
       # Control-flow keywords are inert (they run no command themselves); a
       # segment that IS one is read-only by construction. (`in` is never a
       # segment-first — `for f in …` splits on `;`, so `in` stays mid-segment.)
-      for | while | until | if | do | done | then | else | elif | fi) ;;
+      # 0.23.0: `}` closes a group, `break`/`continue` steer a loop, and
+      # `case`/`esac` bracket one — all inert, all reachable as a segment's
+      # first word once a probe loop is written across lines.
+      for | while | until | if | do | done | then | else | elif | fi | \
+        "}" | break | continue | "case" | "esac") ;;
+      # 0.23.0: read-only reachability probes. A bounded readiness loop
+      # (`for i in $(seq 1 40); do curl …; sleep 3; done`) ends non-zero when
+      # the service never came up — or when the Bash tool's own timeout kills
+      # it, which is how the observed case arrived: cur-63-66, 2026-08-07
+      # 01:17:41, a 40×3s poll cut at the tool's 120s default and surfaced as
+      # is_error → exit 1. Either way that is the probe's ANSWER, not a command
+      # failure; logging it as one buries real failures and walks the GUTTER
+      # stuck-counter on a loop that was working correctly.
+      lsof | pgrep | pidof | ps | ss | netstat | ping | dig | host | \
+        nslookup | seq | hostname | uname | id) ;;
+      curl)
+        # Transfer flags are the write surface: `-O` names the output from the
+        # URL, `-T/--upload-file` and any request body push data, and an
+        # explicit method is a mutation of the far side no matter how it is
+        # spelled. `-o` is a write UNLESS it discards, which is exactly the
+        # `-o /dev/null -w %{http_code}` status-probe idiom.
+        case " $seg " in
+          *" -O "* | *" --remote-name "* | *" -T "* | *" --upload-file "* | \
+            *" -d "* | *" --data"* | *" -F "* | *" --form"* | \
+            *" -X "* | *" --request "*) return 1 ;;
+        esac
+        if printf '%s' " $seg " | grep -qE ' (-o|--output)[[:space:]]'; then
+          printf '%s' " $seg " | grep -qE ' (-o|--output)[[:space:]]+/dev/null([[:space:]]|$)' || return 1
+        fi
+        ;;
+      nc)
+        # Port scan only — `-l` binds a listener, which is not a probe.
+        case " $seg " in
+          *" -l"*) return 1 ;;
+          *" -z "*) ;;
+          *) return 1 ;;
+        esac
+        ;;
+      wget)
+        # Writes a file by default; only the header-only probe qualifies.
+        case " $seg " in
+          *" --spider "*) ;;
+          *) return 1 ;;
+        esac
+        ;;
       git)
         # 0.20.0: git is read-only in most of its interrogation forms, and
         # several of them exit 1 to ANSWER rather than to fail — `git diff
@@ -731,10 +817,19 @@ process_line() {
       ;;
 
     assistant_text)
-      local text
+      local text sc_text
       text=$(echo "$line" | jq -r '.text // empty' 2>/dev/null) || text=""
+      sc_text=$(echo "$line" | jq -r '.sidechain // false' 2>/dev/null) || sc_text="false"
       if [[ -n "$text" ]]; then
-        ASSISTANT_CHARS=$((ASSISTANT_CHARS + ${#text}))
+        # 0.23.0: a sub-agent's reasoning lives in ITS window, never in the
+        # orchestrator's — account it apart from the rotation budget. Signal
+        # detection below is deliberately unchanged: who may say COMPLETE is a
+        # separate question from whose context this is.
+        if [[ "$sc_text" == "true" ]]; then
+          SIDECHAIN_CHARS=$((SIDECHAIN_CHARS + ${#text}))
+        else
+          ASSISTANT_CHARS=$((ASSISTANT_CHARS + ${#text}))
+        fi
         if [[ "$text" == *"<ralph>COMPLETE</ralph>"* ]] ||
           [[ "$text" == *"<promise>ALL_TASKS_DONE</promise>"* ]]; then
           log_activity "✅ Agent signaled COMPLETE"
@@ -772,17 +867,30 @@ process_line() {
       ;;
 
     tool_result)
-      local name bytes lines exit_code path cmd
+      local name bytes lines exit_code path cmd sidechain acct
       name=$(echo "$line" | jq -r '.name // "Other"' 2>/dev/null) || name="Other"
       bytes=$(echo "$line" | jq -r '.bytes // 0' 2>/dev/null) || bytes=0
       lines=$(echo "$line" | jq -r '.lines // 0' 2>/dev/null) || lines=0
       exit_code=$(echo "$line" | jq -r '.exit_code // 0' 2>/dev/null) || exit_code=0
       path=$(echo "$line" | jq -r '.path // ""' 2>/dev/null) || path=""
       cmd=$(echo "$line" | jq -r '.cmd // ""' 2>/dev/null) || cmd=""
+      sidechain=$(echo "$line" | jq -r '.sidechain // false' 2>/dev/null) || sidechain="false"
+
+      # 0.23.0: a Task sub-agent's bytes are ITS context, not this session's.
+      # Route them to SIDECHAIN_CHARS and zero the ACCOUNTING figure, so every
+      # accumulator below adds nothing while the activity line still reports the
+      # real size and `track_file_write` / `track_shell_failure` still fire — a
+      # sub-agent's edits and failures are as real as the orchestrator's, and
+      # only the rotation budget was ever wrong here.
+      acct=$bytes
+      if [[ "$sidechain" == "true" ]]; then
+        SIDECHAIN_CHARS=$((SIDECHAIN_CHARS + bytes))
+        acct=0
+      fi
 
       case "$name" in
         Read)
-          BYTES_READ=$((BYTES_READ + bytes))
+          BYTES_READ=$((BYTES_READ + acct))
           local kb=$((bytes / 1024))
           log_activity "READ $path (${lines} lines, ~${kb}KB)"
           ;;
@@ -795,19 +903,19 @@ process_line() {
           # is called so Edit thrashing contributes to the file-thrash
           # GUTTER threshold — Edit thrash is more common in practice than
           # Write thrash (Edit is for fix-up loops; Write is for new files).
-          BYTES_WRITTEN=$((BYTES_WRITTEN + bytes))
+          BYTES_WRITTEN=$((BYTES_WRITTEN + acct))
           local kb=$((bytes / 1024))
           log_activity "EDIT $path (${lines} lines, ${kb}KB)"
           track_file_write "$path"
           ;;
         Write)
-          BYTES_WRITTEN=$((BYTES_WRITTEN + bytes))
+          BYTES_WRITTEN=$((BYTES_WRITTEN + acct))
           local kb=$((bytes / 1024))
           log_activity "WRITE $path (${lines} lines, ${kb}KB)"
           track_file_write "$path"
           ;;
         Shell)
-          SHELL_OUTPUT_CHARS=$((SHELL_OUTPUT_CHARS + bytes))
+          SHELL_OUTPUT_CHARS=$((SHELL_OUTPUT_CHARS + acct))
           # 0.5.4: anchor the `git commit` and `git push` matches to either
           # start-of-string OR a shell separator (whitespace, &, ;, |, `(`).
           # 0.10.4: allow global flags between `git` and the subcommand
@@ -888,7 +996,7 @@ process_line() {
         *)
           # Unknown tool — count bytes as assistant output to keep
           # accounting conservative, no activity line.
-          ASSISTANT_CHARS=$((ASSISTANT_CHARS + bytes))
+          ASSISTANT_CHARS=$((ASSISTANT_CHARS + acct))
           ;;
       esac
 

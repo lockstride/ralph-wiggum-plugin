@@ -141,3 +141,50 @@ _claude_kind() { # $1=native JSON event
   run _claude_kind '{"type":"result","duration_ms":50,"isSidechain":true}'
   [ -z "$output" ]
 }
+
+# ---------------------------------------------------------------------------
+# Sidechain LABELLING (0.23.0).
+#
+# 0.18.0 suppressed a Task sub-agent's init and result. Its tool traffic still
+# flowed through unlabelled, so the parser could not tell delegated work from
+# the orchestrator's own and charged both to the rotation budget. The filter now
+# stamps `sidechain` on assistant text and on tool_use / tool_result so
+# stream-parser.sh can account them apart (see SIDECHAIN_CHARS).
+# ---------------------------------------------------------------------------
+
+# Return the `sidechain` field of the canonical event(s) for one native event.
+_claude_sidechain() { # $1=native JSON event
+  printf '%s\n' "$1" | jq -n -c -f "$CLAUDE_FILTER" | jq -rc '.sidechain' 2>/dev/null || true
+}
+
+@test "claude: top-level tool_use is not marked sidechain (0.23.0)" {
+  run _claude_sidechain '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/a.ts"}}]}}'
+  [ "$output" = "false" ]
+}
+
+@test "claude: sub-agent tool_use (parent_tool_use_id) is marked sidechain (0.23.0)" {
+  run _claude_sidechain '{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/a.ts"}}]}}'
+  [ "$output" = "true" ]
+}
+
+@test "claude: sub-agent assistant text (isSidechain) is marked sidechain (0.23.0)" {
+  run _claude_sidechain '{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"thinking"}]}}'
+  [ "$output" = "true" ]
+}
+
+@test "claude: sub-agent tool_result is marked sidechain (0.23.0)" {
+  # tool_result arrives on a `user` event; the marker rides that envelope.
+  run _claude_sidechain '{"type":"user","isSidechain":true,"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"payload"}]}}'
+  [ "$output" = "true" ]
+}
+
+@test "claude: top-level tool_result is not marked sidechain (0.23.0 regression guard)" {
+  run _claude_sidechain '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"payload"}]}}'
+  [ "$output" = "false" ]
+}
+
+@test "claude: labelling a sub-agent event does not suppress it (0.23.0)" {
+  # Delegated work must stay VISIBLE — 0.18.0 drops only init/result.
+  run bash -c 'printf "%s\n" "{\"type\":\"user\",\"isSidechain\":true,\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"payload\"}]}}" | jq -n -c -f "'"$CLAUDE_FILTER"'" | jq -rc ".kind"'
+  [ "$output" = "tool_result" ]
+}

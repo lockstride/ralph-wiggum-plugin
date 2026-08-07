@@ -211,23 +211,33 @@ foreach (try inputs catch empty) as $e (
     (if (($e.parent_tool_use_id // null) != null) or ($e.isSidechain // false) then empty
      else {kind:"system", model:($e.model // "unknown")} end)
   elif $e.type == "assistant" then
-    (($e.message.content // [])[] |
+    # 0.23.0: LABEL a Task sub-agent's traffic rather than dropping it. 0.18.0
+    # suppressed the sub-agent's own init and result, but its assistant text and
+    # tool_use / tool_result events still flowed through unlabelled — so the
+    # parser could not tell delegated work from the orchestrator's own, and
+    # charged both to the rotation budget. A delegating loop (the eval loop, any
+    # orchestrator skill using the Task tool) therefore reported a context far
+    # larger than the orchestrator actually held. See SIDECHAIN_CHARS in
+    # stream-parser.sh. Absent on CLIs/versions without the field → false.
+    ((($e.parent_tool_use_id // null) != null) or ($e.isSidechain // false)) as $sc
+    | (($e.message.content // [])[] |
       if .type == "text" then
-        {kind:"assistant_text", text:(.text // "")}
+        {kind:"assistant_text", text:(.text // ""), sidechain:$sc}
       elif .type == "tool_use" then
         (.name // "Other") as $tname
         | (.input // {}) as $inp
         | if ($tname | IN("Read","Edit","Write","NotebookEdit","MultiEdit")) then
-            {kind:"tool_use", name:$tname, path:($inp.file_path // $inp.path // $inp.notebook_path // "")}
+            {kind:"tool_use", name:$tname, path:($inp.file_path // $inp.path // $inp.notebook_path // ""), sidechain:$sc}
           elif ($tname == "Bash") then
-            {kind:"tool_use", name:"Shell", cmd:($inp.command // "")}
+            {kind:"tool_use", name:"Shell", cmd:($inp.command // ""), sidechain:$sc}
           else
-            {kind:"tool_use", name:$tname, path:""}
+            {kind:"tool_use", name:$tname, path:"", sidechain:$sc}
           end
       else empty end
     )
   elif $e.type == "user" then
     . as $state |
+    ((($e.parent_tool_use_id // null) != null) or ($e.isSidechain // false)) as $sc |
     (($e.message.content // [])[] |
       if .type == "tool_result" then
         (.tool_use_id // "") as $tuid
@@ -241,6 +251,7 @@ foreach (try inputs catch empty) as $e (
            name: $info.name,
            path: $info.path,
            cmd: $info.cmd,
+           sidechain: $sc,
            bytes: ($txt | length),
            lines: (if ($info.name | IN("Read","Edit","Write","NotebookEdit","MultiEdit"))
                    then ($txt | split("\n") | length) else 0 end),

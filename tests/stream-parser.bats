@@ -1078,3 +1078,177 @@ _expect_logged() {
   # `2>/dev/null` and `2>&1` are ubiquitous in read-only diagnostics.
   _expect_not_logged 'ls .ralph/stop-requested 2>&1; grep -c CLOCK f.ts 2>/dev/null'
 }
+
+# ---------------------------------------------------------------------------
+# Readiness probes (0.23.0). A bounded poll loop ends non-zero when the service
+# never came up — or when the Bash tool's 120s default kills it, which is how
+# the observed case arrived (cur-63-66, 2026-08-07 01:17:41). Either way that is
+# the probe's answer, not a command failure. Fixtures are verbatim shapes from
+# that run.
+# ---------------------------------------------------------------------------
+
+@test "readiness poll loop exiting 1 is not logged as SHELL FAIL (0.23.0)" {
+  # The verbatim probe: `do` alone on its own segment, an `api=$(curl …)`
+  # capture body, and a grouped `{ [ … ] || [ … ]; }` condition — three shapes
+  # that each fell to the logged path before 0.23.0.
+  local cmd='for i in $(seq 1 40); do
+  api=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://127.0.0.1:16200/health 2>/dev/null)
+  web=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://127.0.0.1:18498/ 2>/dev/null)
+  echo "t=${i} api=${api} web=${web}"
+  if [ "$api" = "200" ] && { [ "$web" = "200" ] || [ "$web" = "304" ]; }; then echo "READY"; break; fi
+  sleep 3
+done'
+  _expect_not_logged "$cmd"
+}
+
+@test "repeated readiness polls do not walk the GUTTER counter (0.23.0)" {
+  local cmd='for i in $(seq 1 20); do curl -s -o /dev/null --max-time 2 http://127.0.0.1:16200/health; sleep 3; done'
+  local events=""
+  for _ in 1 2 3; do
+    events+=$(jq -cn --arg c "$cmd" \
+      '{kind:"tool_result",name:"Shell",bytes:50,lines:5,exit_code:1,path:"",cmd:$c}')
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+
+  if echo "$output" | grep -q "^GUTTER$"; then
+    fail "GUTTER fired on repeated readiness probes"
+  fi
+}
+
+@test "loop keyword on its own segment is peeled (0.23.0)" {
+  # Pre-0.23 the 0.18.0 peel only handled the single-line `do grep …` form; a
+  # bare `do` segment hit the default arm and rejected the whole command.
+  _expect_not_logged 'for f in a b; do
+  grep -c CLOCK "$f"
+done'
+}
+
+@test "variable-capture body is judged on its inner command (0.23.0)" {
+  _expect_not_logged 'code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:1/health); echo "$code"'
+}
+
+@test "variable capture of a MUTATING command is still logged (0.23.0 regression guard)" {
+  # Peeling the assignment must not launder what it fronts.
+  _expect_logged 'out=$(pnpm basic-check)'
+}
+
+@test "brace group is peeled to its inner command, not whitelisted (0.23.0 regression guard)" {
+  _expect_logged '{ rm -rf /tmp/thing; }'
+}
+
+@test "readiness loop running a build is still logged (0.23.0 regression guard)" {
+  _expect_logged 'for i in $(seq 1 5); do pnpm build; sleep 3; done'
+}
+
+@test "lsof and pgrep port probes are read-only (0.23.0)" {
+  _expect_not_logged 'lsof -nP -iTCP:16200 -sTCP:LISTEN; pgrep -f "tsx scripts/serve.ts"'
+}
+
+@test "curl writing to a real file is still logged (0.23.0 regression guard)" {
+  _expect_logged 'curl -s -o /tmp/payload.json http://127.0.0.1:16200/api/pipeline-status'
+}
+
+@test "curl -o /dev/null is a discard, not a write (0.23.0)" {
+  _expect_not_logged 'curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://127.0.0.1:16200/health'
+}
+
+@test "curl with an explicit method mutates the far side and is still logged (0.23.0 regression guard)" {
+  _expect_logged 'curl -s -X POST http://127.0.0.1:16200/internal/cycle-runs'
+}
+
+@test "curl uploading a body is still logged (0.23.0 regression guard)" {
+  _expect_logged 'curl -s --data-binary @/tmp/plan.md https://storage.googleapis.com/bucket/key'
+}
+
+@test "nc port scan is read-only but a listener is still logged (0.23.0)" {
+  _expect_not_logged 'nc -z 127.0.0.1 16200'
+  _expect_logged 'nc -l 16200'
+}
+
+@test "wget only qualifies as a probe with --spider (0.23.0)" {
+  _expect_not_logged 'wget --spider -q http://127.0.0.1:16200/health'
+  _expect_logged 'wget http://127.0.0.1:16200/health'
+}
+
+# ---------------------------------------------------------------------------
+# Sub-agent (sidechain) token accounting (0.23.0).
+#
+# 0.18.0 dropped a Task sub-agent's init and result events, but its tool
+# traffic still flowed through and was charged to the rotation budget. A
+# delegating loop therefore reported a context far larger than the
+# orchestrator actually held, and could rotate early for no reason.
+# ---------------------------------------------------------------------------
+
+_sidechain_read() {
+  # $1 = bytes, $2 = "true"|"false"
+  jq -cn --argjson b "$1" --argjson sc "$2" \
+    '{kind:"tool_result",name:"Read",path:"/tmp/big.ts",cmd:"",sidechain:$sc,bytes:$b,lines:10,exit_code:0}'
+}
+
+@test "top-level reads still drive ROTATE (0.23.0 control)" {
+  export WARN_THRESHOLD=1900
+  export ROTATE_THRESHOLD=2000
+  local events=""
+  for _ in $(seq 1 10); do
+    events+=$(_sidechain_read 1000 false)
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "ROTATE"
+}
+
+@test "sub-agent reads do not drive ROTATE (0.23.0)" {
+  # Byte-for-byte the control test's payload, marked as sidechain. That context
+  # lives in the sub-agent's window, never in the orchestrator's.
+  export WARN_THRESHOLD=1900
+  export ROTATE_THRESHOLD=2000
+  local events=""
+  for _ in $(seq 1 10); do
+    events+=$(_sidechain_read 1000 true)
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+  if echo "$output" | grep -qE "ROTATE|WARN"; then
+    fail "delegated sub-agent bytes drove the rotation signal"
+  fi
+}
+
+@test "sub-agent bytes are reported as sub: on the TOKENS line (0.23.0)" {
+  export WARN_THRESHOLD=100000
+  export ROTATE_THRESHOLD=200000
+  run_parser "$(_sidechain_read 8192 true)" >/dev/null
+  grep -qE "TOKENS: .* sub:[0-9]+KB\]" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "a non-delegating run's TOKENS line is unchanged (0.23.0 regression guard)" {
+  export WARN_THRESHOLD=100000
+  export ROTATE_THRESHOLD=200000
+  run_parser "$(_sidechain_read 8192 false)" >/dev/null
+  grep -q "TOKENS: " "$MOCK_WORKSPACE/.ralph/activity.log"
+  if grep -q "sub:" "$MOCK_WORKSPACE/.ralph/activity.log"; then
+    fail "sub: segment appeared on a run that never delegated"
+  fi
+}
+
+@test "sub-agent work stays visible in the activity log (0.23.0)" {
+  export WARN_THRESHOLD=100000
+  export ROTATE_THRESHOLD=200000
+  run_parser "$(_sidechain_read 4096 true)" >/dev/null
+  grep -q "READ /tmp/big.ts" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "a sub-agent's failing shell is still a real failure (0.23.0)" {
+  # Only the byte accounting changes — a sub-agent's failures are as real as
+  # the orchestrator's and must keep reaching errors.log.
+  local events
+  events=$(jq -cn '{kind:"tool_result",name:"Shell",bytes:50,lines:0,exit_code:1,path:"",cmd:"pnpm basic-check",sidechain:true}')
+  run_parser "$events" >/dev/null
+  grep -q "SHELL FAIL: pnpm basic-check" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
