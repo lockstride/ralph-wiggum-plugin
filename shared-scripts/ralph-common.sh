@@ -234,9 +234,30 @@ EOF
   fi
 
   # Make sure .ralph is ignored. Idempotent.
+  #
+  # 0.23.1: ASK GIT whether the state directory is already ignored instead of
+  # grepping for one literal line. `grep -qxF ".ralph/"` only matched that exact
+  # spelling, so a project that ignores the directory a different way got a
+  # redundant `.ralph/` appended on EVERY loop start — and when the project's
+  # spelling was `.ralph/*` plus a `!.ralph/command-policy` negation (the shape
+  # needed to commit one file out of the state dir), the appended blanket
+  # `.ralph/` silently defeated that negation: git cannot re-include a file
+  # inside an excluded DIRECTORY, so `git add .ralph/command-policy` began
+  # failing with "paths are ignored by one of your .gitignore files" and broke
+  # `git add … && git commit …` chains. Observed in curve, where a commit that
+  # removed the line by name was undone by the next run's `initial commit
+  # before loop` — the loop reintroducing the very rule the repo had deleted.
+  #
+  # Probe a TRANSIENT path, never `.ralph/command-policy`: the whole point of
+  # that negation is that command-policy is NOT ignored, so probing it would
+  # read as "not ignored" and re-append forever.
   local gitignore="$workspace/.gitignore"
-  if [[ -f "$gitignore" ]]; then
-    if ! grep -qxF ".ralph/" "$gitignore" 2>/dev/null; then
+  if git -C "$workspace" check-ignore -q ".ralph/activity.log" 2>/dev/null; then
+    : # already covered — by any spelling, including a global or nested rule
+  elif [[ -f "$gitignore" ]]; then
+    # Fallback for a non-repo / no-git environment: accept the spellings that
+    # already cover the directory rather than only the canonical one.
+    if ! grep -qxE '\.ralph(/|/\*)?' "$gitignore" 2>/dev/null; then
       echo ".ralph/" >>"$gitignore"
     fi
   else

@@ -1452,3 +1452,90 @@ TASKS
   # "blocked 1× in a row" would read as a premature give-up.
   ! echo "$output" | grep -q "blocked 1×"
 }
+
+# ---------------------------------------------------------------------------
+# init_ralph_dir gitignore handling (0.23.1)
+#
+# The check was `grep -qxF ".ralph/"` — one literal spelling. A project that
+# ignores the state dir any other way got a redundant `.ralph/` appended on
+# EVERY loop start, and against the `.ralph/*` + `!.ralph/command-policy` shape
+# that blanket line silently defeated the negation (git cannot re-include a
+# file inside an excluded directory). Observed in curve.
+# ---------------------------------------------------------------------------
+
+# A git repo whose .gitignore is exactly $1.
+_repo_with_gitignore() { # $1 = .gitignore contents
+  local d
+  d=$(mktemp -d "$BATS_TMPDIR/rb-ign.XXXXXX")
+  printf '%s\n' "$1" >"$d/.gitignore"
+  git -C "$d" init -q
+  git -C "$d" config user.email "test@test.com"
+  git -C "$d" config user.name "Test"
+  printf '%s' "$d"
+}
+
+@test "init_ralph_dir does not re-append .ralph/ over a .ralph/* rule (0.23.1)" {
+  local d
+  d=$(_repo_with_gitignore '.ralph/*
+!.ralph/command-policy')
+  init_ralph_dir "$d"
+  if grep -qxF '.ralph/' "$d/.gitignore"; then
+    fail "appended a blanket .ralph/ over an existing .ralph/* rule"
+  fi
+  rm -rf "$d"
+}
+
+@test "the command-policy negation still works after init (0.23.1)" {
+  # The regression that motivated this: `git add .ralph/command-policy` must
+  # not error, while transient state stays ignored.
+  local d
+  d=$(_repo_with_gitignore '.ralph/*
+!.ralph/command-policy')
+  init_ralph_dir "$d"
+  printf 'x\n' >"$d/.ralph/command-policy"
+  printf 'x\n' >"$d/.ralph/activity.log"
+
+  git -C "$d" add .ralph/command-policy
+  git -C "$d" check-ignore -q .ralph/activity.log
+  if git -C "$d" check-ignore -q .ralph/command-policy; then
+    fail "command-policy is ignored — the negation was defeated"
+  fi
+  rm -rf "$d"
+}
+
+@test "init_ralph_dir is idempotent across repeated loop starts (0.23.1)" {
+  local d before after
+  d=$(_repo_with_gitignore '.ralph/*
+!.ralph/command-policy')
+  init_ralph_dir "$d"
+  before=$(cat "$d/.gitignore")
+  init_ralph_dir "$d"
+  init_ralph_dir "$d"
+  after=$(cat "$d/.gitignore")
+  [ "$before" = "$after" ]
+  rm -rf "$d"
+}
+
+@test "init_ralph_dir leaves an existing canonical .ralph/ rule alone (0.23.1 regression guard)" {
+  local d
+  d=$(_repo_with_gitignore '.ralph/')
+  init_ralph_dir "$d"
+  [ "$(grep -cxF '.ralph/' "$d/.gitignore")" -eq 1 ]
+  rm -rf "$d"
+}
+
+@test "init_ralph_dir still adds the rule when nothing ignores .ralph (0.23.1 regression guard)" {
+  local d
+  d=$(_repo_with_gitignore 'node_modules/')
+  init_ralph_dir "$d"
+  grep -qxF '.ralph/' "$d/.gitignore"
+  rm -rf "$d"
+}
+
+@test "init_ralph_dir creates .gitignore when the project has none (0.23.1 regression guard)" {
+  local d
+  d=$(mktemp -d "$BATS_TMPDIR/rb-ign2.XXXXXX")
+  init_ralph_dir "$d"
+  grep -qxF '.ralph/' "$d/.gitignore"
+  rm -rf "$d"
+}
