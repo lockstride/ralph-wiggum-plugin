@@ -61,7 +61,9 @@ Read breadcrumbs before narrative; they're cheap and orient you.
 | `.ralph/task-summary` | done/total/remaining counts + the task list head. Quick "did it finish?" |
 | `.ralph/acceptance-report.md` | Eval-loop output: Status (CLEAN/…), Last loop, Last mode (VERIFIER/REWORK), Gaps, History. Present ⇒ an eval loop ran. |
 | `.ralph/eval-ground-truth` | Path to the spec `tasks.md` the eval graded against. |
-| `.ralph/gates/` | Per-label gate results: `<label>-latest.{exit,cmd,log,summary}`. `exit` is the authoritative pass/fail. Labels: `basic`, `final`, `e2e`, `lint`, `custom`, `eval-*`. |
+| `.ralph/gates/` | Per-label gate results: `<label>-latest.{exit,cmd,log,summary}`. `exit` is the authoritative pass/fail. Labels: `basic`, `final`, `e2e`, `lint`, `custom`, `eval-*`. Also `last-run` (`<label> <exit> <run-id>`, 0.24.0) — the end-of-run marker stream-parser consumes. |
+| `.ralph/gates.impl/` | The IMPLEMENTATION phase's gates, moved aside when the eval loop started (0.24.0). If an eval loop ran, this is where the impl-phase record lives — `gates/` holds only the eval loop's own. Absent ⇒ no eval loop ran. |
+| `.ralph/handoff-agent-ts` | Epoch seconds of the last time the AGENT wrote handoff.md (0.24.0). Compare against loop boundaries to judge how stale the `## Working set` was. |
 | `.ralph/errors.log` | Append-only list of every failed shell/gate — the fastest map of where it struggled. |
 | `.ralph/handoff.md` | What the agent left for its next self. Reveals where it got stuck. |
 | `.ralph/activity.log` | The full narrative (can be thousands of lines). Read last after you know what to look for. |
@@ -76,7 +78,8 @@ grep -niE "gate (start|end|blocked)|guard (deny|rewrite)|cache|all-check" .ralph
 
 Then `sed -n 'A,Bp'` the interesting regions. Read the activity-log legend from
 the emoji: 🧪 gate, 🔀 guard rewrite, ⛔ guard deny, 🚨 GUTTER (agent stuck),
-✅ COMPLETE, 🛑 COMPLETE BLOCKED, 🟢 normal shell/tool.
+⏱ SHELL CUT OFF (the command's own `timeout`/`kill` fired — an answer, not a
+failure; 0.24.0), ✅ COMPLETE, 🛑 COMPLETE BLOCKED, 🟢 normal shell/tool.
 
 ## Step 3 — Distinguish loop types
 

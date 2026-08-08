@@ -535,6 +535,18 @@ current task, files in flight, next planned step, ≤ 3 architectural facts you'
 want the next agent to know. Leave \`## Last gate state\` and \`## Auto-enriched state\`
 alone — the plugin maintains them.
 
+\`## Working set\` is REPLACED, not appended to. It describes the present, not
+the run's history: delete every line that is no longer true before you write
+the new one. A handoff that opens with the current task and closes with a task
+you finished two hours ago tells the next agent nothing it can act on, and it
+cannot tell which half to believe.
+
+Rewrite it whenever your working set actually changes — a tranche boundary, a
+design decision, a new file in flight — not only when you are about to yield.
+A turn that gets force-killed keeps whatever you last wrote, so the value of
+the section is set by how recently you wrote it. The plugin stamps its age in
+\`## Auto-enriched state\`, and the next agent will see how stale it was.
+
 ## Git hygiene
 
 - Stage by explicit path: \`git add <path> …\`. Never \`git add .\`, \`git add -A\`, or \`git add <dir>\` — a blanket add sweeps up files that were untracked at loop start and trips the orphan-leak check.
@@ -817,6 +829,28 @@ _auto_enrich_handoff() {
     next_unchecked=$(grep -E '^- \[ \] ' "$task_file" 2>/dev/null | head -1 | sed -E 's/^- \[ \] //' | cut -c1-100 || true)
   fi
 
+  # 0.24.0: how old is the ## Working set? The agent's own prose is the one
+  # part of the handoff nothing can verify, and a stale block reads exactly
+  # like a fresh one. cur-71 carried a "Current task: T012" paragraph under a
+  # newer "Next: Tranche D" paragraph for 2h49m with nothing marking either as
+  # current. stream-parser stamps .ralph/handoff-agent-ts on every agent
+  # Edit/Write of handoff.md (the file's own mtime can't answer — the plugin
+  # rewrites it too); turn that into an age the next agent can act on.
+  local working_set_age=""
+  local _ts_file="$workspace/.ralph/handoff-agent-ts"
+  if [[ -f "$_ts_file" ]]; then
+    local _then _now _delta
+    _then=$(cat "$_ts_file" 2>/dev/null || true)
+    if [[ "$_then" =~ ^[0-9]+$ ]]; then
+      _now=$(date +%s)
+      _delta=$((_now - _then))
+      [[ $_delta -lt 0 ]] && _delta=0
+      working_set_age=$(printf '%dh %dm ago' $((_delta / 3600)) $(((_delta % 3600) / 60)))
+    fi
+  else
+    working_set_age="never written by the agent — mechanical state below is all there is"
+  fi
+
   # No useful state — nothing to append.
   if [[ -z "$last_commit" ]] && [[ -z "$last_done" ]] && [[ -z "$next_unchecked" ]]; then
     return 0
@@ -843,6 +877,7 @@ _auto_enrich_handoff() {
     [[ -n "$last_commit" ]] && echo "**Last commit**: \`$last_commit\`"
     [[ -n "$last_done" ]] && echo "**Last task done**: $last_done"
     [[ -n "$next_unchecked" ]] && echo "**Next unchecked**: $next_unchecked"
+    [[ -n "$working_set_age" ]] && echo "**Working set written**: $working_set_age"
     :
   } >>"$handoff"
 }

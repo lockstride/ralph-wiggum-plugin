@@ -691,3 +691,55 @@ EOF
   run bash "$SCRIPTS_DIR/gate-run.sh" full true
   [ "$status" -eq 0 ]
 }
+
+# -----------------------------------------------------------------------------
+# End-of-run marker (0.24.0)
+# -----------------------------------------------------------------------------
+# stream-parser used to notice a gate end by matching `gate-run.sh` in the
+# MODEL's command text — which ralph-guard.sh's auto-wrap never puts there, so
+# on the normal path neither handoff.md's "Last gate state" nor the
+# gate-fail-streak TURN_END ever fired. gate-run.sh now announces the end
+# itself, from the process that owns the verdict.
+
+@test "writes a last-run marker with label, exit and a run id (0.24.0)" {
+  bash "$SCRIPTS_DIR/gate-run.sh" basic true || true
+
+  local marker="$MOCK_WORKSPACE/.ralph/gates/last-run"
+  [ -f "$marker" ]
+  local label code runid
+  read -r label code runid < "$marker"
+  [ "$label" = "basic" ]
+  [ "$code" = "0" ]
+  [ -n "$runid" ]
+}
+
+@test "the marker records a failing verdict too (0.24.0)" {
+  bash "$SCRIPTS_DIR/gate-run.sh" full false || true
+
+  local label code
+  read -r label code _ < "$MOCK_WORKSPACE/.ralph/gates/last-run"
+  [ "$label" = "full" ]
+  [ "$code" = "1" ]
+}
+
+@test "each run gets a distinct marker so the parser can tell them apart (0.24.0)" {
+  # A single-slot marker only works if consecutive ends differ — otherwise the
+  # second gate reads as already-consumed.
+  bash "$SCRIPTS_DIR/gate-run.sh" basic true || true
+  local first
+  first=$(cat "$MOCK_WORKSPACE/.ralph/gates/last-run")
+
+  bash "$SCRIPTS_DIR/gate-run.sh" basic true || true
+  local second
+  second=$(cat "$MOCK_WORKSPACE/.ralph/gates/last-run")
+
+  [ "$first" != "$second" ]
+}
+
+@test "the marker is not swept by log retention (0.24.0)" {
+  # Retention globs `<label>-*.log`; the marker must not be collateral.
+  RALPH_GATE_KEEP=1 bash "$SCRIPTS_DIR/gate-run.sh" basic true || true
+  RALPH_GATE_KEEP=1 bash "$SCRIPTS_DIR/gate-run.sh" basic true || true
+  RALPH_GATE_KEEP=1 bash "$SCRIPTS_DIR/gate-run.sh" basic true || true
+  [ -f "$MOCK_WORKSPACE/.ralph/gates/last-run" ]
+}

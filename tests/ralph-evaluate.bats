@@ -371,3 +371,46 @@ TPL
   [ -f "$MOCK_WORKSPACE/.ralph/gate-runner" ]
   [ "$(cat "$MOCK_WORKSPACE/.ralph/gate-runner")" = "$SCRIPTS_DIR/gate-run.sh" ]
 }
+
+# -----------------------------------------------------------------------------
+# archive_impl_gates (0.24.0)
+# -----------------------------------------------------------------------------
+# The eval loop needs an empty gates dir so a green `full` from the
+# implementation loop cannot satisfy its `final`-tier completion guard. Before
+# 0.24.0 that was `rm -rf`, which also destroyed the whole implementation
+# phase's gate record — cur-71 ran 46 gates and finished with one readable.
+
+@test "archive_impl_gates: moves the impl gates aside instead of deleting them" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf '0' > "$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  printf 'pnpm all-check' > "$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf 'log body' > "$MOCK_WORKSPACE/.ralph/gates/full-20260808T195621Z-1.log"
+
+  archive_impl_gates "$MOCK_WORKSPACE"
+
+  # The guard's invariant: a fresh, empty gates dir.
+  [ -d "$MOCK_WORKSPACE/.ralph/gates" ]
+  [ -z "$(ls -A "$MOCK_WORKSPACE/.ralph/gates")" ]
+  # The evidence survives.
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gates.impl/full-latest.exit")" = "0" ]
+  [ -f "$MOCK_WORKSPACE/.ralph/gates.impl/full-20260808T195621Z-1.log" ]
+}
+
+@test "archive_impl_gates: a stale archive from a prior eval run is replaced" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates.impl"
+  printf 'from the run before' > "$MOCK_WORKSPACE/.ralph/gates.impl/stale.log"
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf '0' > "$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+
+  archive_impl_gates "$MOCK_WORKSPACE"
+
+  [ ! -f "$MOCK_WORKSPACE/.ralph/gates.impl/stale.log" ]
+  [ -f "$MOCK_WORKSPACE/.ralph/gates.impl/full-latest.exit" ]
+}
+
+@test "archive_impl_gates: creates the gates dir when there was none" {
+  rm -rf "$MOCK_WORKSPACE/.ralph/gates"
+  archive_impl_gates "$MOCK_WORKSPACE"
+  [ -d "$MOCK_WORKSPACE/.ralph/gates" ]
+  [ ! -d "$MOCK_WORKSPACE/.ralph/gates.impl" ]
+}

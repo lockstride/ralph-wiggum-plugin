@@ -64,6 +64,16 @@ GATE_FAIL_STREAK=0
 GATE_FAIL_STREAK_THRESHOLD="${RALPH_GATE_FAIL_STREAK_THRESHOLD:-5}"
 TURN_END_LATCHED=0
 
+# 0.24.0: the run-id of the last gate end already consumed from
+# .ralph/gates/last-run (written by gate-run.sh's _write_breadcrumbs). Seeded
+# from whatever is on disk at parser start so a PREVIOUS loop's gate is not
+# replayed as this session's first event — the streak is per-agent-invocation
+# by design.
+GATE_EVENT_SEEN=""
+if [[ -f "$RALPH_DIR/gates/last-run" ]]; then
+  GATE_EVENT_SEEN=$(head -n 1 "$RALPH_DIR/gates/last-run" 2>/dev/null || true)
+fi
+
 # 0.10.4: The task-completion cap (RALPH_TASK_COMPLETION_CAP) was removed.
 # Field data showed it never triggered rotation — gate-fail streaks and
 # ROTATE handled every case.
@@ -217,6 +227,82 @@ update_handoff_gate_state() {
   ' "$handoff" >"$tmp" 2>/dev/null
   mv "$tmp" "$handoff"
   rm -f "$body_tmp"
+}
+
+# 0.24.0: record WHEN the agent last wrote handoff.md.
+#
+# handoff.md's own mtime cannot answer this — the plugin rewrites the file
+# itself (## Last gate state, ## Auto-enriched state), so mtime tracks the
+# plugin, not the agent. Only a tool event proves the agent touched it, and
+# only the parser sees tool events.
+#
+# The point is staleness. cur-71's loop 2 ran 2h49m and 21 tasks without
+# touching the handoff, and the ## Working set it inherited opened with a
+# fresh "Next: Tranche D" above a stale "Current task: T012" — nothing on the
+# page said which was current, or how old either was. _auto_enrich_handoff
+# turns this stamp into a visible age line. Deliberately NOT cleared at loop
+# start: an age that spans loops is exactly the signal.
+_note_handoff_touch() {
+  case "$1" in
+    */handoff.md | handoff.md) date +%s >"$RALPH_DIR/handoff-agent-ts" 2>/dev/null || true ;;
+  esac
+}
+
+# 0.24.0: consume the gate's own end-of-run marker.
+#
+# Replaces the pre-0.24 `[[ "$cmd" == *gate-run.sh* ]]` test, which keyed on
+# the MODEL's command text. ralph-guard.sh wraps a tier command via the
+# PreToolUse hook's `updatedInput`, and that rewrite is invisible to the
+# transcript — the tool_use event still carries `./scripts/gate.sh full`. So
+# the test never matched on the normal path, and BOTH things behind it were
+# dead: handoff.md's "Last gate state" was never written (cur-71: 46 gates,
+# `_(none yet)_` still in the file) and GATE_FAIL_STREAK never incremented, so
+# the 5-consecutive-failures TURN_END could not fire.
+#
+# Keying on `.ralph/gates/last-run` instead is rewrite-proof, and covers the
+# `bash "$(cat .ralph/gate-runner)" final …` indirection the eval loop's
+# sub-agents use — neither contains the literal string this used to need.
+#
+# Called from the Shell branch: a gate is always started by a shell command and
+# its verdict is always observed by one (the foreground waiter's own return, or
+# the poll that reads the exit breadcrumb), so every gate end is drained by the
+# next tool_result at the latest.
+#
+# Single-slot, not a journal: two DIFFERENT labels finishing between one shell
+# result and the next collapse to the later one. Per-label locking serializes
+# same-label runs, and an agent running two labels concurrently is rare enough
+# that a missed streak increment is the right trade against an unbounded file.
+_drain_gate_event() {
+  local marker="$RALPH_DIR/gates/last-run"
+  [[ -f "$marker" ]] || return 0
+  local line
+  line=$(head -n 1 "$marker" 2>/dev/null) || return 0
+  [[ -n "$line" ]] || return 0
+  [[ "$line" != "$GATE_EVENT_SEEN" ]] || return 0
+  GATE_EVENT_SEEN="$line"
+
+  local _label _exit _rest
+  read -r _label _exit _rest <<<"$line"
+  # A malformed marker is not a gate verdict. Nothing downstream should act on
+  # it, and the streak must not move on a line we could not parse. gate-run.sh
+  # validates the label before it ever runs (exit 64 otherwise), so this is
+  # defense in depth — but it keeps the 0.12.4 invariant that a bare numeric
+  # token can never be mistaken for a label, which is why the pattern requires
+  # a leading letter rather than accepting any alphanumeric.
+  [[ "$_label" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]] || return 0
+  [[ "$_exit" =~ ^[0-9]+$ ]] || return 0
+
+  if [[ "$_exit" -eq 0 ]]; then
+    GATE_FAIL_STREAK=0
+  else
+    GATE_FAIL_STREAK=$((GATE_FAIL_STREAK + 1))
+    if [[ $GATE_FAIL_STREAK -ge $GATE_FAIL_STREAK_THRESHOLD ]] && [[ $TURN_END_LATCHED -eq 0 ]]; then
+      log_activity "🛑 TURN_END: $GATE_FAIL_STREAK consecutive gate failures — ending turn"
+      TURN_END_LATCHED=1
+      echo "TURN_END" 2>/dev/null || true
+    fi
+  fi
+  update_handoff_gate_state "$_label" "$_exit" 2>/dev/null || true
 }
 
 log_token_status() {
@@ -426,6 +512,48 @@ _split_subcommand() {
     esac
   done
   return 0
+}
+
+# 0.24.0: a command that carries its OWN cutoff is reporting an answer when
+# that cutoff fires, not failing.
+#
+# Sibling of the 0.23.0 readiness-probe rule, for the shape that rule does not
+# reach: a deliberate interrupt/resume harness. cur-71 logged two of them as
+# SHELL FAIL — `… & bpid=$!; sleep 14; kill -INT "$bpid"; wait …` (15:33:02)
+# and `timeout -k 3 12 bash -c …` (15:36:41). Both were testing that a backfill
+# resumes from its checkpoint after being cut off; being cut off was the point.
+#
+# Deliberately narrow, on BOTH axes, because the alternative is laundering real
+# failures:
+#
+#   - The exit code must be a cutoff signature. 124 is GNU timeout firing (and
+#     0.24.0's adapter marker for the CLI's own Bash timeout); 137/143/130 are
+#     KILL/TERM/INT. Every other non-zero code is the command's own verdict and
+#     keeps the logged path — `timeout 300 pnpm test` exiting 1 on a real test
+#     failure is still a failure.
+#   - The command text must carry the instrument that did the cutting. A plain
+#     `pnpm build` the tool had to kill has no self-cutoff and stays a failure,
+#     so an agent hanging the loop remains visible.
+#
+# Callers log these on their own line rather than dropping them: a cutoff is
+# not a verdict, but it is not nothing either.
+_is_self_limited_cutoff() {
+  local cmd="$1" exit_code="$2"
+  case "$exit_code" in
+    124 | 130 | 137 | 143) ;;
+    *) return 1 ;;
+  esac
+  # `timeout`/`gtimeout` as a command word (not the substring inside
+  # `--max-time` or a path), at the start of the command or after a separator.
+  if printf '%s' "$cmd" | grep -qE '(^|[[:space:];&|(])g?timeout[[:space:]]'; then
+    return 0
+  fi
+  # An explicit stop signal aimed at something the command is running. `-0` is
+  # a liveness PROBE, not a cutoff, and is excluded by listing the signals.
+  if printf '%s' "$cmd" | grep -qE '(^|[[:space:];&|(])(p?kill)[[:space:]]+(-[[:alpha:]]+[[:space:]]+)*-(INT|TERM|KILL|HUP|QUIT|2|3|9|15)([[:space:]]|$)'; then
+    return 0
+  fi
+  return 1
 }
 
 _is_expected_nonzero_diagnostic() {
@@ -907,12 +1035,14 @@ process_line() {
           local kb=$((bytes / 1024))
           log_activity "EDIT $path (${lines} lines, ${kb}KB)"
           track_file_write "$path"
+          _note_handoff_touch "$path"
           ;;
         Write)
           BYTES_WRITTEN=$((BYTES_WRITTEN + acct))
           local kb=$((bytes / 1024))
           log_activity "WRITE $path (${lines} lines, ${kb}KB)"
           track_file_write "$path"
+          _note_handoff_touch "$path"
           ;;
         Shell)
           SHELL_OUTPUT_CHARS=$((SHELL_OUTPUT_CHARS + acct))
@@ -960,6 +1090,11 @@ process_line() {
             else
               log_activity "SHELL $cmd → exit 0"
             fi
+          elif _is_self_limited_cutoff "$cmd" "$exit_code"; then
+            # 0.24.0: the command set its own cutoff and the cutoff fired.
+            # Visible, but not a verdict — no errors.log entry, no walk of the
+            # GUTTER stuck-counter. See _is_self_limited_cutoff.
+            log_activity "⏱ SHELL CUT OFF $cmd → exit $exit_code (own cutoff fired; no verdict)"
           else
             log_activity "SHELL $cmd → exit $exit_code"
             track_shell_failure "$cmd" "$exit_code"
@@ -967,31 +1102,13 @@ process_line() {
           # 0.10.0: gate-fail-streak tracking for TURN_END signal.
           # 0.12.0: also write the ## Last gate state section of handoff.md
           # on every gate-end (pass or fail) so the next loop has fresh state.
-          if [[ "$cmd" == *gate-run.sh* ]]; then
-            if [[ $exit_code -eq 0 ]]; then
-              GATE_FAIL_STREAK=0
-            else
-              GATE_FAIL_STREAK=$((GATE_FAIL_STREAK + 1))
-              if [[ $GATE_FAIL_STREAK -ge $GATE_FAIL_STREAK_THRESHOLD ]] && [[ $TURN_END_LATCHED -eq 0 ]]; then
-                log_activity "🛑 TURN_END: $GATE_FAIL_STREAK consecutive gate failures — ending turn"
-                TURN_END_LATCHED=1
-                echo "TURN_END" 2>/dev/null || true
-              fi
-            fi
-            # Extract label from the gate-run.sh invocation: `bash …/gate-run.sh <label> …`
-            # 0.12.4: restrict to canonical labels. The previous regex
-            # `[A-Za-z0-9_-]+` would happily eat the `2` from
-            # `gate-run.sh 2>&1 | …` and persist `label: 2` into handoff.md.
-            # Anchoring to the canonical set means a malformed invocation
-            # without a real label simply skips the handoff update.
-            # `|| true` suppresses pipefail's propagation of grep's exit 1
-            # when there's no canonical-label match (the common no-op case).
-            local _gate_label
-            _gate_label=$(echo "$cmd" | grep -oE 'gate-run\.sh[[:space:]]+(basic|full|final|unit|integration|e2e|lint|format)\b' 2>/dev/null | awk '{print $2}' | head -1 || true)
-            if [[ -n "$_gate_label" ]]; then
-              update_handoff_gate_state "$_gate_label" "$exit_code" 2>/dev/null || true
-            fi
-          fi
+          # 0.24.0: both now key on the gate's OWN end-of-run marker rather
+          # than on `gate-run.sh` appearing in the model's command — the
+          # guard's auto-wrap means it never does. See _drain_gate_event.
+          # The label no longer needs the 0.12.4 canonical-set guard either:
+          # it comes from gate-run.sh as a field, not from parsing a command
+          # line where `2>&1` could be mistaken for one.
+          _drain_gate_event
           ;;
         *)
           # Unknown tool — count bytes as assistant output to keep

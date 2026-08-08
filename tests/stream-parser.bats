@@ -804,7 +804,82 @@ tool_result_json() {
   grep -q 'COMMIT "fix: bar (T002)"' "$MOCK_WORKSPACE/.ralph/activity.log"
 }
 
-# --- 0.12.0: handoff "Last gate state" section writer ---
+# ---------------------------------------------------------------------------
+# 0.12.0: handoff "Last gate state" section writer.
+#
+# 0.24.0 moved the TRIGGER. It used to be `gate-run.sh` appearing in the
+# model's command text, which ralph-guard.sh's auto-wrap never puts there —
+# the rewrite happens in the PreToolUse hook's `updatedInput` and the
+# transcript keeps `./scripts/gate.sh full`. So the writer never fired on the
+# normal path (cur-71: 46 gate runs, `_(none yet)_` still in the handoff), and
+# GATE_FAIL_STREAK never moved either. The trigger is now gate-run.sh's own
+# `.ralph/gates/last-run` marker. Fixtures below therefore drive the marker
+# and send the UNWRAPPED command the agent actually typed.
+# ---------------------------------------------------------------------------
+
+# Ordering barrier: the marker must land while the parser is running, exactly
+# as it does in life (gate-run.sh writes it mid-stream). Waiting on a unique
+# token in activity.log proves the parser is past its startup seed of
+# GATE_EVENT_SEEN before we touch the file — a pre-existing marker is
+# deliberately treated as already-consumed.
+_wait_for_activity() {
+  local pattern="$1" i=0
+  while [[ $i -lt 200 ]]; do
+    grep -q "$pattern" "$MOCK_WORKSPACE/.ralph/activity.log" 2>/dev/null && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Drive one or more gate ends through a SINGLE parser (the streak is per-agent-
+# invocation, so a multi-gate fixture has to share one process).
+# Usage: run_parser_gates basic:1 basic:1 full:0
+#
+# The sequence is per-TEST, not per-call: a test that calls this more than once
+# would otherwise reuse `warmup-1`, and the barrier would clear on the previous
+# call's line before the new parser had finished its startup seed.
+_GATE_FIXTURE_SEQ=0
+run_parser_gates() {
+  local marker="$MOCK_WORKSPACE/.ralph/gates/last-run"
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  local specs=("$@") spec
+  local -a seqs=()
+  for spec in "${specs[@]}"; do
+    _GATE_FIXTURE_SEQ=$((_GATE_FIXTURE_SEQ + 1))
+    seqs+=("$_GATE_FIXTURE_SEQ")
+  done
+  {
+    local i label code n
+    for i in "${!specs[@]}"; do
+      label="${specs[i]%%:*}"
+      code="${specs[i]##*:}"
+      n="${seqs[i]}"
+      tool_result_json "Shell" 50 5 0 "" "echo warmup-$n"
+      _wait_for_activity "warmup-$n"
+      printf '%s %s 20260101T000000Z-%s\n' "$label" "$code" "$n" >"$marker"
+      # The exit code on the wire is the agent's shell result, which is always
+      # numeric; a malformed MARKER is a separate fixture (see below).
+      tool_result_json "Shell" 50 5 "${code//[!0-9]/0}" "" "./scripts/gate.sh $label"
+    done
+  } | bash "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE" 1
+}
+
+# Send a raw marker line (label and exit unvalidated) followed by a shell
+# result, for the malformed-input guards.
+run_parser_raw_marker() {
+  local raw="$1"
+  local marker="$MOCK_WORKSPACE/.ralph/gates/last-run"
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  _GATE_FIXTURE_SEQ=$((_GATE_FIXTURE_SEQ + 1))
+  local n="$_GATE_FIXTURE_SEQ"
+  {
+    tool_result_json "Shell" 50 5 0 "" "echo warmup-$n"
+    _wait_for_activity "warmup-$n"
+    printf '%s\n' "$raw" >"$marker"
+    tool_result_json "Shell" 50 5 0 "" "./scripts/gate.sh basic"
+  } | bash "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE" 1
+}
 
 @test "gate-end failure rewrites Last gate state section of handoff.md (0.12.0)" {
   # Seed a handoff with the expected sections and a Working set the writer
@@ -830,9 +905,7 @@ duration: 12s
 log: .ralph/gates/basic-latest.log
 cmd: pnpm basic-check
 SUM
-  local events=""
-  events+=$(tool_result_json "Shell" 50 5 1 "" "bash /plugin/shared-scripts/gate-run.sh basic pnpm basic-check")
-  run_parser "$events" >/dev/null
+  run_parser_gates basic:1 >/dev/null
 
   # Working set is preserved.
   grep -q "Active task: T031" "$MOCK_WORKSPACE/.ralph/handoff.md"
@@ -853,9 +926,7 @@ SUM
 
 Active task: T041
 HOFF
-  local events=""
-  events+=$(tool_result_json "Shell" 50 5 0 "" "bash /plugin/shared-scripts/gate-run.sh basic pnpm basic-check")
-  run_parser "$events" >/dev/null
+  run_parser_gates basic:0 >/dev/null
 
   grep -q "Active task: T041" "$MOCK_WORKSPACE/.ralph/handoff.md"
   grep -q "exit: 0" "$MOCK_WORKSPACE/.ralph/handoff.md"
@@ -864,21 +935,22 @@ HOFF
 
 @test "gate-end is a no-op when handoff.md is absent (0.12.0)" {
   rm -f "$MOCK_WORKSPACE/.ralph/handoff.md"
-  local events=""
-  events+=$(tool_result_json "Shell" 50 5 1 "" "bash /plugin/shared-scripts/gate-run.sh basic pnpm basic-check")
   # Must not error or create handoff.md.
-  run_parser "$events" >/dev/null
+  run_parser_gates basic:1 >/dev/null
   [ ! -f "$MOCK_WORKSPACE/.ralph/handoff.md" ]
 }
 
 # =============================================================================
-# Gate-label extraction — canonical-only regex (0.12.4)
+# Gate-label sourcing (0.12.4 → 0.24.0)
 # =============================================================================
-# Bug: the prior regex `gate-run\.sh[[:space:]]+[A-Za-z0-9_-]+` greedily
-# captured `2` from `gate-run.sh 2>&1 | tail -40` and wrote `label: 2`
-# into handoff.md. Fix: anchor to canonical labels only.
+# 0.12.4 fixed a regex that greedily captured `2` from `gate-run.sh 2>&1 |
+# tail -40` and wrote `label: 2` into handoff.md. 0.24.0 removes the regex
+# entirely: the label arrives as a FIELD in gate-run.sh's own marker, so there
+# is no command line left to mis-parse. What survives from 0.12.4 is the
+# invariant those tests were protecting — a label the parser cannot trust must
+# not reach handoff.md — now enforced against the marker instead.
 
-@test "gate-label extraction ignores '2>&1' as a label (0.12.4)" {
+@test "a malformed marker never reaches handoff.md (0.24.0, ex-0.12.4)" {
   cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<'HOFF'
 # Loop Handoff
 
@@ -890,41 +962,18 @@ HOFF
 
 Active task: T099
 HOFF
-  local events=""
-  # Malformed invocation: agent typed `bash gate-run.sh 2>&1 | tail` —
-  # there's no real label, just an stderr redirect. The handoff section
-  # MUST be left alone.
-  events+=$(tool_result_json "Shell" 50 5 0 "" "bash /plugin/shared-scripts/gate-run.sh 2>&1 | tail -40")
-  run_parser "$events" >/dev/null
+  # `2` where a label belongs, a non-numeric exit, and a truncated line — none
+  # of them is a verdict, and the streak must not move on one either.
+  run_parser_raw_marker '2 0 20260101T000000Z-a' >/dev/null
+  run_parser_raw_marker 'basic notanumber 20260101T000000Z-b' >/dev/null
+  run_parser_raw_marker 'basic' >/dev/null
 
-  # The unchanged sentinel must still be there — no false rewrite.
   grep -q "unchanged sentinel" "$MOCK_WORKSPACE/.ralph/handoff.md"
-  # And we must NOT have written `label: 2`.
   ! grep -q "label: 2" "$MOCK_WORKSPACE/.ralph/handoff.md"
+  ! grep -q "label: basic" "$MOCK_WORKSPACE/.ralph/handoff.md"
 }
 
-@test "gate-label extraction ignores non-canonical labels (0.12.4)" {
-  cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<'HOFF'
-# Loop Handoff
-
-## Last gate state
-
-(unchanged sentinel)
-HOFF
-  local events=""
-  # Agent typed `gate-run.sh all` (typo — `all` is not a canonical
-  # label). Should be ignored, not persisted as `label: all`.
-  events+=$(tool_result_json "Shell" 50 5 1 "" "bash /plugin/shared-scripts/gate-run.sh all pnpm all-check")
-  run_parser "$events" >/dev/null
-
-  grep -q "unchanged sentinel" "$MOCK_WORKSPACE/.ralph/handoff.md"
-  ! grep -q "label: all" "$MOCK_WORKSPACE/.ralph/handoff.md"
-}
-
-@test "gate-label extraction accepts each canonical label (0.14.0)" {
-  # 0.14.0: canonical set is 3 tier labels + 5 kind labels. Stale labels
-  # (custom, eval-*) are intentionally excluded — see the non-canonical
-  # ignore test above.
+@test "gate label is taken from the marker for every canonical label (0.24.0)" {
   for label in basic full final unit integration e2e lint format; do
     cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<HOFF
 # Loop Handoff
@@ -933,12 +982,129 @@ HOFF
 
 (none yet)
 HOFF
-    local events=""
-    events+=$(tool_result_json "Shell" 50 5 0 "" "bash /plugin/shared-scripts/gate-run.sh $label pnpm test")
-    run_parser "$events" >/dev/null
+    run_parser_gates "$label:0" >/dev/null
     grep -q "label: $label" "$MOCK_WORKSPACE/.ralph/handoff.md" \
       || { echo "Expected 'label: $label' in handoff but didn't find it"; return 1; }
   done
+}
+
+@test "a non-tier label now reaches the handoff too (0.24.0)" {
+  # Pre-0.24 the canonical-set anchor was load-bearing against a mis-parsed
+  # command line, and it silently dropped legitimate labels the eval loop
+  # uses. With the label arriving as a field, `eval-final` is just a label.
+  cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<'HOFF'
+# Loop Handoff
+
+## Last gate state
+
+(none yet)
+HOFF
+  run_parser_gates "eval-final:0" >/dev/null
+  grep -q "label: eval-final" "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+# ---------------------------------------------------------------------------
+# 0.24.0: the gate-end trigger is the marker, not the command text.
+# ---------------------------------------------------------------------------
+
+@test "an auto-wrapped tier gate still reaches Last gate state (0.24.0)" {
+  # THE regression. The agent types `./scripts/gate.sh full`; ralph-guard.sh
+  # wraps it via updatedInput, which the transcript never sees. Pre-0.24 this
+  # wrote nothing at all.
+  cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<'HOFF'
+# Loop Handoff
+
+## Last gate state
+
+_(none yet)_
+HOFF
+  run_parser_gates full:0 >/dev/null
+
+  grep -q "label: full" "$MOCK_WORKSPACE/.ralph/handoff.md" \
+    || { echo "handoff was not updated:"; cat "$MOCK_WORKSPACE/.ralph/handoff.md"; return 1; }
+  ! grep -q "none yet" "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+@test "consecutive gate failures from the marker reach TURN_END (0.24.0)" {
+  # The other half that was dead behind the command-text test: with the streak
+  # never incrementing, the 5-failure TURN_END could not fire on a wrapped
+  # gate. Threshold lowered to keep the fixture small.
+  export RALPH_GATE_FAIL_STREAK_THRESHOLD=3
+  local output
+  output=$(run_parser_gates basic:1 basic:1 basic:1)
+  echo "$output" | grep -q "^TURN_END$" \
+    || { echo "TURN_END not emitted. Output: $output"; return 1; }
+}
+
+@test "a passing gate resets the failure streak (0.24.0)" {
+  export RALPH_GATE_FAIL_STREAK_THRESHOLD=3
+  local output
+  output=$(run_parser_gates basic:1 basic:1 basic:0 basic:1 basic:1)
+  if echo "$output" | grep -q "^TURN_END$"; then
+    fail "TURN_END fired despite an intervening pass"
+  fi
+}
+
+@test "a marker left by a previous loop is not replayed (0.24.0)" {
+  # GATE_EVENT_SEEN is seeded at parser start. A red gate from the loop before
+  # must not count as this session's first failure — the streak is per-agent-
+  # invocation by design.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'basic 1 20251231T235959Z-9\n' > "$MOCK_WORKSPACE/.ralph/gates/last-run"
+  cat > "$MOCK_WORKSPACE/.ralph/handoff.md" <<'HOFF'
+# Loop Handoff
+
+## Last gate state
+
+(unchanged sentinel)
+HOFF
+  local events=""
+  events+=$(tool_result_json "Shell" 50 5 0 "" "./scripts/gate.sh basic")
+  run_parser "$events" >/dev/null
+
+  grep -q "unchanged sentinel" "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+@test "the same gate end is drained only once (0.24.0)" {
+  export RALPH_GATE_FAIL_STREAK_THRESHOLD=2
+  # One marker write, then two shell results. Only the first is a gate end;
+  # re-reading an unchanged marker must not walk the streak.
+  local marker="$MOCK_WORKSPACE/.ralph/gates/last-run"
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  local output
+  output=$(
+    {
+      tool_result_json "Shell" 50 5 0 "" "echo warmup-1"
+      _wait_for_activity "warmup-1"
+      printf 'basic 1 20260101T000000Z-1\n' >"$marker"
+      tool_result_json "Shell" 50 5 1 "" "./scripts/gate.sh basic"
+      tool_result_json "Shell" 50 5 1 "" "./scripts/gate.sh basic"
+    } | bash "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE" 1
+  )
+  if echo "$output" | grep -q "^TURN_END$"; then
+    fail "an unchanged marker was counted twice"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# 0.24.0: handoff-touch stamp. handoff.md's own mtime cannot answer "when did
+# the AGENT last write this" — the plugin rewrites the file too — so the
+# parser records it from the tool event. _auto_enrich_handoff renders it.
+# ---------------------------------------------------------------------------
+
+@test "an agent edit of handoff.md stamps handoff-agent-ts (0.24.0)" {
+  local events=""
+  events+=$(tool_result_json "Edit" 500 20 0 "$MOCK_WORKSPACE/.ralph/handoff.md" "")
+  run_parser "$events" >/dev/null
+  [ -f "$MOCK_WORKSPACE/.ralph/handoff-agent-ts" ]
+  grep -qE '^[0-9]+$' "$MOCK_WORKSPACE/.ralph/handoff-agent-ts"
+}
+
+@test "editing another file does not stamp handoff-agent-ts (0.24.0)" {
+  local events=""
+  events+=$(tool_result_json "Edit" 500 20 0 "$MOCK_WORKSPACE/src/handoff.ts" "")
+  run_parser "$events" >/dev/null
+  [ ! -f "$MOCK_WORKSPACE/.ralph/handoff-agent-ts" ]
 }
 
 
@@ -1251,4 +1417,74 @@ _sidechain_read() {
   events=$(jq -cn '{kind:"tool_result",name:"Shell",bytes:50,lines:0,exit_code:1,path:"",cmd:"pnpm basic-check",sidechain:true}')
   run_parser "$events" >/dev/null
   grep -q "SHELL FAIL: pnpm basic-check" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+# ---------------------------------------------------------------------------
+# Self-limited cutoffs (0.24.0). Sibling of the 0.23.0 readiness-probe rule,
+# for the shape it does not reach: a deliberate interrupt/resume harness. Both
+# fixtures are verbatim from cur-71, where they landed in errors.log as SHELL
+# FAIL (15:33:02 and 15:36:41) while testing that a backfill resumes from its
+# checkpoint after being cut off — being cut off was the point.
+#
+# Narrow on BOTH axes: the exit code must be a cutoff signature AND the command
+# must carry the instrument that did the cutting. The regression guards below
+# are the load-bearing half.
+# ---------------------------------------------------------------------------
+
+# Same shape as _expect_logged/_expect_not_logged but with a chosen exit code.
+_cutoff_not_logged() {
+  local events
+  events=$(jq -cn --arg c "$1" --argjson e "$2" \
+    '{kind:"tool_result",name:"Shell",bytes:50,lines:5,exit_code:$e,path:"",cmd:$c}')
+  run_parser "$events" >/dev/null
+  if grep -q "SHELL FAIL" "$MOCK_WORKSPACE/.ralph/errors.log" 2>/dev/null; then
+    fail "self-limited cutoff was logged as SHELL FAIL: $1"
+  fi
+  grep -q "SHELL CUT OFF" "$MOCK_WORKSPACE/.ralph/activity.log" \
+    || fail "cutoff was silently dropped instead of logged as CUT OFF: $1"
+}
+
+_cutoff_logged() {
+  local events
+  events=$(jq -cn --arg c "$1" --argjson e "$2" \
+    '{kind:"tool_result",name:"Shell",bytes:50,lines:5,exit_code:$e,path:"",cmd:$c}')
+  run_parser "$events" >/dev/null
+  grep -q "SHELL FAIL" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "a timeout harness cut off at its own budget is not a failure (0.24.0)" {
+  _cutoff_not_logged 'timeout -k 3 12 bash -c "$(declare -f BF); BF" >/tmp/ff-1.log 2>&1; echo "cut off (rc=$?)"' 124
+}
+
+@test "a kill -INT harness cut off is not a failure (0.24.0)" {
+  _cutoff_not_logged 'uv run curve backfill --tickers AAPL >/tmp/ff-1.log 2>&1 &
+bpid=$!; sleep 14; kill -INT "$bpid" 2>/dev/null; wait "$bpid" 2>/dev/null; echo "interrupted"' 124
+}
+
+@test "SIGTERM and SIGKILL codes from a self-limited harness are cutoffs (0.24.0)" {
+  _cutoff_not_logged 'timeout 30 pnpm dev' 143
+  _cutoff_not_logged 'pkill -KILL -f "curve backfill"' 137
+}
+
+@test "a self-limited command failing on its OWN verdict is still logged (0.24.0 regression guard)" {
+  # The budget was generous and the suite genuinely failed. Exit 1 is the
+  # test runner's answer, not the cutoff's.
+  _cutoff_logged 'timeout 300 pnpm test' 1
+}
+
+@test "a cutoff code with no self-cutoff instrument is still logged (0.24.0 regression guard)" {
+  # The tool had to kill a plain build. That is the agent hanging the loop and
+  # must stay visible.
+  _cutoff_logged 'pnpm build' 124
+}
+
+@test "a kill -0 liveness probe is not a cutoff instrument (0.24.0 regression guard)" {
+  # `kill -0` asks whether a pid is alive; it stops nothing. A command built
+  # from it that dies must not launder itself as a deliberate cutoff.
+  _cutoff_logged 'pid=60958; until ! kill -0 "$pid" 2>/dev/null; do sleep 15; done; pnpm build' 124
+}
+
+@test "curl --max-time is not the `timeout` command (0.24.0 regression guard)" {
+  # Substring safety: `--max-time` must not read as the timeout instrument.
+  _cutoff_logged 'curl -s --max-time 5 -X POST http://127.0.0.1:1/run' 124
 }

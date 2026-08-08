@@ -193,6 +193,14 @@ Re-reading a green gate log is the second-most common waste pattern (after blind
 
 On failure, gate-run also writes `.ralph/gates/<label>-latest.summary` — a small structured digest (failure-signature lines + any `coverage_gaps` block found in the log). `stream-parser` copies this into the `## Last gate state` section of `.ralph/handoff.md`, which the next loop's framing prompt inlines automatically. You don't need to read the summary file directly — it's delivered to you in the next prompt. On a passing gate the summary file is removed so it doesn't go stale.
 
+### 5b. End-of-run marker (0.24.0).
+
+Every outcome also overwrites `.ralph/gates/last-run` with one line: `<label> <exit> <run-id>`. This is how `stream-parser` knows a gate ended.
+
+It used to know by matching `gate-run.sh` in the command the model typed — which `ralph-guard.sh`'s auto-wrap never puts there. The guard rewrites via the PreToolUse hook's `updatedInput`, and the transcript keeps the original `./scripts/gate.sh full`, so on the normal wrapped path the parser saw no gate at all: `## Last gate state` was never written and the consecutive-gate-failure `TURN_END` could not fire. Announcing the end from the process that owns the verdict is rewrite-proof, and also covers the `bash "$(cat .ralph/gate-runner)" final …` form the eval loop's sub-agents use.
+
+Agents never read this file. The `<run-id>` exists only so the parser can tell a fresh end from one it already consumed.
+
 ### 6. Every gate runs detached; your call is a waiter (0.16.0).
 
 gate-run.sh does not execute the gate inside your shell call. The launcher detaches a **runner** into its own session — immune to tool-call timeouts, subagent-return reaps, tmux kills, and loop rotations — then waits up to `RALPH_GATE_WAIT` (default 570 s) for the verdict:

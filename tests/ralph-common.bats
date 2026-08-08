@@ -1539,3 +1539,56 @@ _repo_with_gitignore() { # $1 = .gitignore contents
   grep -qxF '.ralph/' "$d/.gitignore"
   rm -rf "$d"
 }
+
+# =============================================================================
+# 0.24.0: Working-set age in the auto-enriched block
+# =============================================================================
+# The agent's own prose is the one part of the handoff nothing can verify, and
+# a stale block reads exactly like a fresh one. cur-71 carried a "Current task:
+# T012" paragraph under a newer "Next: Tranche D" paragraph for 2h49m with
+# nothing marking either as current. stream-parser stamps
+# .ralph/handoff-agent-ts on every agent Edit/Write of handoff.md — handoff.md's
+# own mtime can't answer, because the plugin rewrites it too.
+
+_seed_enrichable_state() {
+  create_mock_spec "test-spec"
+  cat > "$MOCK_SPEC_DIR/tasks.md" <<'TASKS'
+# Tasks
+- [x] T001 First task done
+- [ ] T002 Second task pending
+TASKS
+  (cd "$MOCK_WORKSPACE" && git add specs/ && git commit -q -m "feat(scope): T001 done")
+  echo "$MOCK_SPEC_DIR/tasks.md" > "$MOCK_WORKSPACE/.ralph/task-file-path"
+  echo "## Working set" > "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+@test "_auto_enrich_handoff: renders the working set's age from the stamp (0.24.0)" {
+  _seed_enrichable_state
+  # Stamped 2h49m ago — the cur-71 gap.
+  echo "$(($(date +%s) - 10140))" > "$MOCK_WORKSPACE/.ralph/handoff-agent-ts"
+
+  _auto_enrich_handoff "$MOCK_WORKSPACE"
+
+  grep -qE 'Working set written.*2h 49m ago' "$MOCK_WORKSPACE/.ralph/handoff.md" \
+    || { echo "age line missing/wrong:"; cat "$MOCK_WORKSPACE/.ralph/handoff.md"; return 1; }
+}
+
+@test "_auto_enrich_handoff: says so when the agent never wrote one (0.24.0)" {
+  _seed_enrichable_state
+  rm -f "$MOCK_WORKSPACE/.ralph/handoff-agent-ts"
+
+  _auto_enrich_handoff "$MOCK_WORKSPACE"
+
+  grep -q "never written by the agent" "$MOCK_WORKSPACE/.ralph/handoff.md"
+}
+
+@test "_auto_enrich_handoff: a corrupt stamp is ignored, not rendered (0.24.0)" {
+  _seed_enrichable_state
+  echo "not-a-timestamp" > "$MOCK_WORKSPACE/.ralph/handoff-agent-ts"
+
+  _auto_enrich_handoff "$MOCK_WORKSPACE"
+
+  # The section still lands; it just carries no age claim it cannot support.
+  grep -q "## Auto-enriched state" "$MOCK_WORKSPACE/.ralph/handoff.md"
+  ! grep -q "Working set written" "$MOCK_WORKSPACE/.ralph/handoff.md"
+}

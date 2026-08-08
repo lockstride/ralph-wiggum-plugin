@@ -265,12 +265,21 @@ foreach (try inputs catch empty) as $e (
              # `=== GATE <label> exit=<N>` marker and treat the transport states
              # (still-running / launched / died) as non-failures (0). Every
              # non-gate command keeps the is_error mapping unchanged.
+             # 0.24.0: when the CLI's own Bash timeout cuts a command off, the
+             # command never returned a verdict — but is_error flattens that to
+             # a 1 indistinguishable from "the command failed". Surface 124
+             # (the conventional timed-out code) instead, so the parser can tell
+             # a cutoff from a verdict. This ADDS information; nothing that was
+             # 1 for a real reason changes. The gate branch keeps its own
+             # mapping — 0.16.1 already recovers the true verdict there.
              if ($info.cmd | test("gate-run")) then
                ([$txt | match("=== GATE [a-z0-9]+ exit=([0-9]+)"; "g")]) as $m
                | if ($m | length) > 0 then ($m[-1].captures[0].string | tonumber)
                  elif ($txt | test("STILL RUNNING|gate launched detached|RUNNER DIED")) then 0
                  else (if .is_error then 1 else 0 end) end
-             else (if .is_error then 1 else 0 end) end)}
+             elif .is_error then
+               (if ($txt | test("command timed out"; "i")) then 124 else 1 end)
+             else 0 end)}
       else empty end
     )
   elif $e.type == "result" then

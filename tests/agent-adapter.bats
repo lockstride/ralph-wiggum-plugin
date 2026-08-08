@@ -188,3 +188,31 @@ _claude_sidechain() { # $1=native JSON event
   run bash -c 'printf "%s\n" "{\"type\":\"user\",\"isSidechain\":true,\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"payload\"}]}}" | jq -n -c -f "'"$CLAUDE_FILTER"'" | jq -rc ".kind"'
   [ "$output" = "tool_result" ]
 }
+
+# ---------------------------------------------------------------------------
+# 0.24.0: the CLI's own Bash timeout is not a command verdict. Claude's
+# stream-json exposes only is_error, which flattened a cut-off command to a 1
+# indistinguishable from "the command failed" — so stream-parser could not tell
+# a deliberate interrupt harness from a real failure and logged both as SHELL
+# FAIL (cur-71, 15:33:02 / 15:36:41). Surface 124 instead.
+# ---------------------------------------------------------------------------
+
+@test "claude: a tool timeout maps to 124, not a flattened 1 (0.24.0)" {
+  run _claude_exit 'timeout -k 3 12 bash -c "BF"' true 'Command timed out after 2m 0.0s'
+  [ "$output" = "124" ]
+}
+
+@test "claude: the timeout message is matched case-insensitively (0.24.0)" {
+  run _claude_exit 'uv run curve backfill' true 'Error: command timed out after 120s'
+  [ "$output" = "124" ]
+}
+
+@test "claude: a non-timeout is_error still maps to 1 (0.24.0 regression guard)" {
+  run _claude_exit 'pnpm build' true 'error TS2345: Argument of type ...'
+  [ "$output" = "1" ]
+}
+
+@test "claude: a successful command is still 0 (0.24.0 regression guard)" {
+  run _claude_exit 'pnpm build' false 'Build succeeded'
+  [ "$output" = "0" ]
+}

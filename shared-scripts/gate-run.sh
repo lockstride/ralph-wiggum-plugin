@@ -443,6 +443,23 @@ if [[ "${RALPH_GATE_ROLE:-}" == "runner" ]]; then
       # reality.
       rm -f "$gates_dir/$label-latest.summary"
     fi
+    # 0.24.0: end-of-run marker for stream-parser. The parser used to notice a
+    # gate end by matching `gate-run.sh` in the MODEL's command text — which
+    # the guard's auto-wrap never puts there: the rewrite happens in the
+    # PreToolUse hook's `updatedInput`, while the transcript keeps what the
+    # agent typed (`./scripts/gate.sh full`). So on the normal, wrapped path
+    # neither handoff.md's "Last gate state" nor the gate-fail-streak TURN_END
+    # ever fired. Observed in cur-71: 46 gate runs, `_(none yet)_` still in the
+    # handoff. Announcing the end HERE, from the process that owns the verdict,
+    # is rewrite-proof and also covers the `$(cat .ralph/gate-runner)` shape the
+    # eval loop's sub-agents use.
+    #
+    # One line, overwritten per run: `<label> <exit> <run-id>`. The run-id (the
+    # runner's timestamp+pid stem) is what makes a fresh end distinguishable
+    # from the one the parser already consumed. Written BEFORE the per-run exit
+    # file so the marker is on disk by the time the waiter returns and the
+    # agent's tool_result reaches the parser.
+    printf '%s %s %s\n' "$label" "$code" "$ts" >"$gates_dir/last-run" 2>/dev/null || true
     # Per-run exit file LAST — it is the waiter's commit signal.
     printf '%s' "$code" >"$exit_file"
   }

@@ -239,6 +239,32 @@ record_gate_runner() {
   printf '%s\n' "$scripts_dir/gate-run.sh" >"$workspace/.ralph/gate-runner"
 }
 
+# Give the eval loop an empty gates dir, so a gate left behind by the
+# implementation loop cannot satisfy its completion guard. The eval loop's
+# verifier/rework sub-agents run their gates under label `final` and write
+# fresh `final-latest.*` artifacts.
+#
+# 0.24.0: ARCHIVE rather than delete. Clearing is right — a green `full` from
+# the implementation loop must not stand in for the eval loop's `final` tier —
+# but the previous `rm -rf` also destroyed the implementation phase's entire
+# gate record, which is the first thing a post-mortem reads. cur-71 ran 46
+# gates and finished with exactly one still readable. Moving the directory
+# aside gives the guard the same empty slate and keeps the evidence.
+#
+# An existing archive is from a PRIOR eval run over the same worktree; the
+# implementation gates it held were already superseded by the ones we are
+# about to move. Falls back to deleting if the move fails — an empty gates
+# dir is the invariant, the archive is a courtesy.
+archive_impl_gates() {
+  local workspace="$1"
+  local gates="$workspace/.ralph/gates"
+  if [[ -d "$gates" ]]; then
+    rm -rf "$gates.impl"
+    mv "$gates" "$gates.impl" 2>/dev/null || rm -rf "$gates"
+  fi
+  mkdir -p "$gates"
+}
+
 # Render a thin framing prompt that points the agent at the
 # `running-acceptance-evaluation` skill and supplies the per-run paths
 # (ground truth, report). The orchestrator workflow itself, plus the
@@ -345,12 +371,7 @@ main() {
   fi
   echo "✓ Report: $report$([[ "$FRESH" == "true" ]] && echo ' (fresh)')"
 
-  # Clear stale gate state so a red gate left behind by the main loop
-  # doesn't block the eval-loop completion guard. The eval loop's
-  # verifier/rework sub-agents run their gates under label `final`,
-  # writing fresh `final-latest.*` artifacts.
-  rm -rf "$WORKSPACE/.ralph/gates"
-  mkdir -p "$WORKSPACE/.ralph/gates"
+  archive_impl_gates "$WORKSPACE"
 
   record_gate_runner "$WORKSPACE" "$SCRIPT_DIR"
 
