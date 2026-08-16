@@ -56,7 +56,9 @@ iter N - MODE - <one-sentence summary from sub-agent>
 
 Bump the **Last loop** and **Last mode** header fields. The report lives under `.ralph/` (gitignored, per-run state) — **do not** commit it, and do not `git add -f` to bypass the ignore. Disk state is sufficient: the task-counter, the mode-decision grep, and `seed_report()` all read the file directly.
 
-**Step 5. Let the loop advance.** No signal emission needed. The loop's own task-counter will see the updated checkbox state and decide whether to continue or exit.
+**Step 5. Let the loop advance — end your turn.** No signal emission needed. The loop's own task-counter will see the updated checkbox state and decide whether to continue or exit.
+
+`<ralph>COMPLETE</ralph>` has exactly one legitimate source in this loop: the Step 2 early exit, where the top-level checkbox is already `[x]` and **Status** reads `CLEAN`. Emitting it anywhere else — because the gate is green, because this loop's ticket passed, because the remaining rows "look fine" — is rejected by the completion guard, which reads the report rather than the claim. That costs a whole loop and changes nothing. If rows remain open, the correct move is to stop talking and end the turn.
 
 ## What *not* to do
 

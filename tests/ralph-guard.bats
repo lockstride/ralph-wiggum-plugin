@@ -1249,3 +1249,104 @@ EOF
   echo "$output" | jq -r '.hookSpecificOutput.permissionDecisionReason' |
     grep -q ".ralph/policy-proposal"
 }
+
+# --- 0.24.1: the gate cache must arm on BOTH invocation paths ---
+# Pre-0.24.1 the cache/tier-lock block sat after _enforce_command_policy,
+# which exits via _emit_rewrite — so the auto-wrapped path (the normal one)
+# never recorded last-gate-ts.<label>, leaving the cache permanently inert.
+# The `$(cat .ralph/gate-runner)` indirection every eval-loop sub-agent uses
+# was invisible for the same reason: its text has no "gate-run.sh" in it.
+
+@test "gate-cache: auto-wrapped gate records the per-label timestamp (0.24.1)" {
+  setup_v14_gates_policy
+  rm -f "$STATE_DIR"/last-gate-ts*
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "pnpm basic-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic")'
+  [ -f "$STATE_DIR/last-gate-ts.basic" ]
+}
+
+@test "gate-cache: blocks an auto-wrapped gate re-run with no intervening write (0.24.1)" {
+  setup_v14_gates_policy
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.basic"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  printf '1' > "$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
+  run _run_guard Bash "pnpm basic-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("identical output")'
+}
+
+@test "gate-cache: a code write re-opens the auto-wrapped gate (0.24.1)" {
+  setup_v14_gates_policy
+  echo "1" > "$STATE_DIR/last-gate-ts.basic"
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  printf '1' > "$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
+  run _run_guard Bash "pnpm basic-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic")'
+}
+
+@test "gate-cache: gate-runner indirection records the per-label timestamp (0.24.1)" {
+  setup_v14_gates_policy
+  rm -f "$STATE_DIR"/last-gate-ts*
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash 'bash "$(cat .ralph/gate-runner)" final pnpm verify:final'
+  [ "$status" -eq 0 ]
+  [ -f "$STATE_DIR/last-gate-ts.final" ]
+}
+
+@test "gate-cache: gate-runner indirection is subject to the cache (0.24.1)" {
+  setup_v14_gates_policy
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.final"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  printf '0' > "$MOCK_WORKSPACE/.ralph/gates/final-latest.exit"
+  run _run_guard Bash 'bash "$(cat .ralph/gate-runner)" final pnpm verify:final'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e ".hookSpecificOutput.permissionDecisionReason | test(\"Gate 'final'\")"
+}
+
+@test "label-lock: gate-runner indirection triggers the tier lock (0.24.1)" {
+  setup_v14_gates_policy
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash 'bash "$(cat .ralph/gate-runner)" unit pnpm all-check'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("must run under label .full.")'
+}
+
+@test "label-lock: trailing '; echo' does not disarm the tier lock (0.24.1)" {
+  # The shape the eval loop actually types. The trailing segment used to ride
+  # along in the compared command, so no [gates] pin ever matched.
+  setup_v14_gates_policy
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash 'bash "$(cat .ralph/gate-runner)" unit pnpm all-check; echo "GATE_EXIT=$?"'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("must run under label .full.")'
+}
+
+@test "label-lock: correct tier label via gate-runner indirection is allowed (0.24.1)" {
+  setup_v14_gates_policy
+  rm -f "$STATE_DIR"/last-gate-ts*
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash 'bash "$(cat .ralph/gate-runner)" full pnpm all-check; echo "GATE_EXIT=$?"'
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+@test "cat of .ralph/gate-runner does not trigger the gate cache (0.24.1)" {
+  # Reading the breadcrumb is a diagnostic, not a gate run — must not be
+  # treated as one (the 0.14.2 false-positive class).
+  echo "$(date +%s)" > "$STATE_DIR/last-gate-ts.unknown"
+  echo "0" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "cat .ralph/gate-runner"
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}

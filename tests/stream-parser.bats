@@ -1488,3 +1488,61 @@ bpid=$!; sleep 14; kill -INT "$bpid" 2>/dev/null; wait "$bpid" 2>/dev/null; echo
   # Substring safety: `--max-time` must not read as the timeout instrument.
   _cutoff_logged 'curl -s --max-time 5 -X POST http://127.0.0.1:1/run' 124
 }
+
+# --- 0.24.1: per-session attribution + CLI-initiated context restarts ---
+# The parser lives for a whole LOOP, but the agent CLI may open several
+# sessions inside it (Claude Code auto-compaction). Pre-0.24.1 each of those
+# logged a bare SESSION START with no reason, and every SESSION END reported
+# the same loop-to-date token total.
+
+@test "second init in a loop logs a CONTEXT RESTART, not a bare SESSION START (0.24.1)" {
+  # Both events must go through ONE parser process — the session counter is
+  # per-parser-lifetime, which is exactly the loop scope being modelled.
+  printf '%s\n%s\n' \
+    '{"kind":"system","model":"claude-opus-4-8"}' \
+    '{"kind":"system","model":"claude-opus-4-8"}' |
+    bash "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE" 1 > /dev/null
+
+  grep -q "SESSION START: model=claude-opus-4-8" "$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -q "CONTEXT RESTART (#2)" "$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -q "rotated its own context" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "a single-session loop still logs a plain SESSION START (0.24.1)" {
+  run_parser '{"kind":"system","model":"claude-opus-4-8"}'
+  grep -q "SESSION START: model=claude-opus-4-8" "$MOCK_WORKSPACE/.ralph/activity.log"
+  ! grep -q "CONTEXT RESTART" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "SESSION END reports this session's own tokens, not the loop total (0.24.1)" {
+  # Two sessions, each doing work. The second SESSION END must NOT repeat the
+  # first's cumulative figure — that identical-number bug is what this fixes.
+  {
+    echo '{"kind":"system","model":"m"}'
+    tool_result_json "Read" 4000 10 0 "/tmp/a.ts"
+    echo '{"kind":"result","duration_ms":1000}'
+    echo '{"kind":"system","model":"m"}'
+    tool_result_json "Read" 8000 10 0 "/tmp/b.ts"
+    echo '{"kind":"result","duration_ms":2000}'
+  } | bash "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE" 1 > /dev/null
+
+  local first second
+  first=$(grep -o "~[0-9]* tokens this session" "$MOCK_WORKSPACE/.ralph/activity.log" | head -1)
+  second=$(grep -o "~[0-9]* tokens this session" "$MOCK_WORKSPACE/.ralph/activity.log" | tail -1)
+  [ -n "$first" ] && [ -n "$second" ]
+  [ "$first" != "$second" ] || {
+    echo "both sessions reported the same figure: $first"
+    return 1
+  }
+  # The loop total must still be reported alongside it.
+  grep -q "loop total" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "session token attribution never goes negative (0.24.1)" {
+  {
+    echo '{"kind":"system","model":"m"}'
+    echo '{"kind":"result","duration_ms":10}'
+    echo '{"kind":"result","duration_ms":10}'
+  } | bash "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE" 1 > /dev/null
+  ! grep -q -- "~-" "$MOCK_WORKSPACE/.ralph/activity.log"
+}

@@ -114,7 +114,7 @@ _log() {
 }
 
 @test "classify: an unmarked non-zero exit is 'error'" {
-  _log '[09:09:17] 🟢 SESSION END: 21319ms, ~4796 tokens used'
+  _log '[09:09:17] 🟢 SESSION END: 21319ms, ~4796 tokens this session (~4796 loop total)'
   [ "$(_classify 1 0)" = "error" ]
 }
 

@@ -51,6 +51,18 @@ WARN_SENT=0
 TOOL_CALL_COUNT=0
 RATE_LIMITED=0
 
+# 0.24.1: per-session attribution. The parser lives for the whole LOOP, but
+# the agent CLI can open several sessions inside it — Claude Code compacts its
+# own context and emits a fresh init/result pair without Ralph asking for
+# anything. calc_tokens is cumulative over the parser's lifetime, so every
+# SESSION END reported the same loop-to-date figure: a loop with three
+# sessions logged "~272926 tokens used" three times, which reads as a stuck
+# counter and tells an evaluator nothing about which session was expensive.
+# Track a per-session baseline so each SESSION END reports its OWN usage while
+# the loop total (the number rotation actually keys on) stays visible.
+SESSION_INDEX=0
+SESSION_TOKENS_BASE=0
+
 # Gutter detection — temp files (macOS bash 3.x has no assoc arrays)
 FAILURES_FILE=$(mktemp)
 WRITES_FILE=$(mktemp)
@@ -900,7 +912,20 @@ process_line() {
     system)
       local model
       model=$(echo "$line" | jq -r '.model // "unknown"' 2>/dev/null) || model="unknown"
-      log_activity "SESSION START: model=$model"
+      SESSION_INDEX=$((SESSION_INDEX + 1))
+      if [[ $SESSION_INDEX -eq 1 ]]; then
+        log_activity "SESSION START: model=$model"
+      else
+        # 0.24.1: a second init inside one loop is the CLI rotating its OWN
+        # context (Claude Code auto-compaction) — Ralph's ROTATE never fired,
+        # and the loop is still the same loop. Previously this logged as a bare
+        # SESSION START, indistinguishable from a fresh loop and carrying no
+        # reason, so a post-hoc evaluator could not tell why the session
+        # restarted. Name it, and stamp the context state that explains it.
+        local _pct=$((($(calc_tokens) * 100) / ROTATE_THRESHOLD))
+        log_activity "🔄 CONTEXT RESTART (#$SESSION_INDEX): agent CLI rotated its own context at ~${_pct}% of the Ralph budget — model=$model"
+      fi
+      SESSION_TOKENS_BASE=$(calc_tokens)
 
       # Prefer LIVE counts from the resolved task file so the banner tracks
       # progress on every rotation; fall back to the static task-summary
@@ -1172,9 +1197,13 @@ process_line() {
     result)
       local duration
       duration=$(echo "$line" | jq -r '.duration_ms // 0' 2>/dev/null) || duration=0
-      local tokens
+      local tokens session_tokens
       tokens=$(calc_tokens)
-      log_activity "SESSION END: ${duration}ms, ~$tokens tokens used"
+      # 0.24.1: this session's own usage, not the loop-to-date total.
+      session_tokens=$((tokens - SESSION_TOKENS_BASE))
+      [[ $session_tokens -lt 0 ]] && session_tokens=0
+      SESSION_TOKENS_BASE=$tokens
+      log_activity "SESSION END: ${duration}ms, ~$session_tokens tokens this session (~$tokens loop total)"
 
       if [[ $TOOL_CALL_COUNT -eq 0 ]] && [[ $ASSISTANT_CHARS -eq 0 ]] && [[ $RATE_LIMITED -eq 0 ]]; then
         log_error "EMPTY SESSION: agent produced zero output in ${duration}ms — likely rate limited or API issue"

@@ -25,7 +25,10 @@
 #
 # The wrapped command runs under the runner in its own process group with a
 # watchdog timeout, so the real exit code is preserved and hung gates are
-# killed subtree-wide (0.6.3 semantics preserved).
+# killed subtree-wide (0.6.3 semantics preserved). On timeout the watchdog also
+# reaps descendants that left that process group — a child which setsid()s out
+# of it (Cypress/Electron helpers, browser renderers, nx daemons) never sees
+# `kill -- -PGID`, and survivors fail the NEXT gate (0.24.1).
 #
 # Usage:
 #   gate-run.sh <label> <cmd> [args...]
@@ -86,6 +89,9 @@ WHY
     • If the gate outlives the wait budget, prints STILL RUNNING and exits
       75 — re-run the SAME command to keep waiting (it joins the in-flight
       gate; it never double-runs)
+    • On gate timeout, kills the gate's process group AND sweeps descendants
+      that escaped it (Cypress/Electron, browser renderers, nx daemons), so a
+      timed-out gate cannot leave processes behind to fail the next one
     • Writes exit-code breadcrumbs at .ralph/gates/<label>-latest.exit and
       per-run at .ralph/gates/<label>-<ts>.exit — on EVERY outcome,
       including the runner being signalled (143) — plus a command
@@ -464,6 +470,53 @@ if [[ "${RALPH_GATE_ROLE:-}" == "runner" ]]; then
     printf '%s' "$code" >"$exit_file"
   }
 
+  # Breadth-first walk of the process tree rooted at $1, excluding $1 itself.
+  #
+  # `kill -- -PGID` reaches the gate's process group, but a child that calls
+  # setsid()/setpgid() LEAVES that group and is unreachable by it — Cypress's
+  # Electron helpers, browser renderers, and nx's daemon all do this. Once the
+  # group leader dies those escapees are reparented to init and the tree link
+  # is gone too, so the snapshot has to be taken while the tree is intact.
+  #
+  # Field evidence (0.24.1): a `full` gate hit its 1200 s timeout, the group
+  # kill returned cleanly, and live Cypress processes stayed behind and failed
+  # the NEXT TWO gates — ~40 min of an autonomous run lost to what looked like
+  # a code regression. Only descendants of THIS gate are collected, so the
+  # sweep can never reach unrelated work on the machine.
+  #
+  # bash-3.2 safe: no mapfile, no associative arrays. Depth-capped so a
+  # pathological tree cannot spin the watchdog.
+  # shellcheck disable=SC2329  # invoked from the watchdog subshell below
+  _descendant_pids() {
+    local frontier="$1" next="" found="" pid child snapshot depth=0
+    snapshot=$(ps -eo pid=,ppid= 2>/dev/null) || return 0
+    while [[ -n "$frontier" && $depth -lt 20 ]]; do
+      next=""
+      for pid in $frontier; do
+        for child in $(printf '%s\n' "$snapshot" | awk -v p="$pid" '$2 == p { print $1 }'); do
+          case " $found " in
+            *" $child "*) continue ;;
+          esac
+          found="$found $child"
+          next="$next $child"
+        done
+      done
+      frontier="$next"
+      depth=$((depth + 1))
+    done
+    printf '%s' "${found# }"
+  }
+
+  # Signal a snapshot of escaped descendants. Never fatal — a pid that already
+  # exited is the expected case, not an error.
+  # shellcheck disable=SC2329  # invoked from the watchdog subshell below
+  _kill_escapees() {
+    local sig="$1" pids="$2"
+    [[ -n "$pids" ]] || return 0
+    # shellcheck disable=SC2086  # deliberate word-split: $pids is a pid list
+    kill "-$sig" $pids 2>/dev/null || true
+  }
+
   # Signal hardening: TERM/INT/HUP takes the gate subtree down cleanly and
   # records a distinguishable verdict (143) instead of leaving an absence
   # the agent has to infer from pgrep.
@@ -471,9 +524,15 @@ if [[ "${RALPH_GATE_ROLE:-}" == "runner" ]]; then
   _runner_signalled() {
     trap '' TERM INT HUP # no re-entry while shutting down
     if [[ -n "$cmd_pid" ]]; then
+      # Same escapee problem as the timeout path — a rotation/tmux kill that
+      # leaves Cypress alive poisons the next gate just as thoroughly.
+      local _escaped
+      _escaped=$(_descendant_pids "$cmd_pid")
       kill -TERM -- "-$cmd_pid" 2>/dev/null || true
+      _kill_escapees TERM "$_escaped"
       sleep "$RALPH_GATE_KILL_GRACE" 2>/dev/null || true
       kill -KILL -- "-$cmd_pid" 2>/dev/null || true
+      _kill_escapees KILL "$_escaped"
     fi
     printf '\n=== gate-run runner signalled — gate stopped ===\n' >>"$log_file" 2>/dev/null || true
     _write_breadcrumbs 143
@@ -530,14 +589,22 @@ if [[ "${RALPH_GATE_ROLE:-}" == "runner" ]]; then
       sleep 1
       elapsed=$((elapsed + 1))
     done
+    # Snapshot escapees BEFORE signalling — after the group leader dies the
+    # tree link is gone and they can no longer be identified as ours.
+    escaped=$(_descendant_pids "$cmd_pid")
     kill -TERM -- "-$cmd_pid" 2>/dev/null || true
+    _kill_escapees TERM "$escaped"
     grace=0
     while [[ $grace -lt $RALPH_GATE_KILL_GRACE ]]; do
-      kill -0 "$cmd_pid" 2>/dev/null || exit 0
+      # break, not exit: the wrapped command going down does NOT mean the
+      # escapees did — they are the whole reason this sweep exists.
+      kill -0 "$cmd_pid" 2>/dev/null || break
       sleep 1
       grace=$((grace + 1))
     done
     kill -KILL -- "-$cmd_pid" 2>/dev/null || true
+    _kill_escapees KILL "$escaped"
+    exit 0
   ) &
   watchdog_pid=$!
 

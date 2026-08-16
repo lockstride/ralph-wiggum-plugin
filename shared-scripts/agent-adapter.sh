@@ -272,7 +272,18 @@ foreach (try inputs catch empty) as $e (
              # a cutoff from a verdict. This ADDS information; nothing that was
              # 1 for a real reason changes. The gate branch keeps its own
              # mapping — 0.16.1 already recovers the true verdict there.
-             if ($info.cmd | test("gate-run")) then
+             # 0.24.1: recognize the gate by gate-run's OWN output markers, not
+             # by "gate-run" appearing in the command. The guard's auto-wrap
+             # rewrites via updatedInput, so the transcript keeps the model's
+             # original text (`pnpm all-check`) — the cmd test never matched on
+             # the normal path, and every waiter return there flattened to a
+             # false SHELL FAIL. Field cost: two still-running returns from ONE
+             # healthy long gate supplied three of the five "failures" that
+             # tripped `GUTTER: same command failed 5x`. Same rewrite-proof
+             # reasoning as the 0.24.0 gate-end marker. The cmd test stays as a
+             # belt-and-braces OR for explicitly-typed invocations.
+             if ($info.cmd | test("gate-run"))
+                or ($txt | test("=== GATE [a-z0-9]+ (exit=|STILL RUNNING|RUNNER DIED)|gate launched detached")) then
                ([$txt | match("=== GATE [a-z0-9]+ exit=([0-9]+)"; "g")]) as $m
                | if ($m | length) > 0 then ($m[-1].captures[0].string | tonumber)
                  elif ($txt | test("STILL RUNNING|gate launched detached|RUNNER DIED")) then 0

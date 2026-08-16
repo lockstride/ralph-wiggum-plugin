@@ -177,6 +177,30 @@ _canonicalize() {
   echo "$cmd"
 }
 
+# Recognize a command that EXECUTES the gate harness. Two invocation forms
+# reach the hook and both must be caught:
+#   bash /path/to/shared-scripts/gate-run.sh <label> <command>
+#   bash "$(cat .ralph/gate-runner)" <label> <command>
+# The second is the indirection every eval-loop sub-agent is instructed to
+# use; its literal text never contains "gate-run.sh", so matching that string
+# alone skipped the per-label cache AND the tier lock for the entire eval
+# phase (0.24.1).
+#
+# Merely REFERENCING the harness (ls, cat, grep, test -f, wc -l) is not a
+# match — the command must actually run it via bash/sh.
+_is_gate_invocation() {
+  echo "$1" | grep -qE '(^|[;&|] *)(bash|sh) .*(/gate-run\.sh\b|\.ralph/gate-runner)'
+}
+
+# Reduce a gate invocation to "<label> <command…>" by stripping the runner
+# token, whichever form it took. The gate-runner substitution is stripped
+# first so a direct gate-run.sh path passes through it untouched.
+_gate_invocation_tail() {
+  printf '%s' "$1" | sed -E \
+    -e 's|.*\.ralph/gate-runner[^)]*\)"?[[:space:]]+||' \
+    -e 's|.*/gate-run\.sh[[:space:]]+||'
+}
+
 # Inline copy of _load_gates_from_policy. The guard runs as a standalone
 # hook process and does not source ralph-common.sh; keeping a small private
 # copy mirrors the existing pattern (see _canonicalize, _normalize_pnpm).
@@ -600,9 +624,18 @@ _enforce_command_policy() {
   #      is already baked in, so [rewrite] transforms are reflected too).
   #   2. Else if [rewrite] matched (but not wrap), emit the rewritten form.
   #   3. Otherwise return — the agent's original command runs as-is.
+  #
+  # 0.24.1: whichever form we emit is what actually reaches the shell, so the
+  # per-label gate cache and the tier lock have to judge THAT form — and have
+  # to do it here, because _emit_rewrite exits the hook. Deferring to the
+  # caller's check left `last-gate-ts.<label>` unwritten for every auto-wrapped
+  # gate, which is the normal path: the cache's `last_gate > 0` precondition
+  # could then never hold, so no re-run was ever blocked.
   if [[ -n "$_WRAP_REWRITE" ]]; then
+    _guard_gate_invocation "$_WRAP_REWRITE" "$_WRAP_REWRITE"
     _emit_rewrite "$_WRAP_REWRITE"
   elif [[ -n "$_REWRITE_CANONICAL" ]]; then
+    _guard_gate_invocation "$_REWRITE_CANONICAL" "$_REWRITE_CANONICAL"
     _emit_rewrite "$_REWRITE_CANONICAL"
   fi
   return 0
@@ -671,97 +704,129 @@ _guard_bash() {
   _enforce_command_policy "$cmd" "$canonical"
 
   # --- Gate-without-write check (per-label) ---
-  # Different labels run different commands, so a successful 'basic' does
-  # NOT make a subsequent 'full' redundant — the cache must be tracked
-  # per label, not globally. (Without this, [risky] tasks that need 'full'
-  # after 'basic' would get incorrectly blocked.)
+  # Runs here for a command that already invokes the harness itself. The
+  # auto-wrapped path cannot reach this point — _enforce_command_policy
+  # exits via _emit_rewrite — so it calls _guard_gate_invocation directly
+  # on the wrapped form before emitting (0.24.1).
+  _guard_gate_invocation "$cmd" "$canonical"
+}
+
+# --- Gate-without-write check (per-label) ---
+# Different labels run different commands, so a successful 'basic' does
+# NOT make a subsequent 'full' redundant — the cache must be tracked
+# per label, not globally. (Without this, [risky] tasks that need 'full'
+# after 'basic' would get incorrectly blocked.)
+#
+# 0.14.2: Only match actual gate invocations — commands where the harness
+# is being EXECUTED (via bash/sh), not merely referenced (ls, cat, grep,
+# test -f, wc -l, etc.). The previous bare `grep -qE 'gate-run\.sh'`
+# caught diagnostic reads, assigned them label "unknown", and blocked
+# them via the per-label cache — a false positive that wasted agent turns.
+#
+# 0.24.1: called from BOTH paths a gate can reach the shell by — the agent
+# invoking the harness directly, and the [wrap]/[rewrite] rewrite that
+# builds the harness invocation on the agent's behalf. Only reaching it on
+# the direct path left the cache unarmed: `last-gate-ts.<label>` was never
+# written, so the `last_gate > 0` precondition below could never hold and
+# no re-run was ever blocked.
+#
+#   $1 = command as it will actually run (wrapped form on the rewrite path)
+#   $2 = its canonical form, used for the tier comparison
+_guard_gate_invocation() {
+  local cmd="$1" canonical="$2"
+  _is_gate_invocation "$cmd" || return 0
+
+  local label
+  label=$(_gate_invocation_tail "$cmd" | awk '{print $1}')
+  # An unrecognized label is not a gate we can reason about — enforcing a
+  # cache on it would repeat the 0.14.2 false-positive. Let it through.
+  case "$label" in
+    basic | full | final | unit | integration | e2e | lint | format) ;;
+    *) return 0 ;;
+  esac
+
+  # --- Tier-command label lock (0.14.0) ---
+  # The three tier-gate commands declared in [gates] (basic / full / final)
+  # are "owned" by their tier labels. Running a tier command under any
+  # other label (a) writes the breadcrumb to a per-label cache the tier's
+  # downstream consumer doesn't read (e.g. _complete_allowed reads
+  # full-latest.{cmd,exit}, not unit-latest.{...}), and (b) escapes the
+  # per-label gate cache so the agent can re-run hoping for a different
+  # result. That is the "relabel to fish for green" anti-pattern. A flaky
+  # or failing gate is the agent's to fix at the source.
   #
-  # 0.14.2: Only match actual gate invocations — commands where gate-run.sh
-  # is being EXECUTED (via bash/sh), not merely referenced (ls, cat, grep,
-  # test -f, wc -l, etc.). The previous bare `grep -qE 'gate-run\.sh'`
-  # caught diagnostic reads, assigned them label "unknown", and blocked
-  # them via the per-label cache — a false positive that wasted agent turns.
-  if echo "$cmd" | grep -qE '(^|[;&|] *)(bash|sh) .*/gate-run\.sh\b'; then
-    local label
-    label=$(echo "$cmd" | grep -oE 'gate-run\.sh\s+(basic|full|final|unit|integration|e2e|lint|format)' | awk '{print $2}') || label="unknown"
+  # If the same command is declared for more than one tier (allowed —
+  # e.g. full = final), ANY of those tier labels satisfies the lock.
+  local _basic_gate _full_gate _final_gate
+  _guard_load_gates "$WORKSPACE/.ralph/command-policy" \
+    _basic_gate _full_gate _final_gate
+  _basic_gate=$(_normalize_pnpm "$_basic_gate")
+  _basic_gate=$(printf '%s' "$_basic_gate" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  _full_gate=$(_normalize_pnpm "$_full_gate")
+  _full_gate=$(printf '%s' "$_full_gate" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  _final_gate=$(_normalize_pnpm "$_final_gate")
+  _final_gate=$(printf '%s' "$_final_gate" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
 
-    # --- Tier-command label lock (0.14.0) ---
-    # The three tier-gate commands declared in [gates] (basic / full / final)
-    # are "owned" by their tier labels. Running a tier command under any
-    # other label (a) writes the breadcrumb to a per-label cache the tier's
-    # downstream consumer doesn't read (e.g. _complete_allowed reads
-    # full-latest.{cmd,exit}, not unit-latest.{...}), and (b) escapes the
-    # per-label gate cache so the agent can re-run hoping for a different
-    # result. That is the "relabel to fish for green" anti-pattern. A flaky
-    # or failing gate is the agent's to fix at the source.
-    #
-    # If the same command is declared for more than one tier (allowed —
-    # e.g. full = final), ANY of those tier labels satisfies the lock.
-    local _basic_gate _full_gate _final_gate
-    _guard_load_gates "$WORKSPACE/.ralph/command-policy" \
-      _basic_gate _full_gate _final_gate
-    _basic_gate=$(_normalize_pnpm "$_basic_gate")
-    _basic_gate=$(printf '%s' "$_basic_gate" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
-    _full_gate=$(_normalize_pnpm "$_full_gate")
-    _full_gate=$(printf '%s' "$_full_gate" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
-    _final_gate=$(_normalize_pnpm "$_final_gate")
-    _final_gate=$(printf '%s' "$_final_gate" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  # Drop the runner token and the label, leaving the gated command. Trailing
+  # shell segments (`; echo "GATE_EXIT=$?"`, ` | tail -20`) are stripped too —
+  # without that the comparison never matched the pin for the eval loop's
+  # usual `…; echo` shape, silently disarming the lock.
+  local gated_cmd expected_tiers=""
+  gated_cmd=$(_gate_invocation_tail "$canonical" | awk '{ $1=""; sub(/^ /, ""); print }')
+  gated_cmd=$(_strip_pipes_redirects "$gated_cmd")
+  gated_cmd=$(printf '%s' "$gated_cmd" | sed -E 's/[[:space:]]*;.*$//')
+  gated_cmd=$(_normalize_pnpm "$gated_cmd")
+  gated_cmd=$(printf '%s' "$gated_cmd" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
 
-    local gated_cmd expected_tiers=""
-    gated_cmd=$(printf '%s' "$canonical" | sed -E "s|.*gate-run\.sh[[:space:]]+${label}[[:space:]]+||")
-    gated_cmd=$(_normalize_pnpm "$gated_cmd")
-    gated_cmd=$(printf '%s' "$gated_cmd" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  [[ -n "$_basic_gate" && "$gated_cmd" == "$_basic_gate" ]] && expected_tiers="$expected_tiers basic"
+  [[ -n "$_full_gate" && "$gated_cmd" == "$_full_gate" ]] && expected_tiers="$expected_tiers full"
+  [[ -n "$_final_gate" && "$gated_cmd" == "$_final_gate" ]] && expected_tiers="$expected_tiers final"
+  expected_tiers="${expected_tiers# }"
 
-    [[ -n "$_basic_gate" && "$gated_cmd" == "$_basic_gate" ]] && expected_tiers="$expected_tiers basic"
-    [[ -n "$_full_gate" && "$gated_cmd" == "$_full_gate" ]] && expected_tiers="$expected_tiers full"
-    [[ -n "$_final_gate" && "$gated_cmd" == "$_final_gate" ]] && expected_tiers="$expected_tiers final"
-    expected_tiers="${expected_tiers# }"
-
-    if [[ -n "$expected_tiers" ]]; then
-      local _t _ok=0
-      for _t in $expected_tiers; do
-        [[ "$_t" == "$label" ]] && {
-          _ok=1
-          break
-        }
-      done
-      if [[ $_ok -eq 0 ]]; then
-        local _expected_pretty="${expected_tiers// /|}"
-        _block "The tier-gate command '${gated_cmd}' must run under label '${_expected_pretty}', not '${label}'. A pass under '${label}' lands in a per-label cache the completion/eval guards don't read, AND escapes the '${_expected_pretty}' gate cache — re-running a tier command under a fresh label to fish for green is dodging ownership of the failure. Re-run as: gate-run.sh ${_expected_pretty%%|*} ${gated_cmd}. If that label reports it already ran since your last code edit, the cache is signalling: FIX the failing code (you own every failure, flaky infra included)."
-      fi
+  if [[ -n "$expected_tiers" ]]; then
+    local _t _ok=0
+    for _t in $expected_tiers; do
+      [[ "$_t" == "$label" ]] && {
+        _ok=1
+        break
+      }
+    done
+    if [[ $_ok -eq 0 ]]; then
+      local _expected_pretty="${expected_tiers// /|}"
+      _block "The tier-gate command '${gated_cmd}' must run under label '${_expected_pretty}', not '${label}'. A pass under '${label}' lands in a per-label cache the completion/eval guards don't read, AND escapes the '${_expected_pretty}' gate cache — re-running a tier command under a fresh label to fish for green is dodging ownership of the failure. Re-run as: gate-run.sh ${_expected_pretty%%|*} ${gated_cmd}. If that label reports it already ran since your last code edit, the cache is signalling: FIX the failing code (you own every failure, flaky infra included)."
     fi
-
-    local last_gate_ts_file="$STATE_DIR/last-gate-ts.$label"
-    local last_write last_gate
-    last_write=$(_read_ts "$LAST_WRITE_TS")
-    last_gate=$(_read_ts "$last_gate_ts_file")
-
-    # 0.16.0: gates run detached; the exit-75 protocol makes re-running the
-    # same command the CONTINUATION mechanism, not a wasteful repeat. Two
-    # cases must pass the per-label cache:
-    #   1. A live runner holds the label lock → this invocation joins the
-    #      in-flight gate (gate-run.sh serializes; it never double-runs).
-    #   2. No verdict landed at/after the last recorded invocation → that
-    #      run died without a breadcrumb; a relaunch is legitimate.
-    local _inflight=0 _gate_lock="$WORKSPACE/.ralph/gates/.${label}.lock"
-    if [[ -d "$_gate_lock" ]]; then
-      local _gl_pid
-      _gl_pid=$(cat "$_gate_lock/pid" 2>/dev/null || echo "")
-      [[ "$_gl_pid" =~ ^[0-9]+$ ]] && kill -0 "$_gl_pid" 2>/dev/null && _inflight=1
-    fi
-    local _verdict_ts=0 _gate_exit_f="$WORKSPACE/.ralph/gates/${label}-latest.exit"
-    if [[ -f "$_gate_exit_f" ]]; then
-      _verdict_ts=$(stat -f '%m' "$_gate_exit_f" 2>/dev/null || stat -c '%Y' "$_gate_exit_f" 2>/dev/null || echo 0)
-    fi
-
-    if [[ $_inflight -eq 0 ]] && [[ "$_verdict_ts" -ge "$last_gate" ]] &&
-      [[ "$last_gate" -gt 0 ]] && [[ "$last_gate" -ge "$last_write" ]]; then
-      _block "Gate '${label}' already ran since last code write — output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: edit code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose. (Other gate labels can still run — this cache is per-label.)"
-    fi
-
-    # Record the per-label gate invocation timestamp
-    _write_ts "$last_gate_ts_file"
   fi
+
+  local last_gate_ts_file="$STATE_DIR/last-gate-ts.$label"
+  local last_write last_gate
+  last_write=$(_read_ts "$LAST_WRITE_TS")
+  last_gate=$(_read_ts "$last_gate_ts_file")
+
+  # 0.16.0: gates run detached; the exit-75 protocol makes re-running the
+  # same command the CONTINUATION mechanism, not a wasteful repeat. Two
+  # cases must pass the per-label cache:
+  #   1. A live runner holds the label lock → this invocation joins the
+  #      in-flight gate (gate-run.sh serializes; it never double-runs).
+  #   2. No verdict landed at/after the last recorded invocation → that
+  #      run died without a breadcrumb; a relaunch is legitimate.
+  local _inflight=0 _gate_lock="$WORKSPACE/.ralph/gates/.${label}.lock"
+  if [[ -d "$_gate_lock" ]]; then
+    local _gl_pid
+    _gl_pid=$(cat "$_gate_lock/pid" 2>/dev/null || echo "")
+    [[ "$_gl_pid" =~ ^[0-9]+$ ]] && kill -0 "$_gl_pid" 2>/dev/null && _inflight=1
+  fi
+  local _verdict_ts=0 _gate_exit_f="$WORKSPACE/.ralph/gates/${label}-latest.exit"
+  if [[ -f "$_gate_exit_f" ]]; then
+    _verdict_ts=$(stat -f '%m' "$_gate_exit_f" 2>/dev/null || stat -c '%Y' "$_gate_exit_f" 2>/dev/null || echo 0)
+  fi
+
+  if [[ $_inflight -eq 0 ]] && [[ "$_verdict_ts" -ge "$last_gate" ]] &&
+    [[ "$last_gate" -gt 0 ]] && [[ "$last_gate" -ge "$last_write" ]]; then
+    _block "Gate '${label}' already ran since last code write — output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: edit code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose. (Other gate labels can still run — this cache is per-label.)"
+  fi
+
+  # Record the per-label gate invocation timestamp
+  _write_ts "$last_gate_ts_file"
 }
 
 # ---------------------------------------------------------------------------

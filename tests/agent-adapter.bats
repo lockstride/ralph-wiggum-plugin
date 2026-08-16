@@ -216,3 +216,41 @@ _claude_sidechain() { # $1=native JSON event
   run _claude_exit 'pnpm build' false 'Build succeeded'
   [ "$output" = "0" ]
 }
+
+# --- 0.24.1: the auto-wrapped gate carries no "gate-run" in its command ---
+# ralph-guard rewrites via the PreToolUse hook's updatedInput, so the transcript
+# keeps what the model typed (`pnpm all-check`). Keying the gate branch on the
+# command text therefore missed the NORMAL path entirely: every waiter return
+# flattened to a false SHELL FAIL and walked the GUTTER stuck-counter.
+
+@test "claude: auto-wrapped gate still-running normalizes to 0 (0.24.1)" {
+  run _claude_exit 'pnpm all-check' true '=== GATE full STILL RUNNING pid=39645 waited=570s (gate timeout 1200s) log=x ===
+Re-run the exact same command to keep waiting.'
+  [ "$output" = "0" ]
+}
+
+@test "claude: auto-wrapped gate recovers the real verdict from the marker (0.24.1)" {
+  run _claude_exit 'pnpm all-check' true '=== GATE full exit=1 duration=180s log=x latest=y ==='
+  [ "$output" = "1" ]
+}
+
+@test "claude: auto-wrapped gate timeout surfaces 124, not a flattened 1 (0.24.1)" {
+  run _claude_exit 'pnpm all-check' true '=== GATE full exit=124 duration=1211s log=x latest=y ==='
+  [ "$output" = "124" ]
+}
+
+@test "claude: auto-wrapped detached launch is not a failure (0.24.1)" {
+  run _claude_exit 'pnpm basic-check' true 'gate-run.sh: basic gate launched detached (runner pid=1, ts=2, gate timeout 1200s)'
+  [ "$output" = "0" ]
+}
+
+@test "claude: auto-wrapped runner-died is not counted as a command failure (0.24.1)" {
+  run _claude_exit 'pnpm all-check' true '=== GATE full RUNNER DIED without a verdict (pid=9) log=x ==='
+  [ "$output" = "0" ]
+}
+
+@test "claude: a plain failing command is still a failure (0.24.1)" {
+  # The marker test must not swallow ordinary non-gate failures.
+  run _claude_exit 'pnpm all-check' true 'Error: something broke'
+  [ "$output" = "1" ]
+}

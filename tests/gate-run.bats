@@ -743,3 +743,52 @@ EOF
   RALPH_GATE_KEEP=1 bash "$SCRIPTS_DIR/gate-run.sh" basic true || true
   [ -f "$MOCK_WORKSPACE/.ralph/gates/last-run" ]
 }
+
+# --- 0.24.1: timeout must reap descendants that escaped the process group ---
+
+@test "gate timeout reaps a descendant that escaped the process group (0.24.1)" {
+  # Field failure this covers: a timed-out e2e gate left Cypress alive and the
+  # NEXT TWO gates failed on it. `kill -- -PGID` looks like it worked, but a
+  # child that setsid()s out of the group never receives it.
+  local escape="$MOCK_WORKSPACE/escape.sh"
+  local pidfile="$MOCK_WORKSPACE/escapee.pid"
+  cat > "$escape" <<'EOF'
+#!/bin/bash
+# Stand-in for a Cypress/Electron helper: `set -m` makes the background job
+# a leader of its OWN process group, so the gate's group kill cannot reach it.
+set -m
+(sleep 300) &
+echo $! > "$1"
+set +m
+sleep 300
+EOF
+  chmod +x "$escape"
+
+  RALPH_GATE_TIMEOUT=2 RALPH_GATE_KILL_GRACE=1 \
+    run bash "$SCRIPTS_DIR/gate-run.sh" basic bash "$escape" "$pidfile"
+  [ "$status" -eq 124 ]
+
+  [ -f "$pidfile" ] || { echo "escapee never recorded its pid"; return 1; }
+  local escapee
+  escapee=$(cat "$pidfile")
+  [[ "$escapee" =~ ^[0-9]+$ ]] || { echo "bad pid: '$escapee'"; return 1; }
+
+  local waited=0
+  while kill -0 "$escapee" 2>/dev/null && [[ $waited -lt 10 ]]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if kill -0 "$escapee" 2>/dev/null; then
+    kill -9 "$escapee" 2>/dev/null || true
+    echo "escapee $escapee survived the gate timeout"
+    return 1
+  fi
+}
+
+@test "a clean gate run leaves the escapee sweep a no-op (0.24.1)" {
+  # The sweep must not disturb the normal path: no timeout, no signals.
+  run bash "$SCRIPTS_DIR/gate-run.sh" basic echo "clean run"
+  [ "$status" -eq 0 ]
+  grep -q "clean run" "$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
+}

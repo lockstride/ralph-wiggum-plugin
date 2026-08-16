@@ -100,11 +100,13 @@ Configurable via `RALPH_GATE_TAIL` (default 60) and `RALPH_GATE_FAIL_HEAD` (defa
 | `RALPH_BASIC_GATE_TIMEOUT`     | `1200`               | Timeout for tier label `basic` (also covers kind labels `unit | integration | e2e | lint | format`). |
 | `RALPH_FULL_GATE_TIMEOUT`      | `1200`               | Timeout for tier label `full`.                                                   |
 | `RALPH_FINAL_GATE_TIMEOUT`     | `1200`               | Timeout for tier label `final`.                                                  |
-| `RALPH_GATE_KILL_GRACE`        | `10`                 | Seconds between SIGTERM and SIGKILL on timeout. Subtree-kill so no orphaned grandchildren. |
+| `RALPH_GATE_KILL_GRACE`        | `10`                 | Seconds between SIGTERM and SIGKILL on timeout. Kills the gate's process group, then sweeps any descendants that escaped it. |
 | `RALPH_GATE_LOCK_WAIT`         | `60`                 | Seconds to wait for the per-label lock before giving up (exit 64).               |
 | `RALPH_GATE_STALE_LOCK_SEC`    | `2700`               | Time-based stale-lock fallback (45 min). PID-aware steal (0.12.5+) kicks in immediately when the holder pid is dead — only locks without a `pid` file fall through to this timer. |
 
-The timeout mechanism prefers GNU `timeout`, falls back to `gtimeout` (macOS via `brew install coreutils`), and degrades to no timeout if neither is installed. The degraded case is explicit — the wrapper does not pretend to enforce a limit it can't.
+The timeout is enforced by the runner's own watchdog — no dependency on GNU `timeout`/`gtimeout`, so the limit holds identically on macOS and Linux. The gate runs in its own process group; at the deadline the watchdog sends SIGTERM to that group, waits `RALPH_GATE_KILL_GRACE`, then SIGKILLs it.
+
+Killing the group is not sufficient on its own. A child that calls `setsid()`/`setpgid()` — Cypress and Electron helpers, browser renderers, the nx daemon — leaves the group and never receives the signal; once the group leader dies it is reparented to init and can no longer be identified as the gate's. So the watchdog snapshots the descendant tree *before* signalling and sweeps those escapees by pid afterwards. Only descendants of that gate are ever signalled, so the sweep cannot reach unrelated work on the machine. Without it, a timed-out e2e gate leaves live test-runner processes that fail the **next** gate — a failure that reads like a code regression and costs far more than the timeout did.
 
 ## Failure-pattern matching
 
