@@ -387,17 +387,17 @@ agent_normalize() {
   jq -n --unbuffered -c "$filter" 2>/dev/null || true
 }
 
-# Default model alias per CLI. Claude defaults to opus[1m] — a versionless
-# alias, so the loop always gets the current Opus. The [1m] suffix is a
-# CONTEXT TIER, not a version pin: it unlocks the extended 1M-token window.
-# We don't rotate anywhere near 1M (see agent_default_rotate_threshold), but
-# the tier is what makes a >200K budget legal at all. Use RALPH_MODEL to
-# override (e.g. "sonnet[1m]", "opus", "sonnet" for 200K standard window).
+# Default model alias per CLI. Claude defaults to "opus" — the versionless
+# alias, so the loop always resolves to the current Opus, never a pinned
+# version. Every Opus carries a 1M-token window natively, so the default
+# needs no [1m] context tier (see agent_model_has_1m_window). Use
+# RALPH_MODEL to override (e.g. "sonnet" for the standard 200K window, or
+# "sonnet[1m]" to opt a non-Opus model into the 1M tier).
 agent_default_model() {
   local cli
   cli="$(agent_normalize_cli_name "$1")"
   case "$cli" in
-    claude) echo "opus[1m]" ;;
+    claude) echo "opus" ;;
     cursor-agent) echo "composer-2" ;;
     *) echo "" ;;
   esac
@@ -416,18 +416,32 @@ agent_default_effort() {
   esac
 }
 
+# Whether CLI + model run against a 1M-token context window — the tier that
+# unlocks the 300K/250K rotate/warn budget. True for the Claude CLI when the
+# model is any Opus (the bare "opus" alias or a full id such as
+# claude-opus-5; every Opus has the 1M window natively) or when it carries
+# the explicit [1m] context tier, which is the opt-in for non-Opus models
+# (e.g. "sonnet[1m]"). Anything else is treated as a standard 200K window.
+#
+# NOTE: both matches are case-sensitive — "sonnet[1M]" takes the standard
+# branch. Pass model ids lowercase, exactly as the Claude CLI spells them.
+agent_model_has_1m_window() {
+  local cli model
+  cli="$(agent_normalize_cli_name "$1")"
+  model="${2:-}"
+  [[ "$cli" == "claude" ]] || return 1
+  [[ "$model" == *opus* || "$model" == *"[1m]"* ]]
+}
+
 # Default rotate threshold based on CLI and model (in tokens).
 #
-# Models with the [1m] suffix have a 1M-token context window but rotate at
-# 300K — the window is the ceiling, not the target. Past a few hundred K the
-# agent's recall and instruction-following degrade well before the hard
-# limit, so the previous 700K budget bought tokens we couldn't use. 300K
-# still fits a whole spec in one loop and leaves 700K deliberately unspent.
+# 1M-window models (see agent_model_has_1m_window) rotate at 300K — the
+# window is the ceiling, not the target. Past a few hundred K the agent's
+# recall and instruction-following degrade well before the hard limit, so a
+# bigger budget buys tokens we can't use. 300K still fits a whole spec in
+# one loop and leaves 700K deliberately unspent.
 #
 # Standard models (200K window) rotate at 170K.
-#
-# NOTE: the suffix match is case-sensitive — "opus[1M]" takes the standard
-# branch. Pass the tier lowercase, exactly as the Claude CLI spells it.
 agent_default_rotate_threshold() {
   local cli model
   cli="$(agent_normalize_cli_name "$1")"
@@ -435,7 +449,7 @@ agent_default_rotate_threshold() {
 
   case "$cli" in
     claude)
-      if [[ "$model" == *"[1m]"* ]]; then
+      if agent_model_has_1m_window "$cli" "$model"; then
         echo "300000"
       else
         echo "170000"
@@ -450,7 +464,7 @@ agent_default_rotate_threshold() {
 # .ralph/context-warning-active, so the agent yields at its next post-commit
 # check instead of being force-killed at ROTATE_THRESHOLD.
 #
-# 1M-tier models pin this at 250K against a 300K ceiling rather than taking
+# 1M-window models pin this at 250K against a 300K ceiling rather than taking
 # the generic 7/8, which would leave only 37.5K to land the work. A flat 50K
 # landing zone is what makes the difference between a 🤝 GRACEFUL YIELD and a
 # 🔄 ROTATE force-kill on a long loop.
@@ -459,7 +473,7 @@ agent_default_warn_threshold() {
   cli="$(agent_normalize_cli_name "$1")"
   model="${2:-}"
 
-  if [[ "$cli" == "claude" && "$model" == *"[1m]"* ]]; then
+  if agent_model_has_1m_window "$cli" "$model"; then
     echo "250000"
     return
   fi

@@ -36,7 +36,7 @@ fi
 # Which agent CLI drives the loop: "claude" or "cursor-agent"
 RALPH_AGENT_CLI="${RALPH_AGENT_CLI:-claude}"
 
-# Model selection — resolved first so thresholds can key off [1m] suffix
+# Model selection — resolved first so thresholds can key off the model's window
 if type agent_default_model >/dev/null 2>&1; then
   DEFAULT_MODEL="$(agent_default_model "$RALPH_AGENT_CLI")"
 else
@@ -55,7 +55,7 @@ else
   EFFORT="${RALPH_EFFORT:-}"
 fi
 
-# Token thresholds — derived from CLI + model (extended [1m] vs standard)
+# Token thresholds — derived from CLI + model (1M window vs standard 200K)
 if type agent_default_rotate_threshold >/dev/null 2>&1; then
   ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-$(agent_default_rotate_threshold "$RALPH_AGENT_CLI" "$MODEL")}"
   WARN_THRESHOLD="${WARN_THRESHOLD:-$(agent_default_warn_threshold "$RALPH_AGENT_CLI" "$MODEL")}"

@@ -1136,13 +1136,13 @@ TASKS
 
 @test "200K-model rotate threshold is 170000 (0.12.2)" {
   local threshold
-  threshold=$(agent_default_rotate_threshold claude "opus")
+  threshold=$(agent_default_rotate_threshold claude "sonnet")
   [ "$threshold" = "170000" ]
 }
 
 @test "200K-model warn threshold is 148750 (0.12.2)" {
   local threshold
-  threshold=$(agent_default_warn_threshold claude "opus")
+  threshold=$(agent_default_warn_threshold claude "sonnet")
   [ "$threshold" = "148750" ]
 }
 
@@ -1166,21 +1166,41 @@ TASKS
   [ "$(agent_default_warn_threshold claude "sonnet[1m]")" = "250000" ]
 }
 
+# Every Opus has a 1M window natively, so the bare alias — and a full,
+# versioned id — take the 1M budget without any [1m] tier.
+@test "bare opus gets the 1M thresholds without a [1m] suffix (0.25.0)" {
+  [ "$(agent_default_rotate_threshold claude "opus")" = "300000" ]
+  [ "$(agent_default_warn_threshold claude "opus")" = "250000" ]
+}
+
+@test "a full Opus model id gets the 1M thresholds (0.25.0)" {
+  [ "$(agent_default_rotate_threshold claude "claude-opus-5")" = "300000" ]
+  [ "$(agent_default_warn_threshold claude "claude-opus-5")" = "250000" ]
+}
+
+# Opus implies 1M only for the Claude CLI; it never widens cursor-agent.
+@test "opus does not widen cursor-agent thresholds (0.25.0)" {
+  [ "$(agent_default_rotate_threshold cursor-agent "opus")" = "150000" ]
+  run agent_model_has_1m_window cursor-agent "opus"
+  [ "$status" -ne 0 ]
+}
+
 # The tier suffix is matched case-sensitively; an uppercase [1M] silently
 # falls back to the 200K branch, which is a real footgun when hand-passing
 # -m from a launcher script.
 @test "uppercase [1M] does NOT get the 1M thresholds (0.22.0)" {
-  [ "$(agent_default_rotate_threshold claude "opus[1M]")" = "170000" ]
+  [ "$(agent_default_rotate_threshold claude "sonnet[1M]")" = "170000" ]
 }
 
-# The [1m] suffix is a context tier, not a version pin — the alias stays
-# versionless so the loop always resolves to the current Opus.
-@test "claude default model is the versionless opus[1m] alias" {
+# The default stays versionless so the loop always resolves to the current
+# Opus, and carries no [1m] tier — Opus has the 1M window natively.
+@test "claude default model is the versionless opus alias with no [1m] tier (0.25.0)" {
   local model
   model=$(agent_default_model claude)
-  [ "$model" = "opus[1m]" ]
+  [ "$model" = "opus" ]
   # No pinned version digits (e.g. opus-4-8) may creep into the default.
   [[ ! "$model" =~ [0-9]-[0-9] ]]
+  [[ "$model" != *"[1m]"* ]]
 }
 
 # =============================================================================
