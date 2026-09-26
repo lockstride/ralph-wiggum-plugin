@@ -1760,3 +1760,8 @@ deny_json() { # $1=tool name $2=command (Shell) or path $3=reason
   grep -q "SESSION END: 1000ms, ~80000 tokens this session" "$MOCK_WORKSPACE/.ralph/activity.log"
   grep -q "SESSION END: 1000ms, ~30000 tokens this session" "$MOCK_WORKSPACE/.ralph/activity.log"
 }
+
+@test "an event the adapter skipped is recorded in errors.log (0.26.2)" {
+  run_parser '{"kind":"adapter_error","message":"Cannot index number with string \"type\""}' >/dev/null
+  grep -q 'ADAPTER: skipped an event it could not read — Cannot index number' "$MOCK_WORKSPACE/.ralph/errors.log"
+}

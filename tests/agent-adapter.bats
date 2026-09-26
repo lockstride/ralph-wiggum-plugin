@@ -363,3 +363,50 @@ _claude_size() {
   } | jq -n -c -f '$CLAUDE_FILTER' | jq -r 'select(.kind==\"tool_result\") | \"\\(.bytes) \\(.lines)\"'"
   [ "$output" = "19 3" ]
 }
+
+# --- 0.26.2: no event can end the stream --------------------------------------
+# jq ends the whole stream on a runtime error, and the parser then reads EOF
+# while the agent is still working. Content given as a plain string is a shape
+# the API allows; anything the filter still cannot read is skipped and reported.
+
+# Run the Claude filter over the given JSON lines; print the normalized events.
+_claude_stream() {
+  printf '%s\n' "$@" | jq -n -c -f "$CLAUDE_FILTER"
+}
+
+@test "claude: a user message with plain-string content does not end the stream (0.26.2)" {
+  run _claude_stream \
+    '{"type":"user","message":{"role":"user","content":"Invoke the linear-accept skill"},"parent_tool_use_id":"toolu_1"}' \
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"a"}]}}'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -se 'map(select(.kind=="tool_result" and .cmd=="ls")) | length == 1'
+  ! echo "$output" | grep -q adapter_error
+}
+
+@test "claude: assistant plain-string content is assistant text (0.26.2)" {
+  run _claude_stream '{"type":"assistant","message":{"content":"<ralph>COMPLETE</ralph>"}}'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e 'select(.kind=="assistant_text") | .text == "<ralph>COMPLETE</ralph>"'
+}
+
+@test "claude: a content entry that is not a block is skipped, not fatal (0.26.2)" {
+  run _claude_stream \
+    '{"type":"assistant","message":{"content":["stray",{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"a"}]}}'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -se 'map(select(.kind=="tool_result" and .cmd=="ls")) | length == 1'
+}
+
+@test "claude: an unreadable event is reported and the stream carries on (0.26.2)" {
+  run _claude_stream '42' '{"type":"system","subtype":"init","model":"claude-opus-5"}'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -se '.[0].kind == "adapter_error" and .[1].kind == "system"'
+}
+
+@test "cursor: an unreadable event is reported and the stream carries on (0.26.2)" {
+  run bash -c "printf '%s\n' '42' '{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"composer-2\"}' |
+    jq -n -c -f '$CURSOR_FILTER'"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -se '.[0].kind == "adapter_error" and .[1].kind == "system"'
+}

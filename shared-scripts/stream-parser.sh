@@ -1092,6 +1092,15 @@ process_line() {
       TOOL_CALL_COUNT=$((TOOL_CALL_COUNT + 1))
       ;;
 
+    adapter_error)
+      # 0.26.2: agent-adapter.sh skipped an event it could not read, and the
+      # stream carried on. Recorded because a CLI that changed its event shape
+      # shows up here first.
+      local adapter_msg
+      adapter_msg=$(echo "$line" | jq -r '.message // "unknown"' 2>/dev/null) || adapter_msg="unknown"
+      log_error "ADAPTER: skipped an event it could not read — $adapter_msg"
+      ;;
+
     usage)
       local ctx
       ctx=$(echo "$line" | jq -r '.context_tokens // 0' 2>/dev/null) || ctx=0

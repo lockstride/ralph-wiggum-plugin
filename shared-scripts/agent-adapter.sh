@@ -19,6 +19,7 @@
 #   {"kind":"tool_result","name":"<Read|Write|Shell|Other>","path":"<path>","cmd":"<cmd>","bytes":N,"lines":N,"exit_code":N,"denied":B,"deny_reason":"<why>"}
 #     (bytes/lines: the text a Write/Edit-family call wrote; otherwise its result)
 #   {"kind":"usage","context_tokens":N}   (claude only: the API-reported context size)
+#   {"kind":"adapter_error","message":"<why>"}   (an event the filter could not read, skipped)
 #   {"kind":"result","duration_ms":N}
 #   {"kind":"error","message":"<msg>"}
 #   {"kind":"rate_limit","status":"<allowed|rejected>","resets_at":N}
@@ -196,10 +197,21 @@ agent_normalize_filter() {
 # start another.
 def text_lines: if . == "" then 0
   else (split("\n") | length) - (if endswith("\n") then 1 else 0 end) end;
+# 0.26.2: a message's content blocks. The API allows content as a plain string
+# as well as an array of blocks — a string is one text block — and anything in
+# the array that is not an object is not a block.
+def blocks: .message | objects | .content
+  | if type == "array" then .[] | objects
+    elif type == "string" then {type: "text", text: .}
+    else empty end;
+# 0.26.2: an event the filter cannot read is skipped, never fatal. jq ends the
+# whole stream on a runtime error, and with it the session: the parser reads
+# EOF while the agent is still working. The update keeps the state it had; the
+# extract reports what it skipped as an adapter_error.
 foreach (try inputs catch empty) as $e (
   {};
-  if $e.type == "assistant" then
-    reduce (($e.message.content // [])[] | select(.type == "tool_use")) as $tu (
+  . as $s | try (if $e.type == "assistant" then
+    reduce ($e | blocks | select(.type == "tool_use")) as $tu (
       .;
       # 0.26.1: what a Write/Edit-family call writes lives in its INPUT; its
       # result is only "File created successfully at: …". Size the call by
@@ -220,8 +232,8 @@ foreach (try inputs catch empty) as $e (
             written_lines: (if $written then ($written | map(. // "" | text_lines) | add // 0) else null end)
           })
     )
-  else . end;
-  if $e.type == "system" and ($e.subtype // "") == "init" then
+  else . end) catch $s;
+  try (if $e.type == "system" and ($e.subtype // "") == "init" then
     # 0.18.0: a Task sub-agent's events carry parent_tool_use_id (and/or
     # isSidechain). Suppress the sub-agent's own init so it is not logged as a
     # second SESSION START — only the top-level session (both null/absent)
@@ -249,7 +261,7 @@ foreach (try inputs catch empty) as $e (
                + ($u.cache_read_input_tokens // 0)) as $ctx
             | if $ctx > 0 then {kind:"usage", context_tokens:$ctx} else empty end
           else empty end ),
-      (($e.message.content // [])[] |
+      (($e | blocks) |
       if .type == "text" then
         {kind:"assistant_text", text:(.text // ""), sidechain:$sc}
       elif .type == "tool_use" then
@@ -267,7 +279,7 @@ foreach (try inputs catch empty) as $e (
   elif $e.type == "user" then
     . as $state |
     ((($e.parent_tool_use_id // null) != null) or ($e.isSidechain // false)) as $sc |
-    (($e.message.content // [])[] |
+    (($e | blocks) |
       if .type == "tool_result" then
         (.tool_use_id // "") as $tuid
         | ($state[$tuid] // {name:"Other", path:"", cmd:""}) as $info
@@ -347,7 +359,7 @@ foreach (try inputs catch empty) as $e (
        resets_at:($rl.resetsAt // 0)}
   elif $e.type == "error" then
     {kind:"error", message:($e.error.message // $e.message // "Unknown error")}
-  else empty end
+  else empty end) catch {kind:"adapter_error", message:tostring}
 )
 JQ
       ;;
@@ -358,7 +370,9 @@ JQ
 foreach (try inputs catch empty) as $e (
   {};
   .;
-  if $e.type == "system" and ($e.subtype // "") == "init" then
+  # 0.26.2: an event the filter cannot read is skipped, never fatal — see the
+  # Claude filter.
+  try (if $e.type == "system" and ($e.subtype // "") == "init" then
     {kind:"system", model:($e.model // "unknown")}
   elif $e.type == "assistant" then
     ($e.message.content // []) as $c
@@ -397,7 +411,7 @@ foreach (try inputs catch empty) as $e (
     end
   elif $e.type == "error" then
     {kind:"error", message:($e.error.data.message // $e.error.message // $e.message // "Unknown error")}
-  else empty end
+  else empty end) catch {kind:"adapter_error", message:tostring}
 )
 JQ
       ;;
