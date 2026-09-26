@@ -148,7 +148,10 @@ version** the run used — the activity log shows the path, e.g.
   rewrite (e.g. `pnpm nx` → project script). Since 0.26.0 a `./node_modules/.bin/X`
   path is matched as the lockfile's exec form (`pnpm X` / `yarn X` / `npx X`), so
   it is no longer an unguarded spelling, and a `[rewrite]` that would produce a
-  `pnpm <name>` naming no root script is denied instead of emitted.
+  `pnpm <name>` naming no root script is denied instead of emitted. Since 0.27.0
+  every command in a chain (`cd x && …`, `a; b`, one per line) meets `[rewrite]`,
+  `[deny]` and the direct-runner check, and `pnpm -s` / `--silent` is normalized
+  away — so a guard-evasion finding against an older run may no longer reproduce.
 
 **The cache is a forcing function, not a bug.** Its purpose is to enforce a core
 Ralph principle: *whenever a gate/test fails, the agent owns it and must fix the

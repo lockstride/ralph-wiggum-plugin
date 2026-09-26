@@ -33,11 +33,11 @@ the inventory when reviewing the loop's reliability end-to-end.
 - `PreToolUse` hook (`ralph-guard.sh`) registered via `hooks/hooks.json` (record-keyed-by-event-name schema; the wrong-schema 0.12.4 bug is fixed in 0.12.5).
 - `.ralph/command-policy` has five sections, evaluated in order: `[gates] → [rewrite] → [deny] → [wrap] → [protect]`.
   - `[gates]` — **required.** Declares the three tier-gate commands (`basic | <cmd>`, `full | <cmd>`, `final | <cmd>`). Loop refuses to start if any are missing.
-  - `[rewrite]` — project-specific regex transforms (e.g. `pnpm nx X → pnpm X`). Transparent via `updatedInput`.
+  - `[rewrite]` — project-specific regex transforms (e.g. `pnpm nx X → pnpm X`). Transparent via `updatedInput`. Fields are split on a `|` with whitespace on both sides, so a regex may use `(a|b)` alternation.
   - `[deny]` — hard block with `permissionDecision: deny` (e.g. containerized E2E).
   - `[wrap]` — auto-routes other commands through `gate-run.sh <label> <cmd>` transparently. Labels: `basic | full | final | unit | integration | e2e | lint | format`.
   - `[protect]` — bare invocation OK; pipe/redirect denied.
-- Canonicalization (`_canonicalize` in `ralph-guard.sh`): env-prefix stripped, pipes/redirects stripped, a package-local binary path (`./node_modules/.bin/X`) mapped to the lockfile's exec form (`pnpm X`, `yarn X` or `npx X`), `pnpm run X` / `pnpm exec X` normalized to `pnpm X`. Compound chains (`pnpm A && pnpm B`) split — if any segment matches `[wrap]`, the whole chain is rewrapped on just that segment.
+- Canonicalization (`_canonicalize` in `ralph-guard.sh`): env-prefix stripped, pipes/redirects stripped, a package-local binary path (`./node_modules/.bin/X`) mapped to the lockfile's exec form (`pnpm X`, `yarn X` or `npx X`), `pnpm run X` / `pnpm exec X` / `pnpm -s X` / `pnpm --silent X` normalized to `pnpm X`. Compound chains (`cd dir && pnpm A; pnpm B`, and commands on separate lines) split the way the shell reads them — quoted strings, substitutions and heredoc bodies never split — and every command in the chain meets `[rewrite]`, `[deny]` and the direct-runner check. If any command matches `[wrap]`, the whole chain is rewrapped on just that command; otherwise a rewrite replaces only the command it matched.
 - A `[rewrite]` that produces `pnpm <name>` where `<name>` is no root `package.json` script, pnpm subcommand or package-local binary is denied instead of emitted — the denial names the root scripts that do exist.
 - Activity-log emoji: 🔀 `GUARD REWRITE` on transparent rewrites, ⛔ `GUARD DENY` on hard blocks.
 
@@ -227,7 +227,8 @@ full  | pnpm all-check
 final | pnpm all-check
 
 [rewrite]
-# regex | replacement | reason  (backrefs \1, \2, … supported in replacement)
+# regex | replacement | reason  (backrefs \1, \2, … supported in replacement;
+# fields split on a `|` with whitespace on both sides, so `(a|b)` alternation works)
 ^pnpm -w run (.+)$ | pnpm \1 | this repo's package.json has no -w workspace flag
 ^pnpm nx (.+)$     | pnpm \1 | pnpm nx bypasses [wrap] enforcement; use root pnpm scripts
 
@@ -250,7 +251,7 @@ pnpm format:write
 Section semantics:
 
 - **`[gates]`** — the project's three tier-gate commands, exactly one per tier. The framing prompt's `## Gate Selection` block, the completion guard `_complete_allowed`, and the tier-command label-lock all read this. No defaults — every project must declare its own. These pins are frozen for the run, so **never pin a tier to a command the run itself is scoped to change** (e.g. a task that rewrites `./scripts/gate.sh` to take a tier argument): author the post-change command up front, or split the work so the rewrite lands and the policy is re-authored before the rest runs. An agent that hits a stale pin cannot fix it — `command-policy` is loop-managed — so it records `.ralph/policy-proposal` and stops.
-- **`[rewrite]`** — regex match; transparently rewrites the agent's command via the hook's `updatedInput` mechanism (no block, no retry puzzle). Use for incorrect command shapes the agent reaches for.
+- **`[rewrite]`** — regex match; transparently rewrites the agent's command via the hook's `updatedInput` mechanism (no block, no retry puzzle). Use for incorrect command shapes the agent reaches for. Each command in a chain is matched on its own, and the first matching row wins; its output meets `[deny]` and `[wrap]` but no further rewrite. A regex may use `(a|b)` alternation as long as it keeps no whitespace around the `|` — whitespace on both sides is what separates the fields. A compact row with no such separator (`^x$|y|why`) splits on bare `|`.
 - **`[deny]`** — literal prefix match; blocks outright with `permissionDecision: deny`. Use for commands the agent should never run (containerized E2E, destructive ops).
 - **`[wrap]`** — free-form routing table for commands NOT in `[gates]`. Listed command is **transparently auto-rewritten** to its `gate-run.sh <label> <cmd>` form via `updatedInput`, so the loop captures tracking artifacts (latest.log / .exit / .cmd / .summary) without the agent having to remember the wrapper. The label drives the artifact namespace and timeout bucket. Missing/unrecognized label → row skipped. The matcher strips env-var prefixes AND normalizes `pnpm run X` / `pnpm exec X` to `pnpm X` before matching. Compound chains (`pnpm format:write && pnpm test-coverage`) split — if any segment matches, the chain is rewrapped on just that segment.
 - **`[protect]`** — bare invocation OK; only pipe / redirect of the command is denied. Use for commands you want to allow bare but not let the agent dump into a sidecar log.
@@ -262,7 +263,7 @@ Activity-log feedback: 🔀 `GUARD REWRITE` is logged when `[rewrite]` or `[wrap
 When installed as a Claude Code plugin, Ralph registers a `PreToolUse` hook (`ralph-guard.sh`) that intercepts Bash and Write/Edit tool calls to enforce discipline:
 
 - **Transparent rewrites** — `[rewrite]` regex transforms and `[wrap]` auto-routing through `gate-run.sh` happen via `updatedInput` (no block, no agent retry). Logged to `activity.log` as 🔀 `GUARD REWRITE`.
-- **Hard denies** — state tampering (an `rm` or `find -delete` of `.ralph/`, judged per chained command), direct test-tool invocations (`vitest`/`jest`/`cypress`/`tsc --noEmit` and their `pnpm`/`npx`/`yarn` and `node_modules/.bin` variants), `[deny]` rules. Logged as ⛔ `GUARD DENY`. The reason reaches the agent prefixed `[ralph-guard]`, and `errors.log` records it as `GUARD DENY` — the command never ran, so never as `SHELL FAIL`.
+- **Hard denies** — state tampering (an `rm` or `find -delete` of `.ralph/`), direct test-tool invocations (`vitest`/`jest`/`cypress`/`tsc --noEmit` and their `pnpm`/`npx`/`yarn` and `node_modules/.bin` variants), `[deny]` rules — each judged per chained command. Logged as ⛔ `GUARD DENY`. The reason reaches the agent prefixed `[ralph-guard]`, and `errors.log` records it as `GUARD DENY` — the command never ran, so never as `SHELL FAIL`.
 - **Gate-without-change detection** — blocks re-running a gate label when no file has changed since its last verdict, whether through Write/Edit or any other edit to the working tree.
 - **State-file protection** — prevents the agent from tampering with `.ralph/gates/`, `.ralph/activity.log`, and other loop-owned state.
 

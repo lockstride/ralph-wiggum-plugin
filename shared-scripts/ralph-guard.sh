@@ -151,13 +151,25 @@ _strip_env_prefix() {
 # matching catches equivalent variants:
 #   pnpm run <script>  → pnpm <script>
 #   pnpm exec <script> → pnpm <script>
-# Used by the [wrap] policy check so the agent can't slip past a rule on
-# "pnpm all-check" by writing "pnpm run all-check".
+#   pnpm -s <script>, pnpm --silent exec <script> → pnpm <script>
+# `-s`/`--silent` only quiet pnpm's own output, so no rule has to spell them
+# out. Used by the policy checks so the agent can't slip past a rule on
+# "pnpm all-check" by writing "pnpm run all-check" or "pnpm -s all-check".
 # (npx pnpm and pnpm -w run are handled separately by the [rewrite] section.)
 _normalize_pnpm() {
   local cmd="$1"
-  cmd=$(echo "$cmd" | sed -E 's/^pnpm[[:space:]]+(run|exec)[[:space:]]+/pnpm /')
-  echo "$cmd"
+  local silent='^pnpm[[:space:]]+(-s|--silent)([[:space:]]+|$)'
+  local subcommand='^pnpm[[:space:]]+(run|exec)[[:space:]]+'
+  while [[ "$cmd" =~ $silent ]]; do
+    cmd="pnpm ${cmd:${#BASH_REMATCH[0]}}"
+  done
+  if [[ "$cmd" =~ $subcommand ]]; then
+    cmd="pnpm ${cmd:${#BASH_REMATCH[0]}}"
+    while [[ "$cmd" =~ $silent ]]; do
+      cmd="pnpm ${cmd:${#BASH_REMATCH[0]}}"
+    done
+  fi
+  echo "${cmd% }"
 }
 
 # Strip everything after the first pipe, redirect, or command separator so
@@ -213,6 +225,167 @@ _canonicalize() {
   cmd=$(_normalize_local_bin "$cmd")
   cmd=$(_normalize_pnpm "$cmd")
   echo "$cmd"
+}
+
+# Sets _TRIMMED to $1 without its leading and trailing whitespace.
+_trim() {
+  _TRIMMED="${1#"${1%%[![:space:]]*}"}"
+  _TRIMMED="${_TRIMMED%"${_TRIMMED##*[![:space:]]}"}"
+}
+
+# Splits a Bash command into the commands it chains, reading it the way the
+# shell does: quoted strings, `$(…)`/`${…}`/backtick substitutions, subshells,
+# comments and heredoc bodies never split, so a separator inside a commit
+# message or a script body is never taken for one. The separators are the
+# top-level `&&`, `||`, `;`, `&` and newline; a pipeline stays one command.
+# Prints `<command>\036<separator>\036` per command, each command trimmed.
+# Runs under LC_ALL=C, so it scans bytes in one linear pass.
+read -r -d '' _SPLIT_CHAIN_AWK <<'AWK' || true
+function flush(sep, end,    t) {
+  t = substr(s, start, end - start)
+  sub(/^[ \t\n]+/, "", t)
+  sub(/[ \t\n]+$/, "", t)
+  if (t != "") printf "%s\036%s\036", t, sep
+}
+# The position of the first newline at or after p, or n + 1. Searched in
+# growing windows so a long heredoc body is skipped at index() speed.
+function eol(p,    w, k) {
+  for (w = 256; ; w *= 4) {
+    k = index(substr(s, p, w), "\n")
+    if (k) return p + k - 1
+    if (p + w > n) return n + 1
+  }
+}
+BEGIN {
+  s = ENVIRON["_RALPH_CHAIN"]
+  n = length(s)
+  i = start = 1
+  while (i <= n) {
+    c = substr(s, i, 1)
+    top = sp ? stk[sp] : ""
+    if (top == "'") { if (c == "'") sp--; i++; continue }
+    if (c == "\\") { i += 2; continue }
+    if (top == "A") { if (c == "'") sp--; i++; continue }
+    if (top == "`") { if (c == "`") sp--; i++; continue }
+    if (top == "\"") {
+      if (c == "\"") sp--
+      else if (c == "`") stk[++sp] = "`"
+      else if (c == "$" && substr(s, i + 1, 1) ~ /[({]/) stk[++sp] = substr(s, ++i, 1)
+      i++
+      continue
+    }
+    # Unquoted: the top level, or inside $( ), ${ } or a subshell.
+    if (c == "'" || c == "\"" || c == "`") { stk[++sp] = c; i++; continue }
+    if (c == "$" && substr(s, i + 1, 1) == "'") { stk[++sp] = "A"; i += 2; continue }
+    if (c == "$" && substr(s, i + 1, 1) == "{") { stk[++sp] = "{"; i += 2; continue }
+    if (c == "(") { stk[++sp] = "("; i++; continue }
+    if ((c == ")" && top == "(") || (c == "}" && top == "{")) { sp--; i++; continue }
+    if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[ \t\n;&|()]/)) {
+      i = eol(i)
+      continue
+    }
+    if (substr(s, i, 3) == "<<<") { i += 3; continue }
+    if (substr(s, i, 2) == "<<") {
+      j = i + 2
+      strip = 0
+      if (substr(s, j, 1) == "-") { strip = 1; j++ }
+      while (substr(s, j, 1) ~ /[ \t]/) j++
+      w = ""
+      for (; j <= n && substr(s, j, 1) !~ /[ \t\n;&|<>()]/; j++)
+        if (substr(s, j, 1) !~ /["'\\]/) w = w substr(s, j, 1)
+      if (w != "") { hdw[++nhd] = w; hds[nhd] = strip }
+      i = j
+      continue
+    }
+    if (c == "\n" && nhd) {
+      # Heredoc bodies start on the next line, each ending at its delimiter.
+      i++
+      for (h = 1; h <= nhd; h++) {
+        while (i <= n) {
+          e = eol(i)
+          line = substr(s, i, e - i)
+          if (hds[h]) sub(/^\t+/, "", line)
+          i = e
+          if (line == hdw[h]) break
+          i++
+        }
+        if (h < nhd) i++
+      }
+      nhd = 0
+      continue
+    }
+    if (sp == 0) {
+      two = substr(s, i, 2)
+      if (two == "&&" || two == "||") { flush(two, i); i += 2; start = i; continue }
+      if (c == "\n" || c == ";" || (c == "&" && substr(s, i + 1, 1) != ">" && (i == 1 || substr(s, i - 1, 1) !~ /[<>|]/))) {
+        flush(c, i); i++; start = i; continue
+      }
+    }
+    i++
+  }
+  flush("", n + 1)
+}
+AWK
+
+# The commands the Bash command chains, as _split_chain read them, and the
+# separator after each ('' after the last).
+_SEG_TEXT=()
+_SEG_SEP=()
+_split_chain() {
+  local out toks=() i
+  _SEG_TEXT=()
+  _SEG_SEP=()
+  out=$(_RALPH_CHAIN="$1" LC_ALL=C awk "$_SPLIT_CHAIN_AWK" </dev/null) || out=""
+  if [[ -n "$out" ]]; then
+    local IFS=$'\036'
+    read -r -d '' -a toks <<<"$out" || true
+  fi
+  for ((i = 0; i + 1 < ${#toks[@]}; i += 2)); do
+    _SEG_TEXT+=("${toks[i]}")
+    _SEG_SEP+=("${toks[i + 1]}")
+  done
+  # A command the splitter could not read is judged whole, never skipped.
+  if ((${#_SEG_TEXT[@]} == 0)); then
+    _SEG_TEXT=("$1")
+    _SEG_SEP=("")
+  fi
+}
+
+# Each chained command in the canonical form the checks match against. A
+# command's own words are on its first line, once line continuations are
+# joined; any later line belongs to a quoted argument or a heredoc body.
+_SEG_CANON=()
+_canonicalize_chain() {
+  local i line continuation=$'\\\n'
+  _SEG_CANON=()
+  for ((i = 0; i < ${#_SEG_TEXT[@]}; i++)); do
+    line="${_SEG_TEXT[i]//"$continuation"/ }"
+    line="${line%%$'\n'*}"
+    _SEG_CANON[i]=$(_canonicalize "$line")
+  done
+}
+
+# The chain as it will run: each command a [rewrite] row fired on in its
+# rewritten form, every other command exactly as the agent wrote it.
+_join_chain() {
+  local i last=$((${#_SEG_TEXT[@]} - 1)) sep out=""
+  for ((i = 0; i <= last; i++)); do
+    if [[ -n "${_SEG_REWRITTEN[i]}" ]]; then
+      out+="${_SEG_FINAL[i]}"
+    else
+      out+="${_SEG_TEXT[i]}"
+    fi
+    sep="${_SEG_SEP[i]}"
+    if ((i == last)); then
+      # A trailing separator only matters when it backgrounds the command.
+      [[ "$sep" != "&" ]] || out+=" &"
+    elif [[ "$sep" == $'\n' ]]; then
+      out+=$'\n'
+    else
+      out+=" $sep "
+    fi
+  done
+  printf '%s' "$out"
 }
 
 # Recognize a command that EXECUTES the gate harness. Two invocation forms
@@ -288,19 +461,23 @@ _guard_load_gates() {
 # ---------------------------------------------------------------------------
 #
 # 0.12.3 enforcement model: canonicalize → rewrite → deny → wrap → protect.
-# Every Bash command is first canonicalized (env-strip + pipe/redirect-strip
-# + pnpm-wrapper-normalize). The canonical form is then matched against the
-# four policy sections. Whenever a transformation fires, the hook emits an
-# `updatedInput` so the agent's tool call is TRANSPARENTLY corrected — the
-# agent sees its command "just work" without a block-and-retry puzzle. The
-# only thing that still hard-blocks is [deny] (genuinely dangerous commands)
-# and a small set of state-tampering patterns enforced outside this policy.
+# Every command a Bash call chains is canonicalized (env-strip +
+# pipe/redirect-strip + pnpm-wrapper-normalize) and matched against the
+# policy on its own: [rewrite] and [deny] judge each chained command, [wrap]
+# rewraps the chain on the first command it matches, [protect] judges the
+# first. Whenever a transformation fires, the hook emits an `updatedInput` so
+# the agent's tool call is TRANSPARENTLY corrected — the agent sees its
+# command "just work" without a block-and-retry puzzle. The only thing that
+# still hard-blocks is [deny] (genuinely dangerous commands) and a small set
+# of state-tampering patterns enforced outside this policy.
 #
 # .ralph/command-policy syntax:
 #
 #   [rewrite]
 #   regex | replacement | reason     # regex anchored implicitly by ^/$ in pattern
 #                                    # project-specific transforms (e.g. pnpm nx X → pnpm X)
+#                                    # fields split on a `|` with whitespace on both
+#                                    # sides, so the regex may use `(a|b)` alternation
 #
 #   [deny]
 #   command-prefix | reason          # genuinely dangerous; hard block
@@ -312,22 +489,28 @@ _guard_load_gates() {
 #   [protect]
 #   command-prefix                   # bare OK; pipe/redirect denied
 
-# Parse command-policy into four temp files for the four sections.
-# Output paths are echoed space-separated:
-#   "rewrite_file deny_file wrap_file protect_file"
-# Caller is responsible for cleanup. The [gates] section is recognized
-# here so its rows don't fall through to other buckets, but its content
-# is consumed by _load_gates_from_policy in ralph-common.sh — not by
-# this parser's enforcement path.
-_parse_command_policy() {
-  local policy_file="$1"
-  local rw dn wr pt
-  rw=$(mktemp)
-  dn=$(mktemp)
-  wr=$(mktemp)
-  pt=$(mktemp)
-  local section=""
-  local line
+# The policy's rows, parsed once per call by _load_command_policy.
+_RW_PAT=()    # [rewrite] regex
+_RW_REPL=()   # [rewrite] replacement
+_DN_CMD=()    # [deny] command prefix
+_DN_REASON=() # [deny] reason
+_WR_PREFIX=() # [wrap] command prefix, then the [gates] commands
+_WR_LABEL=()  # [wrap] label
+_PT_PREFIX=() # [protect] command prefix
+
+# The [gates] section is recognized so its rows don't fall through to other
+# buckets; its tier commands are auto-wrapped under their tier labels. The
+# gates themselves are loaded by _guard_load_gates.
+_load_command_policy() {
+  local policy="$1" section="" line
+  _RW_PAT=()
+  _RW_REPL=()
+  _DN_CMD=()
+  _DN_REASON=()
+  _WR_PREFIX=()
+  _WR_LABEL=()
+  _PT_PREFIX=()
+  [[ -f "$policy" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     # Strip CR if present, trim trailing whitespace.
     line="${line%$'\r'}"
@@ -342,50 +525,169 @@ _parse_command_policy() {
       "["*"]") section="" ;;
       *)
         case "$section" in
-          rewrite) printf '%s\n' "$line" >>"$rw" ;;
-          deny) printf '%s\n' "$line" >>"$dn" ;;
-          wrap) printf '%s\n' "$line" >>"$wr" ;;
-          protect) printf '%s\n' "$line" >>"$pt" ;;
-          gates) ;; # consumed by _load_gates_from_policy in ralph-common.sh
+          rewrite) _add_rewrite_row "$line" ;;
+          deny) _add_deny_row "$line" ;;
+          wrap) _add_wrap_row "$line" ;;
+          protect) _add_protect_row "$line" ;;
         esac
         ;;
     esac
-  done <"$policy_file"
-  printf '%s %s %s %s' "$rw" "$dn" "$wr" "$pt"
+  done <"$policy"
+
+  # 0.14.0: [gates] commands are auto-wrapped under their tier label — the
+  # project does not need to duplicate them in [wrap]. The command prefix is
+  # canonicalized so it matches the canonical form the [wrap] matcher uses.
+  # (Caveat: env prefixes are dropped at wrap time — if a [gates] command
+  # relies on a leading env var, wrap it in a shell script so the env lives
+  # inside the script.)
+  local _g_basic _g_full _g_final _g_can
+  _guard_load_gates "$policy" _g_basic _g_full _g_final
+  if [[ -n "$_g_basic" ]]; then
+    _g_can=$(_canonicalize "$_g_basic")
+    _add_wrap_row "$_g_can | basic"
+  fi
+  if [[ -n "$_g_full" ]]; then
+    _g_can=$(_canonicalize "$_g_full")
+    _add_wrap_row "$_g_can | full"
+  fi
+  if [[ -n "$_g_final" ]]; then
+    _g_can=$(_canonicalize "$_g_final")
+    _add_wrap_row "$_g_can | final"
+  fi
+  return 0
+}
+
+# Splits a [rewrite] row at its first field separator: a `|` with whitespace
+# on both sides, so a regex may use `(a|b)` alternation as long as it keeps no
+# whitespace around the `|`. A row with no such separator left splits on a
+# bare `|` instead, so compact rows (`^x$|y|why`) read as they always have.
+# Sets _FIELD (trimmed), _REST, and _HAD_SEP (1 when a separator was found).
+_split_rewrite_field() {
+  local row="$1" spaced='[[:space:]][|][[:space:]]'
+  _HAD_SEP=1
+  if [[ "$row" =~ $spaced ]]; then
+    _FIELD="${row%%"${BASH_REMATCH[0]}"*}"
+    _REST="${row#*"${BASH_REMATCH[0]}"}"
+  elif [[ "$row" == *"|"* ]]; then
+    _FIELD="${row%%|*}"
+    _REST="${row#*|}"
+  else
+    _FIELD="$row"
+    _REST=""
+    _HAD_SEP=""
+  fi
+  _trim "$_FIELD"
+  _FIELD="$_TRIMMED"
+}
+
+# A row needs a regex and a replacement; the reason is documentation.
+_add_rewrite_row() {
+  local pattern
+  _split_rewrite_field "$1"
+  pattern="$_FIELD"
+  if [[ -z "$pattern" || -z "$_HAD_SEP" ]]; then
+    return 0
+  fi
+  _split_rewrite_field "$_REST"
+  _RW_PAT+=("$pattern")
+  _RW_REPL+=("$_FIELD")
+}
+
+_add_deny_row() {
+  local rule="$1" denied_cmd reason=""
+  if [[ "$rule" == *"|"* ]]; then
+    _trim "${rule#*|}"
+    reason="$_TRIMMED"
+  fi
+  _trim "${rule%%|*}"
+  denied_cmd="$_TRIMMED"
+  if [[ -n "$denied_cmd" ]]; then
+    _DN_CMD+=("$denied_cmd")
+    _DN_REASON+=("$reason")
+  fi
+}
+
+# 0.14.0: every [wrap] row must specify an explicit, valid label — silent
+# fallback to "basic" hid misclassification. Rows without `|` or with an
+# unrecognized label are skipped (the command falls through to whatever
+# other policy/check would handle it).
+_add_wrap_row() {
+  local rule="$1" prefix label
+  [[ "$rule" == *"|"* ]] || return 0
+  _trim "${rule%%|*}"
+  prefix="$_TRIMMED"
+  _trim "${rule#*|}"
+  label="$_TRIMMED"
+  [[ -n "$prefix" ]] || return 0
+  case "$label" in
+    basic | full | final | unit | integration | e2e | lint | format)
+      _WR_PREFIX+=("$prefix")
+      _WR_LABEL+=("$label")
+      ;;
+  esac
+}
+
+_add_protect_row() {
+  _trim "$1"
+  if [[ -n "$_TRIMMED" ]]; then
+    _PT_PREFIX+=("$_TRIMMED")
+  fi
 }
 
 # 0.12.2: Rewrites are passthrough — the command is transparently
 # corrected via the hook's updatedInput mechanism, not blocked.
-# Sets _REWRITE_CANONICAL to the rewritten command if a rule matched.
-_REWRITE_CANONICAL=""
-
+#
+# Each chained command meets the rows in order; the first matching row
+# rewrites it, and the result meets [deny] and [wrap] but no further rewrite.
+# Fills _SEG_FINAL (each command as the later checks judge it) and
+# _SEG_REWRITTEN (1 where a row fired). Matching is grep -E, as it has always
+# been, so a row's regex dialect does not depend on the shell.
+_SEG_FINAL=()
+_SEG_REWRITTEN=()
 _apply_rewrites() {
-  # $1 = stripped command, $2 = rewrite file
-  # On match: sets _REWRITE_CANONICAL and returns 0.
-  # Caller is responsible for feeding the rewritten form to downstream checks
-  # and emitting the updatedInput hook response if nothing blocks.
-  local stripped="$1" rwfile="$2"
-  _REWRITE_CANONICAL=""
-  [[ -s "$rwfile" ]] || return 0
-  local rule pattern replacement reason canonical
-  while IFS= read -r rule || [[ -n "$rule" ]]; do
-    [[ -z "$rule" ]] && continue
-    # Split on ' | ' (with optional surrounding whitespace).
-    pattern="${rule%%|*}"
-    rule="${rule#*|}"
-    replacement="${rule%%|*}"
-    reason="${rule#*|}"
-    # Trim whitespace from each field.
-    pattern="$(printf '%s' "$pattern" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
-    replacement="$(printf '%s' "$replacement" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
-    reason="$(printf '%s' "$reason" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
-    [[ -z "$pattern" ]] && continue
-    # Apply regex. We use sed with the pattern as-is; the pattern may use ^ and $.
-    if printf '%s' "$stripped" | grep -qE "$pattern" 2>/dev/null; then
-      _REWRITE_CANONICAL=$(printf '%s' "$stripped" | sed -E "s|$pattern|$replacement|")
-      return 0
-    fi
-  done <"$rwfile"
+  local n=${#_SEG_CANON[@]} rows=${#_RW_PAT[@]} i r
+  _SEG_FINAL=()
+  _SEG_REWRITTEN=()
+  for ((i = 0; i < n; i++)); do
+    _SEG_FINAL[i]="${_SEG_CANON[i]}"
+    _SEG_REWRITTEN[i]=""
+  done
+  ((n > 0 && rows > 0)) || return 0
+
+  # One grep of every command against every row settles the usual case —
+  # nothing to rewrite — and counts the commands the row loop must place. A
+  # row that is not a valid regex makes grep fail (exit 2) rather than
+  # answer, so that falls through to the row loop, where it alone never
+  # matches.
+  local -a patterns=()
+  for ((r = 0; r < rows; r++)); do
+    patterns+=(-e "${_RW_PAT[r]}")
+  done
+  local hits="" status=0 pending=$n newlines
+  hits=$(printf '%s\n' "${_SEG_CANON[@]}" | grep -nE "${patterns[@]}" 2>/dev/null) || status=$?
+  ((status != 1)) || return 0
+  if ((status == 0)); then
+    newlines="${hits//[!$'\n']/}"
+    pending=$((${#newlines} + 1))
+  fi
+
+  local delim=$'\001' line idx
+  for ((r = 0; r < rows && pending > 0; r++)); do
+    hits=$(printf '%s\n' "${_SEG_CANON[@]}" | grep -nE -e "${_RW_PAT[r]}" 2>/dev/null) || continue
+    while IFS= read -r line; do
+      idx=$((${line%%:*} - 1))
+      [[ -z "${_SEG_REWRITTEN[idx]}" ]] || continue
+      _SEG_FINAL[idx]=$(printf '%s\n' "${_SEG_CANON[idx]}" |
+        sed -E "s${delim}${_RW_PAT[r]}${delim}${_RW_REPL[r]}${delim}")
+      # 0.12.4: re-normalize pnpm wrappers after rewrite. A rule like
+      # `^pnpm nx (.+)$ | pnpm \1` turns `pnpm nx run api:test-coverage`
+      # into `pnpm run api:test-coverage` — without a second pnpm-normalize
+      # pass, that wouldn't match `pnpm api:test-coverage` in [wrap].
+      _SEG_FINAL[idx]=$(_normalize_pnpm "${_SEG_FINAL[idx]}")
+      _SEG_REWRITTEN[idx]=1
+      pending=$((pending - 1))
+    done <<<"$hits"
+  done
 }
 
 # pnpm's own subcommands: `pnpm <name>` for these never looks for a script.
@@ -468,38 +770,27 @@ _emit_rewrite() {
   exit 0
 }
 
+#   $1 = one chained command, rewritten
 _apply_deny() {
-  local stripped="$1" dnfile="$2"
-  [[ -s "$dnfile" ]] || return 0
-  local rule denied_cmd denied_reason
-  while IFS= read -r rule || [[ -n "$rule" ]]; do
-    [[ -z "$rule" ]] && continue
-    denied_cmd="${rule%%|*}"
-    denied_reason=""
-    [[ "$rule" == *"|"* ]] && denied_reason="${rule#*|}"
-    denied_cmd="$(printf '%s' "$denied_cmd" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
-    denied_reason="$(printf '%s' "$denied_reason" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
-    [[ -z "$denied_cmd" ]] && continue
-    if [[ "$stripped" == "$denied_cmd" || "$stripped" == "$denied_cmd "* ]]; then
-      _block "${denied_reason:-Command denied by project configuration.}"
+  local stripped="$1" r
+  for ((r = 0; r < ${#_DN_CMD[@]}; r++)); do
+    if [[ "$stripped" == "${_DN_CMD[r]}" || "$stripped" == "${_DN_CMD[r]} "* ]]; then
+      _block "${_DN_REASON[r]:-Command denied by project configuration.}"
     fi
-  done <"$dnfile"
+  done
 }
 
+#   $1 = original command, $2 = its first chained command, rewritten
 _apply_protect() {
-  local cmd="$1" stripped="$2" ptfile="$3"
-  [[ -s "$ptfile" ]] || return 0
-  local prefix
-  while IFS= read -r prefix || [[ -n "$prefix" ]]; do
-    prefix="$(printf '%s' "$prefix" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
-    [[ -z "$prefix" ]] && continue
-    if [[ "$stripped" == "$prefix"* ]]; then
+  local cmd="$1" stripped="$2" r
+  for ((r = 0; r < ${#_PT_PREFIX[@]}; r++)); do
+    if [[ "$stripped" == "${_PT_PREFIX[r]}"* ]]; then
       if echo "$cmd" | grep -qE '\||\s*>\s*|>>'; then
-        _block "Protected script pipe/redirect denied: '$prefix' must not be piped or redirected. Run bare or through gate-run.sh."
+        _block "Protected script pipe/redirect denied: '${_PT_PREFIX[r]}' must not be piped or redirected. Run bare or through gate-run.sh."
       fi
       return 0
     fi
-  done <"$ptfile"
+  done
 }
 
 # [wrap] auto-wrap enforcement (0.12.3).
@@ -523,197 +814,93 @@ _apply_protect() {
 # emits it via _emit_rewrite after all checks pass.
 _WRAP_REWRITE=""
 
-# 0.12.4: Try to match a single segment of the canonical form against the
-# given wrap rules. Returns 0 with _WRAP_REWRITE set on match, or 1 on
-# no match. Extracted from _apply_wrap so it can be reused by the
-# compound-chain fallback below.
+# Matches one canonical command against the [wrap] rows. Returns 0 with
+# _WRAP_REWRITE set on match, or 1 on no match.
 _try_match_wrap_segment() {
-  # $1 = canonical segment to match (already env/pipe/pnpm-normalized)
-  # $2 = wrap file
-  # 0.14.0: every [wrap] row must specify an explicit, valid label —
-  # silent fallback to "basic" hid misclassification. Rows without `|`
-  # or with an unrecognized label are skipped (the segment falls through
-  # to whatever other policy/check would handle it).
-  local segment="$1" wrfile="$2"
+  local segment="$1" r
   local gate_run_path="${PLUGIN_ROOT:-..}/shared-scripts/gate-run.sh"
-  local rule prefix label
-  while IFS= read -r rule || [[ -n "$rule" ]]; do
-    [[ -z "$rule" ]] && continue
-    [[ "$rule" == *"|"* ]] || continue
-    prefix="${rule%%|*}"
-    label="${rule#*|}"
-    prefix="$(printf '%s' "$prefix" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
-    label="$(printf '%s' "$label" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
-    [[ -z "$prefix" || -z "$label" ]] && continue
-    case "$label" in
-      basic | full | final | unit | integration | e2e | lint | format) ;;
-      *) continue ;;
-    esac
-    if [[ "$segment" == "$prefix" || "$segment" == "$prefix "* ]]; then
-      _WRAP_REWRITE="bash $gate_run_path $label $segment"
+  for ((r = 0; r < ${#_WR_PREFIX[@]}; r++)); do
+    if [[ "$segment" == "${_WR_PREFIX[r]}" || "$segment" == "${_WR_PREFIX[r]} "* ]]; then
+      _WRAP_REWRITE="bash $gate_run_path ${_WR_LABEL[r]} $segment"
       return 0
     fi
-  done <"$wrfile"
+  done
   return 1
 }
 
+# The first chained command that matches a [wrap] row is the one wrapped, and
+# the WHOLE chain is replaced by the gate-wrap of just that command: a
+# `pnpm format:write && pnpm lint:check && pnpm test-coverage` warm-up is
+# dropped because basic-check/all-check already run those steps, and
+# gate-run.sh runs from the workspace root whatever `cd` preceded it. This
+# closes the most common bypass — chained "warm-up" commands leading to a
+# gated target.
+#   $1 = original command
 _apply_wrap() {
-  # $1 = original command (raw, for gate-run.sh detection + chain splitting)
-  # $2 = canonical command (env/pipe/pnpm-normalized) for matching AND wrapping
-  # $3 = wrap file
-  local cmd="$1" canonical="$2" wrfile="$3"
+  local cmd="$1" i dropped=""
   _WRAP_REWRITE=""
-  [[ -s "$wrfile" ]] || return 0
+  ((${#_WR_PREFIX[@]} > 0)) || return 0
 
   # Already wrapped — nothing to do. The agent's deliberate invocation of
   # gate-run.sh is the contract being satisfied.
-  if echo "$cmd" | grep -qE 'gate-run\.sh'; then
-    return 0
-  fi
+  [[ "$cmd" != *gate-run.sh* ]] || return 0
 
-  # Step 1: try the simple canonical form (head segment of any chain).
-  if _try_match_wrap_segment "$canonical" "$wrfile"; then
-    return 0
-  fi
-
-  # Step 2 (0.12.4): if the original command is a compound chain
-  # (`pnpm format:write && pnpm lint:check && pnpm test-coverage`), the
-  # canonical form only captures the FIRST segment — later segments that
-  # might match a [wrap] rule are invisible to the simple match above.
-  # Split on `&&`/`||`/`;`, canonicalize each segment independently, and
-  # try matching. On match, the WHOLE chain is replaced by the gate-wrap
-  # of just that segment: the format:write/lint:check prefix is dropped
-  # because basic-check/all-check already runs those steps internally.
-  # This closes the most common bypass — chained "warm-up" commands
-  # leading to a gated target.
-  if echo "$cmd" | grep -qE '(&&|\|\||;)'; then
-    # 0.14.6: split ONLY on shell separators (&&/||/;), never on literal
-    # newlines that may live inside a quoted argument such as a multi-line
-    # `git commit -m "<body>"`. The old `IFS=$'\n'` word-split on newlines
-    # too, so a commit-body line that happened to start with a gated command
-    # (e.g. "pnpm all-check …") was mis-detected as a gate target — polluting
-    # gates/<label>-latest.cmd and triggering a spurious COMPLETE BLOCKED.
-    # Use an ASCII unit-separator (0x1f) sentinel: it cannot appear in a real
-    # command line, so splitting on it isolates exactly the shell-level
-    # segments while any embedded newline stays inside its segment.
-    local _sep
-    _sep=$(printf '\037')
-    local IFS="$_sep"
-    local segment seg_canonical
-    local _segments_seen=""
-    # shellcheck disable=SC2046  # intentional word splitting on the sentinel
-    for segment in $(printf '%s' "$cmd" | sed -E "s/[[:space:]]*(&&|\|\||;)[[:space:]]*/$_sep/g"); do
-      segment=$(printf '%s' "$segment" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
-      [[ -z "$segment" ]] && continue
-      seg_canonical=$(_canonicalize "$segment")
-      [[ -z "$seg_canonical" ]] && continue
-      if _try_match_wrap_segment "$seg_canonical" "$wrfile"; then
-        # 0.12.5: log which prefix segments got dropped. The "drop the
-        # prefix" assumption is safe for `format:write && lint:check`-style
-        # warm-ups (basic-check / all-check already run those) but may
-        # not be safe for every project's chain. Surface the dropped
-        # segments so an operator can spot a load-bearing prefix being
-        # discarded.
-        if [[ -n "$_segments_seen" ]]; then
-          _log_intercept "🔀" "REWRITE-CHAIN" "dropped prefix: $_segments_seen | wrapped: $seg_canonical"
-        fi
-        return 0
+  for ((i = 0; i < ${#_SEG_FINAL[@]}; i++)); do
+    [[ -n "${_SEG_FINAL[i]}" ]] || continue
+    if _try_match_wrap_segment "${_SEG_FINAL[i]}"; then
+      # 0.12.5: log which prefix commands got dropped. The "drop the prefix"
+      # assumption is safe for `format:write && lint:check`-style warm-ups
+      # but may not be safe for every project's chain. Surface them so an
+      # operator can spot a load-bearing prefix being discarded.
+      if [[ -n "$dropped" ]]; then
+        _log_intercept "🔀" "REWRITE-CHAIN" "dropped prefix: $dropped | wrapped: ${_SEG_FINAL[i]}"
       fi
-      [[ -n "$_segments_seen" ]] && _segments_seen="$_segments_seen, "
-      _segments_seen="${_segments_seen}${seg_canonical}"
-    done
-  fi
+      return 0
+    fi
+    dropped="${dropped:+$dropped, }${_SEG_FINAL[i]}"
+  done
   return 0
 }
 
+# Judges the chained commands _canonicalize_chain left in _SEG_CANON.
+#   $1 = original command (pipes/redirects/env intact)
 _enforce_command_policy() {
-  # $1 = original command (pipes/redirects/env intact)
-  # $2 = canonical command (env-stripped, pipe-stripped, pnpm-normalized)
-  local cmd="$1" canonical="$2"
-  local policy="$WORKSPACE/.ralph/command-policy"
-  local rwfile="" dnfile="" wrfile="" ptfile=""
-
-  if [[ -f "$policy" ]]; then
-    local parsed
-    parsed=$(_parse_command_policy "$policy")
-    rwfile="${parsed%% *}"
-    parsed="${parsed#* }"
-    dnfile="${parsed%% *}"
-    parsed="${parsed#* }"
-    wrfile="${parsed%% *}"
-    ptfile="${parsed#* }"
-
-    # 0.14.0: [gates] commands are auto-wrapped under their tier label —
-    # the project does not need to duplicate them in [wrap]. We append
-    # synthesized wrap rules to the parsed wrap file before enforcement.
-    # The command prefix is canonicalized (env-prefix + pipe stripped,
-    # pnpm-normalized) so it matches the canonical form the [wrap]
-    # matcher uses. (Caveat: env prefixes are dropped at wrap time —
-    # if a [gates] command relies on a leading env var, wrap it in a
-    # shell script so the env lives inside the script.)
-    local _g_basic _g_full _g_final _g_can
-    _guard_load_gates "$policy" _g_basic _g_full _g_final
-    if [[ -n "$_g_basic" ]]; then
-      _g_can=$(_canonicalize "$_g_basic")
-      [[ -n "$_g_can" ]] && printf '%s | basic\n' "$_g_can" >>"$wrfile"
-    fi
-    if [[ -n "$_g_full" ]]; then
-      _g_can=$(_canonicalize "$_g_full")
-      [[ -n "$_g_can" ]] && printf '%s | full\n' "$_g_can" >>"$wrfile"
-    fi
-    if [[ -n "$_g_final" ]]; then
-      _g_can=$(_canonicalize "$_g_final")
-      [[ -n "$_g_can" ]] && printf '%s | final\n' "$_g_can" >>"$wrfile"
-    fi
-  fi
+  local cmd="$1" i rewritten=""
   # No policy file → no rewrite/deny/wrap/protect rules. Tier-gate
   # validation (in ralph-setup.sh / loop entry points) has already failed
-  # the loop if .ralph/command-policy is missing, so this branch only
-  # matters for the test harness and the hook running outside an active
-  # loop (e.g. interactive debugging). Pass commands through unchanged.
+  # the loop if .ralph/command-policy is missing, so this only matters for
+  # the test harness and the hook running outside an active loop (e.g.
+  # interactive debugging). Commands pass through unchanged.
+  _load_command_policy "$WORKSPACE/.ralph/command-policy"
 
   # Enforcement order: rewrite → deny → wrap → protect.
-  #   - [rewrite] applies regex transforms to the canonical form (and
-  #     anywhere else it appears). Project-specific (e.g. `pnpm nx X → pnpm X`).
-  #     Result feeds into all downstream checks.
-  #   - [deny] hard-blocks the canonical form. Only path that calls _block().
+  #   - [rewrite] applies regex transforms to each chained command.
+  #     Project-specific (e.g. `pnpm nx X → pnpm X`). Results feed into all
+  #     downstream checks.
+  #   - [deny] hard-blocks any chained command it matches. Only path that
+  #     calls _block().
   #   - [wrap] sets _WRAP_REWRITE to the gate-run.sh-wrapped form, which we
   #     emit via updatedInput at the end. Agent sees the wrapped command
   #     execute transparently.
   #   - [protect] hard-blocks pipe/redirect of bare commands (separate from
   #     wrap because protected scripts may not be gate-runnable).
-  #
-  # Cleanup is best-effort — temp files in /tmp survive only until next
-  # reboot, and the hook process is short-lived. Avoid installing an EXIT
-  # trap because _block calls `exit 0` and on macOS `rm -f '/dev/null'`
-  # errors out under `set -e`, masking the block result.
-  [[ -n "$rwfile" ]] && _apply_rewrites "$canonical" "$rwfile"
-  if [[ -n "$_REWRITE_CANONICAL" ]]; then
-    canonical="$_REWRITE_CANONICAL"
-    # 0.12.4: re-normalize pnpm wrappers after rewrite. A rule like
-    # `^pnpm nx (.+)$ | pnpm \1` turns `pnpm nx run api:test-coverage`
-    # into `pnpm run api:test-coverage` — without a second pnpm-normalize
-    # pass, that wouldn't match `pnpm api:test-coverage` in [wrap] and
-    # would slip through. Re-running normalize closes the loop.
-    canonical=$(_normalize_pnpm "$canonical")
-    _REWRITE_CANONICAL="$canonical"
-  fi
-  [[ -n "$dnfile" ]] && _apply_deny "$canonical" "$dnfile"
-  # After [deny], so an explicit deny row keeps its own, more specific reason.
-  [[ -n "$_REWRITE_CANONICAL" ]] && _deny_unresolvable_rewrite "$canonical"
-  [[ -n "$wrfile" ]] && _apply_wrap "$cmd" "$canonical" "$wrfile"
-  [[ -n "$ptfile" ]] && _apply_protect "$cmd" "$canonical" "$ptfile"
-
-  # No block fired — clean up tempfiles on the success path.
-  [[ -n "$rwfile" ]] && rm -f "$rwfile"
-  [[ -n "$dnfile" ]] && rm -f "$dnfile"
-  [[ -n "$wrfile" ]] && rm -f "$wrfile"
-  [[ -n "$ptfile" ]] && rm -f "$ptfile"
+  _apply_rewrites
+  for ((i = 0; i < ${#_SEG_FINAL[@]}; i++)); do
+    _apply_deny "${_SEG_FINAL[i]}"
+    if [[ -n "${_SEG_REWRITTEN[i]}" ]]; then
+      rewritten=1
+      # After [deny], so an explicit deny row keeps its own, more specific reason.
+      _deny_unresolvable_rewrite "${_SEG_FINAL[i]}"
+    fi
+  done
+  _apply_wrap "$cmd"
+  _apply_protect "$cmd" "${_SEG_FINAL[0]:-}"
 
   # Decide what to emit. Priority:
-  #   1. If [wrap] matched, emit the gate-run.sh-wrapped form (the canonical
-  #      is already baked in, so [rewrite] transforms are reflected too).
-  #   2. Else if [rewrite] matched (but not wrap), emit the rewritten form.
+  #   1. If [wrap] matched, emit the gate-run.sh-wrapped form (the rewritten
+  #      command is already baked in, so [rewrite] transforms are reflected).
+  #   2. Else if [rewrite] matched, emit the chain with each rewritten command
+  #      in its rewritten form and every other command as written.
   #   3. Otherwise return — the agent's original command runs as-is.
   #
   # 0.24.1: whichever form we emit is what actually reaches the shell, so the
@@ -725,9 +912,11 @@ _enforce_command_policy() {
   if [[ -n "$_WRAP_REWRITE" ]]; then
     _guard_gate_invocation "$_WRAP_REWRITE" "$_WRAP_REWRITE"
     _emit_rewrite "$_WRAP_REWRITE"
-  elif [[ -n "$_REWRITE_CANONICAL" ]]; then
-    _guard_gate_invocation "$_REWRITE_CANONICAL" "$_REWRITE_CANONICAL"
-    _emit_rewrite "$_REWRITE_CANONICAL"
+  elif [[ -n "$rewritten" ]]; then
+    local joined
+    joined=$(_join_chain)
+    _guard_gate_invocation "$joined" "$joined"
+    _emit_rewrite "$joined"
   fi
   return 0
 }
@@ -808,25 +997,30 @@ _guard_bash() {
     _block "State tampering denied: cannot write .ralph/gates/ breadcrumbs by hand — gate-run.sh owns them and the completion guard trusts them. Run the gate harness instead: bash \"\$(cat .ralph/gate-runner)\" <label> <command> (label in basic|full|final; command from .ralph/command-policy [gates])."
   fi
 
-  # Canonicalize once — env prefix stripped, pipes/redirects stripped, pnpm
-  # run/exec normalized. Every downstream check matches against this form
-  # so the agent can't slip past via env-vars, pipes, or wrapper aliases.
-  local canonical
-  canonical=$(_canonicalize "$cmd")
+  # Split the chain once and canonicalize each command in it — env prefix
+  # stripped, pipes/redirects stripped, pnpm run/exec/-s normalized. The
+  # direct-runner check, [rewrite] and [deny] judge every chained command, so
+  # the agent can't slip past via env-vars, pipes, wrapper aliases, or a
+  # `cd dir &&` in front. `canonical` is the first command's form.
+  _split_chain "$cmd"
+  _canonicalize_chain
+  local canonical="${_SEG_CANON[0]:-}" i
 
   # --- Direct test tool denial ---
-  # Block direct invocations of test tools without gate-run.sh wrapper.
-  # Only bypass when the command is going through gate-run.sh itself.
+  # Block direct invocations of test tools without gate-run.sh wrapper. A
+  # command that runs the harness starts with bash/sh, so it never matches.
   # 0.26.0: every package-manager exec form is covered — _canonicalize maps a
   # `node_modules/.bin/<tool>` path onto whichever of them the lockfile names.
-  if ! echo "$cmd" | grep -qE 'gate-run\.sh'; then
-    if echo "$canonical" | grep -qE '^(exec )?((npx|pnpm|yarn) )?(vitest|jest|cypress)(\s|$)'; then
+  local runner='^(exec )?((npx|pnpm|yarn) )?(vitest|jest|cypress)([[:space:]]|$)'
+  local tsc='^(exec )?((npx|pnpm|yarn) )?tsc[[:space:]]+--noEmit'
+  for ((i = 0; i < ${#_SEG_CANON[@]}; i++)); do
+    if [[ "${_SEG_CANON[i]}" =~ $runner ]]; then
       _block "Direct test runner invocation denied — bypasses the gate-run.sh breadcrumbs the completion guard depends on. Use a script from .ralph/command-policy [wrap] for your test tier (unit/integration/e2e); most accept extra args for targeted runs (e.g. a single spec file). The hook routes it through gate-run.sh automatically."
     fi
-    if echo "$canonical" | grep -qE '^(exec )?((npx|pnpm|yarn) )?tsc\s+--noEmit'; then
+    if [[ "${_SEG_CANON[i]}" =~ $tsc ]]; then
       _block "Direct tsc invocation denied — bypasses the gate-run.sh breadcrumbs the completion guard depends on. Use a script from .ralph/command-policy [wrap] that runs type-check (often rolled into a basic-check or dedicated lint script)."
     fi
-  fi
+  done
 
   # --- Blanket git-add denial (0.15.4) ---
   # `git add .` / `-A` / `--all` stage files that were untracked at loop start,
@@ -846,7 +1040,7 @@ _guard_bash() {
 
   # --- Command-policy enforcement ---
   # .ralph/command-policy: [gates] [rewrite] [deny] [wrap] [protect].
-  _enforce_command_policy "$cmd" "$canonical"
+  _enforce_command_policy "$cmd"
 
   # --- Gate-without-change check (per-label) ---
   # Runs here for a command that already invokes the harness itself. The

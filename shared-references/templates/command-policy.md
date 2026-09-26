@@ -1,11 +1,12 @@
 # .ralph/command-policy — Ralph command policy
 #
 # Five sections, scanned in order: [gates] → [rewrite] → [deny] → [wrap] → [protect].
-# Every Bash command is canonicalized first (env-prefix + pipes/redirects
-# stripped, `./node_modules/.bin/X` → the lockfile's exec form, `pnpm run X` /
-# `pnpm exec X` → `pnpm X`), then matched. [rewrite]
-# and [wrap] transparently correct the agent's invocation via updatedInput;
-# only [deny] hard-blocks.
+# Every command a Bash call chains (`a && b`, `a; b`, one per line — quoted
+# text and heredoc bodies never split) is canonicalized first (env-prefix +
+# pipes/redirects stripped, `./node_modules/.bin/X` → the lockfile's exec form,
+# `pnpm run X` / `pnpm exec X` / `pnpm -s X` → `pnpm X`), then matched on its
+# own. [rewrite] and [wrap] transparently correct the agent's invocation via
+# updatedInput; only [deny] hard-blocks.
 
 # ─────────────────────────────────────────────────────────────────────
 # [gates] — REQUIRED. The three tier-gate commands.
@@ -41,6 +42,11 @@ final | pnpm all-check
 # same-named root script.
 #
 #   ^regex$ | replacement | reason   (backrefs \1, \2, … supported)
+#
+# Fields are split on a `|` with whitespace on both sides, so a regex may use
+# `(pnpm|npx)` alternation as long as it keeps no whitespace around its `|`.
+# The first matching row wins; its output meets [deny] and [wrap] but no
+# further rewrite.
 
 [rewrite]
 # ^pnpm -w run (.+)$ | pnpm \1 | this repo's package.json has no -w workspace flag

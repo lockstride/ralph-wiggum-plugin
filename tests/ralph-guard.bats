@@ -1569,3 +1569,182 @@ _verdict_on_current_tree() {
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic")'
 }
+
+# --- 0.27.0: every chained command meets [rewrite], [deny] and the direct-runner check
+# Only the first command of `a; b` or `cd x && b` used to be judged, so a
+# rewrite, a deny row or the direct-runner check never saw `b`. The chain is
+# read the way the shell reads it: quotes, substitutions and heredoc bodies
+# are never split.
+
+_chain_policy() {
+  touch "$MOCK_WORKSPACE/pnpm-lock.yaml"
+  echo '{"scripts":{"test-unit":"nx run-many -t test-unit","format":"prettier --write ."}}' \
+    >"$MOCK_WORKSPACE/package.json"
+  printf '%s\n' '[rewrite]' \
+    '^pnpm nx run ([^: ]+):test-unit( .*)?$ | pnpm test-unit \1\2 | route to the gated script' \
+    '^pnpm -w run (.+)$ | pnpm \1 | no -w workspace flag' \
+    '^(pnpm|npx) env-run (.* )?--env[= ]e2e-local( .*)?$ | pnpm env-run --env=e2e-local | funnel to [deny]' '' \
+    '[deny]' 'pnpm env-run --env=e2e-local | the lane owns its environment' \
+    'pnpm test-e2e | containerized' '' \
+    '[wrap]' 'pnpm test-unit | unit' \
+    >"$MOCK_WORKSPACE/.ralph/command-policy"
+}
+
+_assert_passes_unchanged() {
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "a rewrite reaches a command chained after another (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash "shellcheck -s sh x.sh; ./node_modules/.bin/nx run canonical-prompt:test-unit --skip-nx-cache 2>&1 | tail -20"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh unit pnpm test-unit canonical-prompt --skip-nx-cache$")'
+}
+
+@test "a rewrite keeps the rest of the chain as written (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash "cd apps && pnpm -w run format && git status --short"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "cd apps && pnpm format && git status --short"'
+}
+
+@test "every rewritten command in a chain is rewritten (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash $'pnpm -w run format\npnpm -w run format --check'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "pnpm format\npnpm format --check"'
+}
+
+@test "a [deny] row fires on a command chained after a cd (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash "cd infra && ../node_modules/.bin/env-run --env=e2e-local -- docker compose up -d"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("the lane owns its environment")'
+}
+
+@test "a newline chains commands just as ; does (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash $'cd infra\nnpx env-run --env e2e-local -- docker compose ps'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("the lane owns its environment")'
+}
+
+@test "a [deny] later in the chain wins over a [wrap] earlier in it (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash "pnpm test-unit && pnpm test-e2e"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("containerized")'
+}
+
+@test "the direct-runner check reaches a chained command (0.27.0)" {
+  run _run_guard Bash "cd apps/api && npx vitest run src/a.spec.ts"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Direct test runner")'
+}
+
+@test "a runner after a gate-run.sh command is still judged (0.27.0)" {
+  echo "$(date +%s)" >"$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh unit pnpm test-unit && pnpm exec vitest run"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Direct test runner")'
+}
+
+@test "separators inside a quoted commit message do not chain (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash 'git commit -q -m "docs: note; pnpm nx run api:test-unit && npx vitest run"'
+  _assert_passes_unchanged
+}
+
+@test "a gated script named in a quoted commit message is not wrapped (0.27.0)" {
+  # The [wrap] chain split used to cut at the `;` inside the quotes and
+  # replace the whole commit with `gate-run.sh unit pnpm test-unit passes"`.
+  _chain_policy
+  run _run_guard Bash 'git commit -q -m "test: cover the lane; pnpm test-unit passes"'
+  _assert_passes_unchanged
+}
+
+@test "a heredoc body is not chained commands (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash $'git commit -q -F - <<\'EOF\'\nfix: route tests\n\npnpm nx run api:test-unit; npx vitest run\ncd infra && npx env-run --env=e2e-local -- up\nEOF'
+  _assert_passes_unchanged
+}
+
+@test "a heredoc inside a command substitution is not chained commands (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash $'git commit -q -m "$(cat <<\'EOF\'\nfix: x; npx vitest run\nsecond && pnpm -w run format\nEOF\n)"'
+  _assert_passes_unchanged
+}
+
+@test "a comment is not a chained command (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash "git status # then; npx vitest run"
+  _assert_passes_unchanged
+}
+
+@test "a backgrounding & chains, a 2>&1 redirect does not (0.27.0)" {
+  run _run_guard Bash "nohup node server.js > /tmp/log 2>&1 & npx vitest run"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Direct test runner")'
+}
+
+# --- 0.27.0: pnpm's -s / --silent flag is not a way around the policy ---------
+
+@test "pnpm -s nx meets the project's nx rewrite and [wrap] (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash "pnpm -s nx run api:test-unit"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh unit pnpm test-unit api$")'
+}
+
+@test "pnpm --silent exec nx meets the project's nx rewrite and [wrap] (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash "pnpm --silent exec nx run api:test-unit --skip-nx-cache"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh unit pnpm test-unit api --skip-nx-cache$")'
+}
+
+@test "pnpm run -s <script> meets [wrap] (0.27.0)" {
+  _chain_policy
+  run _run_guard Bash "pnpm run -s test-unit"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh unit pnpm test-unit$")'
+}
+
+@test "pnpm -s vitest is a direct runner (0.27.0)" {
+  run _run_guard Bash "pnpm -s vitest run"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Direct test runner")'
+}
+
+# --- 0.27.0: a [rewrite] regex may use | alternation ---------------------------
+# Fields split on a `|` with whitespace on both sides; a row without one
+# splits on bare `|`, as compact rows always have.
+
+@test "a [rewrite] regex may use alternation (0.27.0)" {
+  printf '%s\n' '[rewrite]' \
+    '^(pnpm|npx) nx run ([^: ]+):test-unit( .*)?$ | pnpm \2:test-unit\3 | either launcher' \
+    >"$MOCK_WORKSPACE/.ralph/command-policy"
+  run _run_guard Bash "npx nx run api:test-unit --watch=false"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "pnpm api:test-unit --watch=false"'
+  run _run_guard Bash "pnpm nx run api:test-unit"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "pnpm api:test-unit"'
+}
+
+@test "a compact [rewrite] row without spaces around | still parses (0.27.0)" {
+  printf '%s\n' '[rewrite]' '^pnpm -w run (.+)$|pnpm \1|no -w workspace flag' \
+    >"$MOCK_WORKSPACE/.ralph/command-policy"
+  run _run_guard Bash "pnpm -w run format"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "pnpm format"'
+}
+
+@test "a [rewrite] reason may contain | itself (0.27.0)" {
+  printf '%s\n' '[rewrite]' '^npx pnpm (.+)$ | pnpm \1 | local pnpm | never npx' \
+    >"$MOCK_WORKSPACE/.ralph/command-policy"
+  run _run_guard Bash "npx pnpm install"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "pnpm install"'
+}
