@@ -833,9 +833,10 @@ _auto_enrich_handoff() {
   # part of the handoff nothing can verify, and a stale block reads exactly
   # like a fresh one. cur-71 carried a "Current task: T012" paragraph under a
   # newer "Next: Tranche D" paragraph for 2h49m with nothing marking either as
-  # current. stream-parser stamps .ralph/handoff-agent-ts on every agent
-  # Edit/Write of handoff.md (the file's own mtime can't answer — the plugin
-  # rewrites it too); turn that into an age the next agent can act on.
+  # current. stream-parser stamps .ralph/handoff-agent-ts whenever the
+  # section's content changes, however it was written (the file's own mtime
+  # can't answer — the plugin rewrites it too); turn that into an age the next
+  # agent can act on.
   local working_set_age=""
   local _ts_file="$workspace/.ralph/handoff-agent-ts"
   if [[ -f "$_ts_file" ]]; then

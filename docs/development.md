@@ -21,7 +21,8 @@ bats tests/
 
 Tests cover:
 
-- `gate-run.sh` — timeout, exit codes, log retention, mkdir-mutex serialization
+- `gate-run.sh` — timeout, exit codes, log retention, mkdir-mutex serialization, the per-verdict working-tree record
+- `tree-fingerprint.sh` — stability, and which working-tree changes move the fingerprint
 - `stream-parser.sh` — signal detection (ROTATE, WARN, GUTTER, TURN_END, DEFER, COMPLETE, RECOVER, HEARTBEAT), stall patterns, heartbeat sidecar
 - `prompt-resolver.sh` — caching, hash checks, fallbacks, multi-line `{{ACTIVITY_TAIL}}` rendering, `task-file-path` breadcrumb across all prompt modes
 - `ralph-evaluate.sh` — flag parsing, ground-truth resolution, report seeding, orchestrator prompt rendering
@@ -61,9 +62,9 @@ Two watchdogs prevent the loop from hanging indefinitely.
 
 Emitted by the stream parser to the loop on stdout:
 
-- `ROTATE` — token threshold hit; loop kills the agent and starts a fresh loop.
+- `ROTATE` — context threshold hit; loop kills the agent and starts a fresh loop. On the Claude CLI the context is the size the API reports for each request; cursor-agent uses a byte estimate.
 - `WARN` — approaching the threshold; agent is told to wrap up.
-- `GUTTER` — hard stuck pattern (e.g., 10 writes/edits to the same file inside a 5-min window with no commit; 5 consecutive shell failures of the same shape), OR agent self-signals via `<ralph>GUTTER</ralph>`. Loop ends with a postmortem bundle. Thresholds tunable via `RALPH_FILE_THRASH_THRESHOLD`, `RALPH_FILE_THRASH_WINDOW_SECONDS`, `RALPH_SHELL_FAIL_THRESHOLD`.
+- `GUTTER` — hard stuck pattern (e.g., 10 writes/edits to the same file inside a 5-min window with no commit; 5 shell failures — or guard denials — of the same command since the last commit), OR agent self-signals via `<ralph>GUTTER</ralph>`. Loop ends with a postmortem bundle. Thresholds tunable via `RALPH_FILE_THRASH_THRESHOLD`, `RALPH_FILE_THRASH_WINDOW_SECONDS`, `RALPH_SHELL_FAIL_THRESHOLD`.
 - `RECOVER` — emitted on every successful `git commit`. Clears any latched GUTTER, the per-loop shell-failure counter, and the per-file write/edit thrash history (a successful commit is evidence of progress).
 - `COMPLETE` — agent emits `<ralph>COMPLETE</ralph>` or `<promise>ALL_TASKS_DONE</promise>`. The parser re-checks the real checkbox state before honoring.
 - `DEFER` — retryable API / network error (rate limit, 5xx, timeout). Loop waits with exponential backoff (15s → 120s + 0–25% jitter) and retries.
@@ -134,6 +135,7 @@ ralph-wiggum-plugin/
 │   ├── prompt-resolver.sh       # Resolves & renders the effective prompt
 │   ├── agent-adapter.sh         # CLI-agnostic invocation layer
 │   ├── gate-run.sh              # Verification-gate wrapper
+│   ├── tree-fingerprint.sh      # Working-tree fingerprint for the gate cache
 │   ├── ralph-evaluate.sh        # Acceptance evaluator
 │   ├── ralph-status.sh          # Operator status snapshot
 │   ├── ralph-supervise.sh       # Wraps a run: notify + auto-resume-once

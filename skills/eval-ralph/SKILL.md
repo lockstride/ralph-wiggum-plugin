@@ -61,10 +61,10 @@ Read breadcrumbs before narrative; they're cheap and orient you.
 | `.ralph/task-summary` | done/total/remaining counts + the task list head. Quick "did it finish?" |
 | `.ralph/acceptance-report.md` | Eval-loop output: Status (CLEAN/…), Last loop, Last mode (VERIFIER/REWORK), Gaps, History. Present ⇒ an eval loop ran. |
 | `.ralph/eval-ground-truth` | Path to the spec `tasks.md` the eval graded against. |
-| `.ralph/gates/` | Per-label gate results: `<label>-latest.{exit,cmd,log,summary}`. `exit` is the authoritative pass/fail. Labels: `basic`, `final`, `e2e`, `lint`, `custom`, `eval-*`. Also `last-run` (`<label> <exit> <run-id>`, 0.24.0) — the end-of-run marker stream-parser consumes. |
+| `.ralph/gates/` | Per-label gate results: `<label>-latest.{exit,cmd,log,summary,tree}`. `exit` is the authoritative pass/fail; `tree` (0.26.0) fingerprints the working tree the verdict ran against. Labels: `basic`, `final`, `e2e`, `lint`, `custom`, `eval-*`. Also `last-run` (`<label> <exit> <run-id>`, 0.24.0) — the end-of-run marker stream-parser consumes. |
 | `.ralph/gates.impl/` | The IMPLEMENTATION phase's gates, moved aside when the eval loop started (0.24.0). If an eval loop ran, this is where the impl-phase record lives — `gates/` holds only the eval loop's own. Absent ⇒ no eval loop ran. |
-| `.ralph/handoff-agent-ts` | Epoch seconds of the last time the AGENT wrote handoff.md (0.24.0). Compare against loop boundaries to judge how stale the `## Working set` was. |
-| `.ralph/errors.log` | Append-only list of every failed shell/gate — the fastest map of where it struggled. |
+| `.ralph/handoff-agent-ts` | Epoch seconds of the last time the `## Working set` content changed (0.24.0; keyed on content, however written, since 0.26.0 — before that only Write/Edit counted, so a Bash-written handoff read as stale). Compare against loop boundaries to judge how stale the working set was. |
+| `.ralph/errors.log` | Append-only list of every failed shell/gate — the fastest map of where it struggled. `GUARD DENY` entries (0.26.0) are commands the guard refused, which never ran; before 0.26.0 they were logged as `SHELL FAIL … exit 1`. |
 | `.ralph/handoff.md` | What the agent left for its next self. Reveals where it got stuck. |
 | `.ralph/activity.log` | The full narrative (can be thousands of lines). Read last after you know what to look for. |
 
@@ -75,6 +75,14 @@ cd <worktree>
 grep -nE "LOOP [0-9]+ (START|END)|SESSION START|COMPLETE|BLOCKED|GUTTER" .ralph/activity.log
 grep -niE "gate (start|end|blocked)|guard (deny|rewrite)|cache|all-check" .ralph/activity.log
 ```
+
+Context size: `TOKENS` lines marked `ctx:api` (0.26.0) carry the context the API
+reported for the session — the figure rotation keys on. Unmarked lines are a byte
+estimate that misses the system prompt, retained thinking and tool-call inputs,
+and runs far below the real context. For a Claude run on an older plugin, read
+the true size from the session transcript under
+`~/.claude/projects/<worktree-path-slug>/`: on each main-chain assistant entry,
+`input_tokens + cache_creation_input_tokens + cache_read_input_tokens`.
 
 Then `sed -n 'A,Bp'` the interesting regions. Read the activity-log legend from
 the emoji: 🧪 gate, 🔀 guard rewrite, ⛔ guard deny, 🚨 GUTTER (agent stuck),
@@ -104,13 +112,17 @@ Most "why did it thrash?" questions come down to the guard. Key mechanics
 version** the run used — the activity log shows the path, e.g.
 `…/ralph-wiggum-plugin/<version>/shared-scripts/gate-run.sh`.
 
-- **Per-label gate cache** (`ralph-guard.sh` `_guard_bash`): a gate is blocked
-  with *"Gate '<label>' already ran since last code write"* when
-  `last_gate_ts.<label> >= last-write-ts`. Crucially, **`last-write-ts` is bumped
-  only by Write/Edit/MultiEdit (code writes)** — never by Bash. So environmental
-  remediation (`nx reset`, `docker compose up/down`, daemon restarts) does *not*
-  invalidate the cache. There is intentionally no `--force`; deleting breadcrumbs
-  doesn't help; `rm` of `.ralph/` is denied as state-tampering.
+- **Per-label gate cache** (`ralph-guard.sh` `_guard_gate_invocation`): a gate is
+  blocked with *"Gate '<label>' already ran and nothing has changed since"* when
+  `last_gate_ts.<label> >= last-write-ts` **and** the working tree matches the one
+  recorded with that label's last verdict (`gates/<label>-latest.tree`, 0.26.0).
+  `last-write-ts` is bumped only by Write/Edit/MultiEdit; the tree record catches
+  edits made through Bash (`sed -i`, heredocs, scripts). Neither moves for
+  environmental remediation (`nx reset`, `docker compose up/down`, daemon
+  restarts) — those touch only ignored paths — so it does *not* invalidate the
+  cache. There is intentionally no `--force`; deleting breadcrumbs doesn't help;
+  `rm` of `.ralph/` is denied as state-tampering. Before 0.26.0 a Bash edit did not
+  re-open the gate: a denial right after a `python3`/`sed -i` edit was a false one.
 - **Completion check** (`ralph-common.sh` `_complete_allowed`): the impl loop and
   the eval loop gate on **different tiers** (0.14.3+). The tier command comes from
   `.ralph/command-policy` `[gates]` (the single source of truth — no defaults, no
@@ -131,7 +143,10 @@ version** the run used — the activity log shows the path, e.g.
   the agent may fall through to a raw (unbreadcrumbed) run.
 - **Direct-runner denial**: raw `vitest`/`cypress`/`jest`/`tsc --noEmit` are
   denied unless routed through `gate-run.sh`; `[rewrite]` rules transparently
-  rewrite (e.g. `pnpm nx` → project script).
+  rewrite (e.g. `pnpm nx` → project script). Since 0.26.0 a `./node_modules/.bin/X`
+  path is matched as the lockfile's exec form (`pnpm X` / `yarn X` / `npx X`), so
+  it is no longer an unguarded spelling, and a `[rewrite]` that would produce a
+  `pnpm <name>` naming no root script is denied instead of emitted.
 
 **The cache is a forcing function, not a bug.** Its purpose is to enforce a core
 Ralph principle: *whenever a gate/test fails, the agent owns it and must fix the
@@ -150,7 +165,7 @@ flakiness at its source, the agent tries to make it pass without a code change �
 agent tries the raw command (lock contention), tries to `rm` the lock or a gate
 breadcrumb (denied), tries re-running the tier command under a different label
 (now **denied** by the guard) → ~tens of minutes wasted, escaping only when a
-*genuine* code/config fix bumps `last-write-ts`. When you see this, the agent
+*genuine* code/config fix changes the working tree. When you see this, the agent
 dodged ownership. As of 0.14.x the main relabel escape hatch is **closed** (the
 guard blocks a pinned tier command under the wrong label, and `rm` of `.ralph/`
 breadcrumbs is denied as state-tampering); the remaining hatch to watch for is:
@@ -217,7 +232,7 @@ project-side flakiness. "No changes needed" is valid.
 - **Evidence over vibes.** Every claim ties to a timestamp, exit code, or
   file:line. Quote the log.
 - **Mechanism over symptom.** "It thrashed" is useless; "the per-label cache
-  blocked re-running `final` because `nx reset` doesn't bump `last-write-ts`" is
+  blocked re-running `final` because `nx reset` changes no file" is
   the answer.
 - **Separate regressions from pre-existing limits.** If the recent changes all
   fired correctly and the pain came from an older design gap or project-side

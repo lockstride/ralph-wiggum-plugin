@@ -43,7 +43,7 @@ Fixed set, two families:
 | `lint`        | Lint-only / type-check-only runs                                | 1200 s          |
 | `format`      | Format-only runs                                                | 1200 s          |
 
-Each label gets its own artifact namespace — `<label>-latest.{log,exit,cmd,summary}`. The `full-latest.cmd` file is what the completion guard `_complete_allowed` uses to refuse `<promise>ALL_TASKS_DONE</promise>` when the impl-loop completion command was spoofed (e.g. running a cheap command under `gate-run.sh full`). The label-lock catches spoofs the other way too — running the tier-`full` command under `gate-run.sh basic` is denied.
+Each label gets its own artifact namespace — `<label>-latest.{log,exit,cmd,summary,tree}`. The `full-latest.cmd` file is what the completion guard `_complete_allowed` uses to refuse `<promise>ALL_TASKS_DONE</promise>` when the impl-loop completion command was spoofed (e.g. running a cheap command under `gate-run.sh full`). The label-lock catches spoofs the other way too — running the tier-`full` command under `gate-run.sh basic` is denied.
 
 Since 0.20.0 the mismatch is caught at the point of the run rather than at COMPLETE. `gate-run.sh full <anything but [gates].full>` exits 64 immediately: nothing executes, no breadcrumb is written, and the message names the label, the pin, and the command you passed. This closes the case where a run's *own work* invalidates the pin — a task that rewrites the gate command means every subsequent tier gate silently stops counting, and pre-0.20 that surfaced only hours later at COMPLETE, where the sole repair (editing loop-managed `.ralph/command-policy`) is denied. If the pin is the stale side, the agent records `.ralph/policy-proposal` and stops; the operator applies it.
 
@@ -67,6 +67,7 @@ $WS/.ralph/gates/
 ├── basic-20260420T104211Z.log
 ├── basic-latest.log              # symlink to most recent (copy on FAT32)
 ├── basic-latest.exit             # single decimal, no newline — the exit code
+├── basic-latest.tree             # fingerprint of the working tree the verdict ran against
 └── activity.log                  # best-effort one-liner per gate (shared)
 ```
 
@@ -202,6 +203,12 @@ Every outcome also overwrites `.ralph/gates/last-run` with one line: `<label> <e
 It used to know by matching `gate-run.sh` in the command the model typed — which `ralph-guard.sh`'s auto-wrap never puts there. The guard rewrites via the PreToolUse hook's `updatedInput`, and the transcript keeps the original `./scripts/gate.sh full`, so on the normal wrapped path the parser saw no gate at all: `## Last gate state` was never written and the consecutive-gate-failure `TURN_END` could not fire. Announcing the end from the process that owns the verdict is rewrite-proof, and also covers the `bash "$(cat .ralph/gate-runner)" final …` form the eval loop's sub-agents use.
 
 Agents never read this file. The `<run-id>` exists only so the parser can tell a fresh end from one it already consumed.
+
+### 5c. Working-tree record (0.26.0).
+
+Every verdict also writes `.ralph/gates/<label>-latest.tree`: a fingerprint (`tree-fingerprint.sh`) of the working tree the gate ran against — `HEAD`, every tracked change, and every untracked file git does not ignore. It is taken when the run ends, so whatever the gate itself rewrote (a `format:write` step, generated files, unignored test artifacts) is part of the record. When no fingerprint can be computed the file is removed rather than left stale.
+
+`ralph-guard.sh` compares against it before refusing a re-run of the same label: a gate whose code changed through Bash — `sed -i`, a heredoc, a script — is not "unchanged" just because no Write/Edit event fired. Changes to ignored paths do not count, so restarting a daemon or resetting a cache still leaves the gate cached. Agents never read this file.
 
 ### 6. Every gate runs detached; your call is a waiter (0.16.0).
 

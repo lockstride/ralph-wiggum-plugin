@@ -2,7 +2,8 @@
 #
 # Five sections, scanned in order: [gates] → [rewrite] → [deny] → [wrap] → [protect].
 # Every Bash command is canonicalized first (env-prefix + pipes/redirects
-# stripped, `pnpm run X` / `pnpm exec X` → `pnpm X`), then matched. [rewrite]
+# stripped, `./node_modules/.bin/X` → the lockfile's exec form, `pnpm run X` /
+# `pnpm exec X` → `pnpm X`), then matched. [rewrite]
 # and [wrap] transparently correct the agent's invocation via updatedInput;
 # only [deny] hard-blocks.
 
@@ -33,7 +34,11 @@ final | pnpm all-check
 
 # ─────────────────────────────────────────────────────────────────────
 # [rewrite] — regex transforms applied before matching. Use for wrapper
-# aliases the canonicalizer can't normalize on its own.
+# aliases the canonicalizer can't normalize on its own. A rewrite that yields
+# `pnpm <name>` where <name> is no root package.json script, pnpm subcommand or
+# node_modules/.bin binary is denied instead — so a blanket rule such as
+# `^pnpm nx (.+)$ | pnpm \1` only lets through the nx targets that have a
+# same-named root script.
 #
 #   ^regex$ | replacement | reason   (backrefs \1, \2, … supported)
 

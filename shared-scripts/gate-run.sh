@@ -96,6 +96,9 @@ WHY
       per-run at .ralph/gates/<label>-<ts>.exit — on EVERY outcome,
       including the runner being signalled (143) — plus a command
       breadcrumb at .ralph/gates/<label>-latest.cmd
+    • Records the working tree each verdict ran against at
+      .ralph/gates/<label>-latest.tree, so the loop's guard can tell a
+      re-run of unchanged code from a re-run after an edit
     • Maintains a .ralph/gates/<label>-latest.log pointer for quick reading
 
 LABELS (fixed set — pick the closest match)
@@ -414,6 +417,18 @@ if [[ "${RALPH_GATE_ROLE:-}" == "runner" ]]; then
     rm -f "$latest_link"
     ln -s "$(basename "$log_file")" "$latest_link" 2>/dev/null ||
       cp "$log_file" "$latest_link" 2>/dev/null || true
+    # 0.26.0: the working tree this verdict ran against, taken at the END of
+    # the run so whatever the gate itself rewrote is part of the record.
+    # ralph-guard.sh re-opens the label's gate cache once the tree differs
+    # from it. Removed rather than left stale when no fingerprint can be
+    # computed — the guard then judges on Write/Edit events alone.
+    local tree
+    tree=$(bash "$(dirname "$_self")/tree-fingerprint.sh" "$workspace" 2>/dev/null) || tree=""
+    if [[ -n "$tree" ]]; then
+      printf '%s' "$tree" >"$gates_dir/$label-latest.tree"
+    else
+      rm -f "$gates_dir/$label-latest.tree"
+    fi
     # 0.3.3 / 0.6.4 breadcrumbs, consumed by the loop's COMPLETE guard and
     # the tier-command label-lock.
     printf '%s' "$code" >"$gates_dir/$label-latest.exit"

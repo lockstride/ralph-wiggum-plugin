@@ -18,7 +18,8 @@ The plugin's intended behaviors, with where each is implemented. Use this as
 the inventory when reviewing the loop's reliability end-to-end.
 
 ### Graceful context management & restarts
-- Stream parser fires `WARN` at 87.5% of the token threshold (`stream-parser.sh:emit_warn_or_rotate`) and touches `.ralph/context-warning-active`.
+- The context size rotation keys on is the one the API reports for each request — system prompt, tools, retained thinking and all tool traffic — on the Claude CLI; `activity.log` marks it `ctx:api` on each `TOKENS` line. cursor-agent reports none and keeps a byte estimate.
+- Stream parser fires `WARN` at `WARN_THRESHOLD` (`check_gutter` in `stream-parser.sh`) and touches `.ralph/context-warning-active`.
 - The framing prompt instructs the agent to check `context-warning-active` and `stop-requested` after every commit and yield with a handoff write if either is present.
 - Loop detects 🤝 `GRACEFUL YIELD` when handoff.md was written this iteration (`_detect_graceful_yield` in `ralph-common.sh`) — distinguishes a good yield from a force-killed `ROTATE` / `TURN_END`.
 - At 100% (`ROTATE_THRESHOLD`), the loop force-kills the agent. The next session reads the inlined handoff block from `build_prompt`.
@@ -36,11 +37,12 @@ the inventory when reviewing the loop's reliability end-to-end.
   - `[deny]` — hard block with `permissionDecision: deny` (e.g. containerized E2E).
   - `[wrap]` — auto-routes other commands through `gate-run.sh <label> <cmd>` transparently. Labels: `basic | full | final | unit | integration | e2e | lint | format`.
   - `[protect]` — bare invocation OK; pipe/redirect denied.
-- Canonicalization (`_canonicalize` in `ralph-guard.sh`): env-prefix stripped, pipes/redirects stripped, `pnpm run X` / `pnpm exec X` normalized to `pnpm X`. Compound chains (`pnpm A && pnpm B`) split — if any segment matches `[wrap]`, the whole chain is rewrapped on just that segment.
+- Canonicalization (`_canonicalize` in `ralph-guard.sh`): env-prefix stripped, pipes/redirects stripped, a package-local binary path (`./node_modules/.bin/X`) mapped to the lockfile's exec form (`pnpm X`, `yarn X` or `npx X`), `pnpm run X` / `pnpm exec X` normalized to `pnpm X`. Compound chains (`pnpm A && pnpm B`) split — if any segment matches `[wrap]`, the whole chain is rewrapped on just that segment.
+- A `[rewrite]` that produces `pnpm <name>` where `<name>` is no root `package.json` script, pnpm subcommand or package-local binary is denied instead of emitted — the denial names the root scripts that do exist.
 - Activity-log emoji: 🔀 `GUARD REWRITE` on transparent rewrites, ⛔ `GUARD DENY` on hard blocks.
 
-### Multi-consecutive gate checks without interleaving writes/edits
-- `ralph-guard.sh`'s gate-without-write check blocks re-running a gate when no Write/Edit happened since the last gate (`LAST_WRITE_TS` vs `LAST_GATE_TS` in `$XDG_STATE_HOME/ralph/<workspace-hash>/`).
+### Multi-consecutive gate checks without an interleaving change
+- `ralph-guard.sh`'s gate cache blocks re-running a gate label when nothing has changed since its last verdict: no Write/Edit since the last run (`LAST_WRITE_TS` vs `LAST_GATE_TS` in `$XDG_STATE_HOME/ralph/<workspace-hash>/`), and a working tree — `HEAD`, tracked changes, untracked files git does not ignore — identical to the one `gate-run.sh` recorded with that verdict (`.ralph/gates/<label>-latest.tree`). An edit made through Bash re-opens the gate; environmental remediation (daemon restarts, cache resets) touches no such file and does not.
 - Prevents the "run gate → read output → re-run gate for more output" anti-pattern that wastes minutes per loop.
 
 ### Gate-level adherence (three-tier model)
@@ -53,7 +55,7 @@ the inventory when reviewing the loop's reliability end-to-end.
 - `.ralph/handoff.md` has three managed sections:
   - `## Working set` — written by the agent before yielding (current task, files in flight, next planned step). The framing reminds it; the Stop hook (`handoff-check.sh`) emits a soft warning if it's stale.
   - `## Last gate state` — rewritten by `stream-parser.sh` after every gate-end.
-  - `## Auto-enriched state` — appended by the loop on `ROTATE` / `TURN_END` (last commit SHA + subject, last `[x]` task, next unchecked task). Mechanical carry-over even when the agent was force-killed.
+  - `## Auto-enriched state` — appended by the loop on `ROTATE` / `TURN_END` (last commit SHA + subject, last `[x]` task, next unchecked task, and how long ago the `## Working set` content last changed — however it was written). Mechanical carry-over even when the agent was force-killed.
 - The next loop inlines the whole file via `build_prompt`'s `## Handoff from previous loop` block.
 
 ### Effective and reliable eval loop
@@ -185,7 +187,7 @@ After the loop starts, Ralph writes to `.ralph/` (git-ignored automatically):
 
 - `progress.md` — human-readable session log
 - `guardrails.md` — lessons learned from past failures (the agent reads this)
-- `errors.log` — failures detected by the stream parser
+- `errors.log` — failures detected by the stream parser, and guard denials (`GUARD DENY`, with the guard's reason)
 - `activity.log` — real-time token usage + tool calls
 - `effective-prompt.md` — the rendered prompt fed to the agent at each loop start
 - `handoff.md` — rolling state document, injected into the framing prompt every loop (see [Handoff state](#handoff-state) below)
@@ -208,7 +210,7 @@ Your commits are your durable memory. Ralph commits frequently during each loop 
 `.ralph/handoff.md` is a rolling state document the framing prompt injects at the start of every loop. It has two sections:
 
 - **`## Last gate state`** — owned by the plugin. `gate-run.sh` writes a structured summary to `.ralph/gates/<label>-latest.summary` on every failed gate (parsed failure signatures + optional `coverage_gaps` block), and `stream-parser` rewrites this section on every gate-end. Do not edit it from the agent.
-- **`## Working set`** — owned by the agent. Update this before yielding the turn — current task, files in flight, next planned step. The plugin emits a soft `Stop`-hook reminder when this section isn't refreshed during a loop.
+- **`## Working set`** — owned by the agent. Update this before yielding the turn — current task, files in flight, next planned step. The plugin emits a soft `Stop`-hook reminder when this section isn't refreshed during a loop, and stamps how long ago its content last changed — a rewrite through Bash counts the same as one through Write/Edit.
 
 A skeleton is seeded automatically by `init_ralph_dir` on first run.
 
@@ -260,8 +262,8 @@ Activity-log feedback: 🔀 `GUARD REWRITE` is logged when `[rewrite]` or `[wrap
 When installed as a Claude Code plugin, Ralph registers a `PreToolUse` hook (`ralph-guard.sh`) that intercepts Bash and Write/Edit tool calls to enforce discipline:
 
 - **Transparent rewrites** — `[rewrite]` regex transforms and `[wrap]` auto-routing through `gate-run.sh` happen via `updatedInput` (no block, no agent retry). Logged to `activity.log` as 🔀 `GUARD REWRITE`.
-- **Hard denies** — state tampering (`rm -rf .ralph/`), direct test-tool invocations (`vitest`/`jest`/`cypress`/`tsc --noEmit` and their `pnpm exec` variants), `[deny]` rules. Logged as ⛔ `GUARD DENY`.
-- **Gate-without-write detection** — blocks re-running a gate when no file has been written since the last gate.
+- **Hard denies** — state tampering (an `rm` or `find -delete` of `.ralph/`, judged per chained command), direct test-tool invocations (`vitest`/`jest`/`cypress`/`tsc --noEmit` and their `pnpm`/`npx`/`yarn` and `node_modules/.bin` variants), `[deny]` rules. Logged as ⛔ `GUARD DENY`. The reason reaches the agent prefixed `[ralph-guard]`, and `errors.log` records it as `GUARD DENY` — the command never ran, so never as `SHELL FAIL`.
+- **Gate-without-change detection** — blocks re-running a gate label when no file has changed since its last verdict, whether through Write/Edit or any other edit to the working tree.
 - **State-file protection** — prevents the agent from tampering with `.ralph/gates/`, `.ralph/activity.log`, and other loop-owned state.
 
 A `Stop` hook (`handoff-check.sh`) emits a soft reminder (`systemMessage` payload) when the `## Working set` section of `handoff.md` wasn't updated during the loop. Advisory only — does not block the agent from yielding.
@@ -272,8 +274,8 @@ The stream parser emits signals that the main loop uses to decide when to rotate
 
 | Signal | Trigger | Effect |
 |---|---|---|
-| `ROTATE` | Token usage ≥ `ROTATE_THRESHOLD` | Hard rotation — agent killed mid-task |
-| `WARN` | Tokens ≥ `WARN_THRESHOLD` (250K of 300K on a 1M-window model, i.e. Opus or any `[1m]` model; 87.5% of rotate elsewhere) | Touches `.ralph/context-warning-active`; agent is supposed to yield at next post-commit check |
+| `ROTATE` | Context ≥ `ROTATE_THRESHOLD` (API-reported on Claude) | Hard rotation — agent killed mid-task |
+| `WARN` | Context ≥ `WARN_THRESHOLD` (250K of 300K on a 1M-window model, i.e. Opus or any `[1m]` model; 87.5% of rotate elsewhere) | Touches `.ralph/context-warning-active`; agent is supposed to yield at next post-commit check |
 | `TURN_END` | 5 consecutive gate failures (configurable via `RALPH_GATE_FAIL_STREAK_THRESHOLD`) | Rotation; next loop reads the freshly-written handoff block |
 | `GUTTER` | Stuck pattern (repeated failures, file thrashing) or agent self-signal `<ralph>GUTTER</ralph>` | Rotation with diagnostic post-mortem |
 | `COMPLETE` | Agent emits `<promise>ALL_TASKS_DONE</promise>` | Loop exits successfully; chains `--evaluate` if set |
@@ -331,7 +333,7 @@ For mode mechanics, artifacts, and limitations, see [docs/development.md → Acc
 | `RALPH_EVAL_FRAMING_TEMPLATE` | — | Custom eval-loop framing template (absolute or workspace-relative path). Rendered with `{{GROUND_TRUTH_PATH}}` / `{{REPORT_PATH}}`. Lets a project point the eval loop at its own orchestrator skill. |
 | `RALPH_EVAL_REPORT_TEMPLATE` | — | Custom acceptance-report seed template (absolute or workspace-relative path). Rendered with `{{GROUND_TRUTH_PATH}}`. Must keep the loop's checkbox-completion contract (`- [ ]` lines drive completion). |
 | `RALPH_MODEL` | per-CLI (`opus` for Claude, `composer-2` for Cursor) | Work-loop model id. Same as `-m/--model`. The Claude default is the **versionless** `opus` alias, so the loop always resolves to the current Opus, which has a 1M window natively. A non-Opus model gets the standard 200K budget unless it carries the `[1m]` context tier (e.g. `sonnet[1m]`). |
-| `ROTATE_THRESHOLD` | `300000` on a 1M-window model (Opus, or any `[1m]` model), `170000` otherwise (Claude); `150000` for cursor-agent | Hard cap — the loop force-kills the agent and rotates context. The 1M window is a ceiling, not a target; stopping at 300K keeps recall sharp and leaves the rest unspent. |
+| `ROTATE_THRESHOLD` | `300000` on a 1M-window model (Opus, or any `[1m]` model), `170000` otherwise (Claude); `150000` for cursor-agent | Hard cap — the loop force-kills the agent and rotates context. Measured on the context the API reports (Claude) or a byte estimate (cursor-agent). The 1M window is a ceiling, not a target; stopping at 300K keeps recall sharp and leaves the rest unspent. |
 | `WARN_THRESHOLD` | `250000` on a 1M-window model, else `ROTATE_THRESHOLD × 7/8` | Rotation *requested* — the loop touches `.ralph/context-warning-active` and the agent yields at its next post-commit check. On 1M models this is pinned rather than derived, so there is a flat 50K landing zone before the hard cap. |
 | `RALPH_EFFORT` | `xhigh` (Claude only) | Reasoning effort for the main work loop: `low\|medium\|high\|xhigh\|max`. Ignored for cursor-agent (no effort knob). The loop-prompt generator always runs at `medium` and is unaffected. |
 | `RALPH_SKIP_GUARDRAILS` | — | Set to `1` to omit the guardrails preamble |

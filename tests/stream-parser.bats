@@ -42,6 +42,22 @@ tool_result_json() {
     "$name" "$bytes" "$lines" "$exit_code" "$path" "$cmd"
 }
 
+# Helper: write .ralph/handoff.md with $1 as its ## Working set body
+handoff_with_working_set() {
+  cat >"$MOCK_WORKSPACE/.ralph/handoff.md" <<EOF
+# Loop Handoff
+
+## Working set
+
+$1
+
+## Last gate state
+
+label: basic
+exit: 0
+EOF
+}
+
 @test "emits ROTATE when token threshold reached" {
   # Each Read adds bytes to BYTES_READ; tokens = total_bytes / 4
   # With ROTATE_THRESHOLD=200, we need 800+ bytes total
@@ -1092,7 +1108,11 @@ HOFF
 # parser records it from the tool event. _auto_enrich_handoff renders it.
 # ---------------------------------------------------------------------------
 
-@test "an agent edit of handoff.md stamps handoff-agent-ts (0.24.0)" {
+@test "an agent edit that changes the working set stamps handoff-agent-ts (0.24.0)" {
+  # 0.26.0: keyed on the section's content, so the edit must change it.
+  handoff_with_working_set "- current task: T001"
+  run_parser "" >/dev/null
+  handoff_with_working_set "- current task: T002"
   local events=""
   events+=$(tool_result_json "Edit" 500 20 0 "$MOCK_WORKSPACE/.ralph/handoff.md" "")
   run_parser "$events" >/dev/null
@@ -1545,4 +1565,198 @@ bpid=$!; sleep 14; kill -INT "$bpid" 2>/dev/null; wait "$bpid" 2>/dev/null; echo
     echo '{"kind":"result","duration_ms":10}'
   } | bash "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE" 1 > /dev/null
   ! grep -q -- "~-" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+# ---------------------------------------------------------------------------
+# 0.26.0: rotation keys on the context the API reports. The byte count never
+# sees the system prompt, retained thinking or any tool call's input; a usage
+# report replaces it, and bytes after a report are added as an estimate until
+# the next one.
+# ---------------------------------------------------------------------------
+
+usage_json() {
+  printf '{"kind":"usage","context_tokens":%d}\n' "$1"
+}
+
+@test "a usage report is the token figure, however few bytes were seen (0.26.0)" {
+  export WARN_THRESHOLD=5000
+  export ROTATE_THRESHOLD=10000
+  run_parser "$(usage_json 4000)" >/dev/null
+  grep -qE 'TOKENS: 4000 / 10000 \(40%\) \[ctx:api ' "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "bytes after a usage report are added as an estimate (0.26.0)" {
+  export WARN_THRESHOLD=5000
+  export ROTATE_THRESHOLD=10000
+  local events
+  events="$(usage_json 4000)"$'\n'"$(tool_result_json "Read" 400 10 0 "/tmp/a.ts")"
+  run_parser "$events" >/dev/null
+  grep -q 'TOKENS: 4100 / 10000' "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "a usage report over ROTATE_THRESHOLD rotates with no tool result (0.26.0)" {
+  export WARN_THRESHOLD=5000
+  export ROTATE_THRESHOLD=10000
+  local output
+  output=$(run_parser "$(usage_json 12000)")
+  echo "$output" | grep -q "^ROTATE$"
+}
+
+@test "a usage report over WARN_THRESHOLD requests the rotation (0.26.0)" {
+  export WARN_THRESHOLD=5000
+  export ROTATE_THRESHOLD=10000
+  local output
+  output=$(run_parser "$(usage_json 6000)")
+  echo "$output" | grep -q "^WARN$"
+  [ -f "$MOCK_WORKSPACE/.ralph/context-warning-active" ]
+}
+
+@test "a later, smaller usage report replaces the earlier one (0.26.0)" {
+  # The CLI compacting its own context shrinks what the session holds.
+  export WARN_THRESHOLD=50000
+  export ROTATE_THRESHOLD=100000
+  local events
+  events="$(usage_json 60000)"$'\n''{"kind":"system","model":"claude-opus-5"}'$'\n'"$(usage_json 20000)"
+  run_parser "$events" >/dev/null
+  tail -n 1 "$MOCK_WORKSPACE/.ralph/activity.log" | grep -q 'TOKENS: 20000 / 100000'
+}
+
+@test "without usage reports the TOKENS line is the unmarked byte estimate (0.26.0)" {
+  export WARN_THRESHOLD=5000
+  export ROTATE_THRESHOLD=10000
+  run_parser "$(tool_result_json "Read" 400 10 0 "/tmp/a.ts")" >/dev/null
+  # PROMPT_CHARS (3000) + 400 bytes read, over 4.
+  grep -q 'TOKENS: 850 / 10000 (8%) \[read:' "$MOCK_WORKSPACE/.ralph/activity.log"
+  ! grep -q 'ctx:api' "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+# ---------------------------------------------------------------------------
+# 0.26.0: a guard denial is logged as one. The command never ran, so it is not
+# a SHELL FAIL, a COMMIT FAILED, or a write — but re-issuing a call the guard
+# keeps refusing still walks the GUTTER stuck-counter.
+# ---------------------------------------------------------------------------
+
+deny_json() { # $1=tool name $2=command (Shell) or path $3=reason
+  if [[ "$1" == "Shell" ]]; then
+    jq -cn --arg c "$2" --arg r "$3" \
+      '{kind:"tool_result",name:"Shell",cmd:$c,path:"",bytes:80,lines:0,exit_code:1,denied:true,deny_reason:$r}'
+  else
+    jq -cn --arg n "$1" --arg p "$2" --arg r "$3" \
+      '{kind:"tool_result",name:$n,cmd:"",path:$p,bytes:80,lines:1,exit_code:1,denied:true,deny_reason:$r}'
+  fi
+}
+
+@test "a guard denial is logged as GUARD DENY, not SHELL FAIL (0.26.0)" {
+  run_parser "$(deny_json Shell 'pnpm basic-check' "Gate 'basic' already ran and nothing has changed since")" >/dev/null
+  grep -q "GUARD DENY: pnpm basic-check → Gate 'basic' already ran" "$MOCK_WORKSPACE/.ralph/errors.log"
+  ! grep -q "SHELL FAIL" "$MOCK_WORKSPACE/.ralph/errors.log"
+  grep -q "SHELL pnpm basic-check → denied by guard" "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "a denied git commit is not logged as COMMIT FAILED (0.26.0)" {
+  run_parser "$(deny_json Shell 'git add -A && git commit -m "wip"' "Blanket 'git add' denied")" >/dev/null
+  ! grep -q "COMMIT FAILED" "$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -q "GUARD DENY: git add -A" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "re-issuing a denied call reaches GUTTER at the shell-fail threshold (0.26.0)" {
+  local events
+  events="$(deny_json Shell 'pnpm basic-check' 'cached')"$'\n'"$(deny_json Shell 'pnpm basic-check' 'cached')"
+  local output
+  output=$(run_parser "$events")
+  echo "$output" | grep -q "^GUTTER$"
+  grep -q "same call denied 2x" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "a denied Write is logged as denied, not as a write (0.26.0)" {
+  local target="$MOCK_WORKSPACE/.ralph/command-policy"
+  run_parser "$(deny_json Write "$target" "Write to '.ralph/command-policy' denied.")" >/dev/null
+  grep -qF "WRITE $target → denied by guard" "$MOCK_WORKSPACE/.ralph/activity.log"
+  ! grep -qF "WRITE $target (" "$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -qF "GUARD DENY: WRITE $target" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "a long failing command counts as one repeat per failure (0.26.0)" {
+  # base64 wraps long input on some platforms; the repeat counter must still
+  # see one line per failure.
+  local long
+  long="pnpm $(printf 'x%.0s' $(seq 1 200))"
+  local events
+  events="$(tool_result_json "Shell" 50 0 1 "" "$long")"$'\n'"$(tool_result_json "Shell" 50 0 1 "" "$long")"
+  run_parser "$events" >/dev/null
+  grep -q "(attempt 2)" "$MOCK_WORKSPACE/.ralph/errors.log"
+  ! grep -q "(attempt 3)" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+# ---------------------------------------------------------------------------
+# 0.26.0: the working set's age is keyed on its content. The agent rewrites the
+# handoff through Bash as often as through Write/Edit, and no tool event
+# reports a Bash write.
+# ---------------------------------------------------------------------------
+
+@test "the first look at the working set records a baseline, no stamp (0.26.0)" {
+  handoff_with_working_set "- current task: T001"
+  run_parser "$(tool_result_json "Read" 100 10 0 "/tmp/a.ts")" >/dev/null
+  [ -f "$MOCK_WORKSPACE/.ralph/handoff-working-set.sum" ]
+  [ ! -f "$MOCK_WORKSPACE/.ralph/handoff-agent-ts" ]
+}
+
+@test "a Bash rewrite of the working set mid-stream stamps its age (0.26.0)" {
+  handoff_with_working_set "- current task: T001"
+  {
+    tool_result_json "Shell" 10 0 0 "" "ls"
+    # Let the parser take its baseline before the rewrite lands.
+    sleep 1
+    handoff_with_working_set "- current task: T002"
+    tool_result_json "Shell" 10 0 0 "" "python3 - rewrites .ralph/handoff.md"
+  } | bash "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE" 1 >/dev/null
+  [ -f "$MOCK_WORKSPACE/.ralph/handoff-agent-ts" ]
+  grep -qE '^[0-9]+$' "$MOCK_WORKSPACE/.ralph/handoff-agent-ts"
+}
+
+@test "a working set changed after the last look is stamped at the next start (0.26.0)" {
+  handoff_with_working_set "- current task: T001"
+  run_parser "" >/dev/null
+  handoff_with_working_set "- current task: T002"
+  run_parser "" >/dev/null
+  [ -f "$MOCK_WORKSPACE/.ralph/handoff-agent-ts" ]
+}
+
+@test "rewriting only the plugin's sections does not stamp the working set (0.26.0)" {
+  handoff_with_working_set "- current task: T001"
+  run_parser "" >/dev/null
+  # What update_handoff_gate_state and _auto_enrich_handoff rewrite.
+  sed -i.bak 's/^exit: 0$/exit: 1/' "$MOCK_WORKSPACE/.ralph/handoff.md"
+  printf '\n## Auto-enriched state\n\n**Last commit**: `abc123 feat: x`\n' >>"$MOCK_WORKSPACE/.ralph/handoff.md"
+  run_parser "$(tool_result_json "Edit" 100 10 0 "$MOCK_WORKSPACE/.ralph/handoff.md")" >/dev/null
+  [ ! -f "$MOCK_WORKSPACE/.ralph/handoff-agent-ts" ]
+}
+
+@test "an identical rewrite of the working set does not stamp (0.26.0)" {
+  handoff_with_working_set "- current task: T001"
+  run_parser "" >/dev/null
+  handoff_with_working_set "- current task: T001"
+  run_parser "$(tool_result_json "Write" 100 10 0 "$MOCK_WORKSPACE/.ralph/handoff.md")" >/dev/null
+  [ ! -f "$MOCK_WORKSPACE/.ralph/handoff-agent-ts" ]
+}
+
+@test "the handoff file created with a working set counts as a change (0.26.0)" {
+  rm -f "$MOCK_WORKSPACE/.ralph/handoff.md"
+  run_parser "" >/dev/null
+  handoff_with_working_set "- current task: T001"
+  run_parser "$(tool_result_json "Write" 100 10 0 "$MOCK_WORKSPACE/.ralph/handoff.md")" >/dev/null
+  [ -f "$MOCK_WORKSPACE/.ralph/handoff-agent-ts" ]
+}
+
+@test "with usage reports, SESSION END gives each session its own context (0.26.0)" {
+  # The second session follows the CLI compacting its own context: its figure
+  # is its own context, not a negative delta from the one it inherited.
+  export WARN_THRESHOLD=900000
+  export ROTATE_THRESHOLD=1000000
+  local events
+  events='{"kind":"system","model":"claude-opus-5"}'$'\n'"$(usage_json 80000)"$'\n''{"kind":"result","duration_ms":1000}'
+  events+=$'\n''{"kind":"system","model":"claude-opus-5"}'$'\n'"$(usage_json 30000)"$'\n''{"kind":"result","duration_ms":1000}'
+  run_parser "$events" >/dev/null
+  grep -q "SESSION END: 1000ms, ~80000 tokens this session" "$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -q "SESSION END: 1000ms, ~30000 tokens this session" "$MOCK_WORKSPACE/.ralph/activity.log"
 }

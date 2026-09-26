@@ -792,3 +792,42 @@ EOF
   [ "$status" -eq 0 ]
   grep -q "clean run" "$MOCK_WORKSPACE/.ralph/gates/basic-latest.log"
 }
+
+# --- 0.26.0: each verdict records the working tree it ran against -------------
+# ralph-guard.sh's gate cache re-opens once the tree differs from this record,
+# so an edit made through Bash — no Write/Edit event — still counts.
+
+@test "a verdict records the working tree it ran against (0.26.0)" {
+  bash "$SCRIPTS_DIR/gate-run.sh" basic true
+  [ -s "$MOCK_WORKSPACE/.ralph/gates/basic-latest.tree" ]
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gates/basic-latest.tree")" = \
+    "$(bash "$SCRIPTS_DIR/tree-fingerprint.sh" "$MOCK_WORKSPACE")" ]
+}
+
+@test "the recorded tree includes what the gate itself wrote (0.26.0)" {
+  # A gate that rewrites files (format:write, generated sources) must not
+  # leave its own output looking like a code change afterwards.
+  bash "$SCRIPTS_DIR/gate-run.sh" basic sh -c 'echo formatted > "$RALPH_WORKSPACE/generated.ts"'
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gates/basic-latest.tree")" = \
+    "$(bash "$SCRIPTS_DIR/tree-fingerprint.sh" "$MOCK_WORKSPACE")" ]
+}
+
+@test "a failing verdict records the tree too (0.26.0)" {
+  run bash "$SCRIPTS_DIR/gate-run.sh" unit false
+  [ "$status" -eq 1 ]
+  [ -s "$MOCK_WORKSPACE/.ralph/gates/unit-latest.tree" ]
+}
+
+@test "no tree record is left behind when none can be computed (0.26.0)" {
+  # Outside a git work tree there is no fingerprint; a stale record from an
+  # earlier run would compare against the wrong tree.
+  local ws
+  ws=$(mktemp -d "$BATS_TMPDIR/ralph-nogit-XXXXXX")
+  mkdir -p "$ws/.ralph/gates"
+  printf 'stale' >"$ws/.ralph/gates/basic-latest.tree"
+  # The ceiling keeps git from finding a repository above the temp dir.
+  GIT_CEILING_DIRECTORIES="$BATS_TMPDIR" RALPH_WORKSPACE="$ws" \
+    bash "$SCRIPTS_DIR/gate-run.sh" basic true
+  [ ! -e "$ws/.ralph/gates/basic-latest.tree" ]
+  rm -rf "$ws"
+}

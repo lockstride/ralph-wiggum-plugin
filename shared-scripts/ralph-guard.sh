@@ -5,7 +5,8 @@
 # (Bash, Write, Edit, MultiEdit) to enforce mechanical constraints the
 # agent cannot route around:
 #
-#   - Gate-without-write block (Bash: gate-run.sh without intervening write)
+#   - Gate-without-change block (Bash: a gate re-run with no Write/Edit and no
+#     working-tree change since that label's last verdict)
 #   - Direct-test-tool denial (Bash: vitest/cypress/tsc without gate-run.sh)
 #   - Command-policy enforcement (Bash: .ralph/command-policy —
 #     gates/rewrite/deny/wrap/protect)
@@ -16,10 +17,12 @@
 # State lives outside the workspace at:
 #   $XDG_STATE_HOME/ralph/<sha256(realpath(workspace))>/
 #   (fallback: $HOME/.local/state/ralph/...)
+# The working-tree record each verdict ran against is gate-run.sh's, beside
+# the other gate breadcrumbs: .ralph/gates/<label>-latest.tree.
 #
 # Hook input: JSON on stdin with tool_name and tool_input.
-# Hook output: JSON on stdout — {"result":"block","reason":"..."} to deny,
-#              or nothing (exit 0) to allow.
+# Hook output: JSON on stdout — a PreToolUse permissionDecision (deny, or
+#              allow with updatedInput), or nothing (exit 0) to allow as-is.
 
 set -euo pipefail
 
@@ -91,6 +94,9 @@ _log_intercept() {
   printf '[%s] %s GUARD %s %s\n' "$ts" "$emoji" "$kind" "$detail" >>"$log" 2>/dev/null || true
 }
 
+# Keep in sync with the tool_result branch of agent-adapter.sh's Claude filter.
+RALPH_GUARD_DENY_MARKER="[ralph-guard] "
+
 _block() {
   # 0.12.3: Use Claude Code's documented PreToolUse hook response format.
   # The legacy `{"result":"block","reason":"..."}` form is SILENTLY IGNORED
@@ -100,9 +106,14 @@ _block() {
   # etc. all went through unblocked because the hook output was unrecognized.
   #
   # 0.12.5: also log to activity.log so operators see the intercept.
+  #
+  # 0.26.0: the reason reaches the agent as the failed tool call's result, so
+  # it opens with RALPH_GUARD_DENY_MARKER. The marker is how agent-adapter.sh
+  # tells a denial — the command never ran — from a command that ran and
+  # failed, so the parser logs it as a GUARD DENY rather than a SHELL FAIL.
   local reason="$1"
   _log_intercept "⛔" "DENY" "${TOOL_INPUT_CMD:-${TOOL_INPUT_FILE_PATH:-?}} → $reason"
-  jq -nc --arg reason "$reason" \
+  jq -nc --arg reason "${RALPH_GUARD_DENY_MARKER}${reason}" \
     '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$reason}}' \
     2>/dev/null
   exit 0
@@ -164,8 +175,34 @@ _strip_pipes_redirects() {
   echo "$cmd" | sed -E 's/[[:space:]]+$//'
 }
 
+# 0.26.0: a package-local binary spelled out by path — `./node_modules/.bin/nx`,
+# `../node_modules/.bin/vitest`, or absolute — is exactly what the workspace's
+# package manager resolves for `pnpm nx` / `npx nx` / `yarn nx`. Left as a
+# path it matches no rule, which makes it an unguarded, uncached way to run
+# anything a rule exists for. Rewritten to the package manager's own exec form
+# (named by the lockfile), every [rewrite]/[deny]/[wrap] rule and the
+# direct-runner denial see the command it is, and wherever the canonical form
+# is emitted it still runs the same binary.
+_normalize_local_bin() {
+  local cmd="$1"
+  local re='^([^[:space:]]*/)?node_modules/\.bin/([^[:space:]/]+)(.*)$'
+  if [[ "$cmd" =~ $re ]]; then
+    local tool="${BASH_REMATCH[2]}" rest="${BASH_REMATCH[3]}" exec_form
+    if [[ -f "$WORKSPACE/pnpm-lock.yaml" ]]; then
+      exec_form="pnpm"
+    elif [[ -f "$WORKSPACE/yarn.lock" ]]; then
+      exec_form="yarn"
+    else
+      exec_form="npx"
+    fi
+    cmd="$exec_form $tool$rest"
+  fi
+  echo "$cmd"
+}
+
 # Compose the canonicalization pipeline:
-#   strip env prefix → strip pipes/redirects → normalize pnpm wrappers
+#   strip env prefix → strip pipes/redirects → package-local binary path →
+#   normalize pnpm wrappers
 # The result is the form used for matching against [deny]/[wrap] rules.
 # [rewrite] rules are applied on top of this (in _enforce_command_policy)
 # to handle project-specific patterns like `pnpm nx X → pnpm X`.
@@ -173,6 +210,7 @@ _canonicalize() {
   local cmd
   cmd=$(_strip_env_prefix "$1")
   cmd=$(_strip_pipes_redirects "$cmd")
+  cmd=$(_normalize_local_bin "$cmd")
   cmd=$(_normalize_pnpm "$cmd")
   echo "$cmd"
 }
@@ -348,6 +386,57 @@ _apply_rewrites() {
       return 0
     fi
   done <"$rwfile"
+}
+
+# pnpm's own subcommands: `pnpm <name>` for these never looks for a script.
+_is_pnpm_builtin() {
+  case "$1" in
+    add | audit | bin | cat-file | cat-index | config | create | dedupe | deploy | \
+      dlx | doctor | env | exec | fetch | find-hash | i | import | init | install | \
+      install-test | it | licenses | link | list | ln | ls | outdated | pack | patch | \
+      patch-commit | patch-remove | prune | publish | rb | rebuild | recursive | \
+      remove | restart | rm | root | run | run-script | self-update | server | setup | \
+      start | stop | store | t | test | tst | un | uninstall | unlink | up | update | \
+      upgrade | why)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# 0.26.0: a [rewrite] must not hand the shell a pnpm script that does not exist.
+#
+# A blanket rule like `^pnpm nx (.+)$ | pnpm \1` is right for every nx target
+# with a same-named root script and wrong for every other one: it turns a valid
+# `pnpm nx run <project>:<target>` into a `pnpm <project>:<target>` that can
+# only fail "command not found", which reads as a broken command and invites a
+# hunt for a spelling the policy does not see. When the rewritten
+# `pnpm <name>` names no root script, pnpm subcommand or package-local binary,
+# deny it instead and say which scripts do exist.
+#   $1 = rewritten canonical command
+_deny_unresolvable_rewrite() {
+  local canonical="$1"
+  local re='^pnpm[[:space:]]+([^[:space:]]+)'
+  [[ "$canonical" =~ $re ]] || return 0
+  local name="${BASH_REMATCH[1]}"
+  # A flag (-w, --filter, -r …) or a pnpm subcommand is not a script lookup.
+  [[ "$name" == -* ]] && return 0
+  _is_pnpm_builtin "$name" && return 0
+  local pkg="$WORKSPACE/package.json"
+  [[ -f "$pkg" ]] || return 0
+  [[ -e "$WORKSPACE/node_modules/.bin/$name" ]] && return 0
+  local has
+  has=$(jq -r --arg n "$name" '(.scripts // {}) | has($n)' "$pkg" 2>/dev/null) || return 0
+  [[ "$has" == "false" ]] || return 0
+
+  # Suggest root scripts that run the same target: for an nx-style
+  # `<project>:<target>` name, those whose name contains <target>.
+  local target="${name#*:}" near
+  target="${target#_}"
+  near=$(jq -r --arg t "$target" \
+    '[(.scripts // {}) | keys[] | select(contains($t))] | .[:8] | map("pnpm " + .) | join(", ")' \
+    "$pkg" 2>/dev/null) || near=""
+  _block "Command-policy [rewrite] turned this command into '${canonical}', but '${name}' is not a script in package.json or a binary in node_modules/.bin, so it could only fail with 'command not found'. Run a script that exists${near:+ instead — e.g. ${near}}. If the [rewrite] rule itself is wrong, record the corrected row and a one-line why in .ralph/policy-proposal for the operator."
 }
 
 _emit_rewrite() {
@@ -610,6 +699,8 @@ _enforce_command_policy() {
     _REWRITE_CANONICAL="$canonical"
   fi
   [[ -n "$dnfile" ]] && _apply_deny "$canonical" "$dnfile"
+  # After [deny], so an explicit deny row keeps its own, more specific reason.
+  [[ -n "$_REWRITE_CANONICAL" ]] && _deny_unresolvable_rewrite "$canonical"
   [[ -n "$wrfile" ]] && _apply_wrap "$cmd" "$canonical" "$wrfile"
   [[ -n "$ptfile" ]] && _apply_protect "$cmd" "$canonical" "$ptfile"
 
@@ -645,18 +736,70 @@ _enforce_command_policy() {
 # Bash dispatch
 # ---------------------------------------------------------------------------
 
+# 0.26.0: judge a deletion one chained command at a time. The command that
+# deletes must itself name .ralph as a path component (`.ralph-postmortems/`
+# is a different directory) — an `rm` of something else followed by a
+# read-only `grep … .ralph/…` later in the chain is not tampering. A deletion
+# is `rm`, with or without flags, or `find … -delete`, once env assignments and
+# the sudo/command/builtin/exec/nohup/time/xargs wrappers in front are peeled.
+_deny_ralph_deletion() {
+  local cmd="$1"
+  local ralph_path='(^|[^A-Za-z0-9_.-])\.ralph([^A-Za-z0-9_.-]|$)'
+  local assignment='^[A-Za-z_][A-Za-z0-9_]*='
+  local _sep seg first in_xargs skip_value
+  _sep=$(printf '\037')
+  local IFS="$_sep"
+  # shellcheck disable=SC2046  # intentional word splitting on the sentinel
+  for seg in $(printf '%s' "$cmd" | tr '\n' "$_sep" |
+    sed -E "s/[[:space:]]*(&&|\|\||;|\||&)[[:space:]]*/$_sep/g"); do
+    in_xargs=0
+    skip_value=0
+    # Peel the words in front of the command that actually runs.
+    while :; do
+      seg="${seg#"${seg%%[![:space:]]*}"}"
+      first="${seg%%[[:space:]]*}"
+      [[ -n "$first" ]] || break
+      if [[ $skip_value -eq 1 ]]; then
+        skip_value=0
+      elif [[ $in_xargs -eq 1 && "$first" == -* ]]; then
+        # xargs options, plus the value of those that take it separately.
+        case "$first" in
+          -n | -I | -L | -P | -d | -E | -s) skip_value=1 ;;
+        esac
+      else
+        case "$first" in
+          xargs) in_xargs=1 ;;
+          sudo | command | builtin | exec | nohup | time) ;;
+          *=*) [[ "$first" =~ $assignment ]] || break ;;
+          *) break ;;
+        esac
+      fi
+      seg="${seg#"$first"}"
+    done
+    case "$first" in
+      rm | '\rm' | */rm)
+        if printf '%s' "$seg" | grep -qE "$ralph_path"; then
+          _block "State tampering denied: cannot delete .ralph/ directory or contents via rm. These are managed by the loop."
+        fi
+        ;;
+      find | */find)
+        if printf '%s' "$seg" | grep -qE "$ralph_path" &&
+          printf '%s ' "$seg" | grep -qE '[[:space:]]-delete[[:space:]]'; then
+          _block "State tampering denied: cannot delete .ralph/ contents via find -delete."
+        fi
+        ;;
+    esac
+  done
+  return 0
+}
+
 _guard_bash() {
   local cmd="$TOOL_INPUT_CMD"
   [[ -z "$cmd" ]] && return 0
 
   # --- State-tampering denial ---
   # Block attempts to delete or manipulate .ralph/ state
-  if echo "$cmd" | grep -qE '(rm\s+(-[a-zA-Z]*[rf]|--force|--recursive)\s+|rm\s+-[a-zA-Z]*\s+).*\.ralph(/|$)'; then
-    _block "State tampering denied: cannot delete .ralph/ directory or contents via rm. These are managed by the loop."
-  fi
-  if echo "$cmd" | grep -qE 'find\s+.*\.ralph.*-delete'; then
-    _block "State tampering denied: cannot delete .ralph/ contents via find -delete."
-  fi
+  _deny_ralph_deletion "$cmd"
   # Block hand-forging gate breadcrumbs. gate-run.sh is the only writer of
   # .ralph/gates/*-latest.{exit,cmd,log,summary}; the completion guard trusts
   # those files. An agent that can't locate gate-run.sh must not reconstruct
@@ -674,11 +817,13 @@ _guard_bash() {
   # --- Direct test tool denial ---
   # Block direct invocations of test tools without gate-run.sh wrapper.
   # Only bypass when the command is going through gate-run.sh itself.
+  # 0.26.0: every package-manager exec form is covered — _canonicalize maps a
+  # `node_modules/.bin/<tool>` path onto whichever of them the lockfile names.
   if ! echo "$cmd" | grep -qE 'gate-run\.sh'; then
-    if echo "$canonical" | grep -qE '^(exec )?(vitest|npx vitest|pnpm vitest|yarn vitest|jest|npx jest|cypress|npx cypress|pnpm cypress)(\s|$)'; then
+    if echo "$canonical" | grep -qE '^(exec )?((npx|pnpm|yarn) )?(vitest|jest|cypress)(\s|$)'; then
       _block "Direct test runner invocation denied — bypasses the gate-run.sh breadcrumbs the completion guard depends on. Use a script from .ralph/command-policy [wrap] for your test tier (unit/integration/e2e); most accept extra args for targeted runs (e.g. a single spec file). The hook routes it through gate-run.sh automatically."
     fi
-    if echo "$canonical" | grep -qE '^(exec )?(tsc|npx tsc|pnpm tsc)\s+--noEmit'; then
+    if echo "$canonical" | grep -qE '^(exec )?((npx|pnpm|yarn) )?tsc\s+--noEmit'; then
       _block "Direct tsc invocation denied — bypasses the gate-run.sh breadcrumbs the completion guard depends on. Use a script from .ralph/command-policy [wrap] that runs type-check (often rolled into a basic-check or dedicated lint script)."
     fi
   fi
@@ -703,7 +848,7 @@ _guard_bash() {
   # .ralph/command-policy: [gates] [rewrite] [deny] [wrap] [protect].
   _enforce_command_policy "$cmd" "$canonical"
 
-  # --- Gate-without-write check (per-label) ---
+  # --- Gate-without-change check (per-label) ---
   # Runs here for a command that already invokes the harness itself. The
   # auto-wrapped path cannot reach this point — _enforce_command_policy
   # exits via _emit_rewrite — so it calls _guard_gate_invocation directly
@@ -711,7 +856,7 @@ _guard_bash() {
   _guard_gate_invocation "$cmd" "$canonical"
 }
 
-# --- Gate-without-write check (per-label) ---
+# --- Gate-without-change check (per-label) ---
 # Different labels run different commands, so a successful 'basic' does
 # NOT make a subsequent 'full' redundant — the cache must be tracked
 # per label, not globally. (Without this, [risky] tasks that need 'full'
@@ -793,7 +938,7 @@ _guard_gate_invocation() {
     done
     if [[ $_ok -eq 0 ]]; then
       local _expected_pretty="${expected_tiers// /|}"
-      _block "The tier-gate command '${gated_cmd}' must run under label '${_expected_pretty}', not '${label}'. A pass under '${label}' lands in a per-label cache the completion/eval guards don't read, AND escapes the '${_expected_pretty}' gate cache — re-running a tier command under a fresh label to fish for green is dodging ownership of the failure. Re-run as: gate-run.sh ${_expected_pretty%%|*} ${gated_cmd}. If that label reports it already ran since your last code edit, the cache is signalling: FIX the failing code (you own every failure, flaky infra included)."
+      _block "The tier-gate command '${gated_cmd}' must run under label '${_expected_pretty}', not '${label}'. A pass under '${label}' lands in a per-label cache the completion/eval guards don't read, AND escapes the '${_expected_pretty}' gate cache — re-running a tier command under a fresh label to fish for green is dodging ownership of the failure. Re-run as: gate-run.sh ${_expected_pretty%%|*} ${gated_cmd}. If that label reports it already ran with nothing changed since, the cache is signalling: FIX the failing code (you own every failure, flaky infra included)."
     fi
   fi
 
@@ -820,13 +965,44 @@ _guard_gate_invocation() {
     _verdict_ts=$(stat -f '%m' "$_gate_exit_f" 2>/dev/null || stat -c '%Y' "$_gate_exit_f" 2>/dev/null || echo 0)
   fi
 
+  # 0.26.0: a Write/Edit event is not the only way code changes — a Bash
+  # edit re-opens the gate too, via _tree_changed_since_verdict. Checked last,
+  # and only when everything else says deny: it is the one costly test.
   if [[ $_inflight -eq 0 ]] && [[ "$_verdict_ts" -ge "$last_gate" ]] &&
-    [[ "$last_gate" -gt 0 ]] && [[ "$last_gate" -ge "$last_write" ]]; then
-    _block "Gate '${label}' already ran since last code write — output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: edit code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose. (Other gate labels can still run — this cache is per-label.)"
+    [[ "$last_gate" -gt 0 ]] && [[ "$last_gate" -ge "$last_write" ]] &&
+    ! _tree_changed_since_verdict "$label"; then
+    _block "Gate '${label}' already ran and nothing has changed since — no Write/Edit, and no tracked or untracked file differs from the tree it ran against. Output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: change code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose. (Other gate labels can still run — this cache is per-label.)"
   fi
 
   # Record the per-label gate invocation timestamp
   _write_ts "$last_gate_ts_file"
+}
+
+# 0.26.0: whether the working tree differs from the one the label's last
+# verdict ran against.
+#
+# last-write-ts moves only on Write/Edit/MultiEdit, but the agent also edits
+# through Bash — python heredocs, `sed -i`, `perl -i`, `cat >` — and a cache
+# keyed on tool events alone denies a re-run of code that HAS changed, which
+# teaches the agent to route around the gate.
+#
+# gate-run.sh records the tree's fingerprint (tree-fingerprint.sh) as
+# <label>-latest.tree at the END of every run, so whatever the gate itself
+# rewrote — a format:write step, test artifacts git does not ignore — is part
+# of the record rather than a change. Environmental remediation (nx reset,
+# docker restarts) touches no tracked or unignored file and still leaves the
+# gate cached. A Bash edit made while the same label's gate is running lands
+# inside that record and is not seen as a change; a Write/Edit then still is.
+#
+# Can only re-open a gate, never close one: no record, or no fingerprint now,
+# means "unknown" and the timestamps alone decide.
+_tree_changed_since_verdict() {
+  local label="$1"
+  local recorded current
+  recorded=$(cat "$WORKSPACE/.ralph/gates/${label}-latest.tree" 2>/dev/null) || recorded=""
+  [[ -n "$recorded" ]] || return 1
+  current=$(bash "$PLUGIN_ROOT/shared-scripts/tree-fingerprint.sh" "$WORKSPACE" 2>/dev/null) || current=""
+  [[ -n "$current" && "$current" != "$recorded" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -878,7 +1054,8 @@ _guard_write() {
 
   # --- Record WRITE event ---
   # last-write-ts invalidates the per-label gate cache: a gate stays cached
-  # until the agent writes code. Only *code/artifact* writes should count.
+  # until the agent writes code (or the working tree otherwise changes — see
+  # _tree_changed_since_verdict). Only *code/artifact* writes should count.
   # Writes that reach here under .ralph/ are the allowlisted loop bookkeeping
   # files (handoff/errors/guardrails/diagnosis/progress/acceptance-report) —
   # everything else under .ralph/ was denied above. Bumping the cache for

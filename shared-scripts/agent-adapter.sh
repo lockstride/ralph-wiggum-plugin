@@ -16,7 +16,8 @@
 #   {"kind":"system","model":"<id>"}
 #   {"kind":"assistant_text","text":"<chunk>"}
 #   {"kind":"tool_use","name":"<Read|Write|Shell|Other>","path":"<path>","cmd":"<cmd>"}
-#   {"kind":"tool_result","name":"<Read|Write|Shell|Other>","path":"<path>","cmd":"<cmd>","bytes":N,"lines":N,"exit_code":N}
+#   {"kind":"tool_result","name":"<Read|Write|Shell|Other>","path":"<path>","cmd":"<cmd>","bytes":N,"lines":N,"exit_code":N,"denied":B,"deny_reason":"<why>"}
+#   {"kind":"usage","context_tokens":N}   (claude only: the API-reported context size)
 #   {"kind":"result","duration_ms":N}
 #   {"kind":"error","message":"<msg>"}
 #   {"kind":"rate_limit","status":"<allowed|rejected>","resets_at":N}
@@ -220,7 +221,18 @@ foreach (try inputs catch empty) as $e (
     # larger than the orchestrator actually held. See SIDECHAIN_CHARS in
     # stream-parser.sh. Absent on CLIs/versions without the field → false.
     ((($e.parent_tool_use_id // null) != null) or ($e.isSidechain // false)) as $sc
-    | (($e.message.content // [])[] |
+    # 0.26.0: the context this session actually holds, as the API reports it —
+    # every input token of the request (uncached, cache-written and cache-read),
+    # i.e. system prompt, tools, retained thinking and all tool traffic so far.
+    # The parser's byte count sees only a fraction of that. A sub-agent's usage
+    # is its own window, so only the main chain reports.
+    | ( ( if ($sc | not) then
+            ($e.message.usage // {}) as $u
+            | (($u.input_tokens // 0) + ($u.cache_creation_input_tokens // 0)
+               + ($u.cache_read_input_tokens // 0)) as $ctx
+            | if $ctx > 0 then {kind:"usage", context_tokens:$ctx} else empty end
+          else empty end ),
+      (($e.message.content // [])[] |
       if .type == "text" then
         {kind:"assistant_text", text:(.text // ""), sidechain:$sc}
       elif .type == "tool_use" then
@@ -234,7 +246,7 @@ foreach (try inputs catch empty) as $e (
             {kind:"tool_use", name:$tname, path:"", sidechain:$sc}
           end
       else empty end
-    )
+    ))
   elif $e.type == "user" then
     . as $state |
     ((($e.parent_tool_use_id // null) != null) or ($e.isSidechain // false)) as $sc |
@@ -247,11 +259,17 @@ foreach (try inputs catch empty) as $e (
             elif ($c | type) == "array" then ($c | map(.text // "") | join("\n"))
             else "" end
           ) as $txt
+        # 0.26.0: a denial by ralph-guard.sh — the call never ran. Its reason
+        # opens with the guard's marker (RALPH_GUARD_DENY_MARKER there; keep
+        # the two in sync).
+        | ((.is_error // false) and ($txt | startswith("[ralph-guard] "))) as $denied
         | {kind:"tool_result",
            name: $info.name,
            path: $info.path,
            cmd: $info.cmd,
            sidechain: $sc,
+           denied: $denied,
+           deny_reason: (if $denied then ($txt | ltrimstr("[ralph-guard] ") | .[0:240]) else "" end),
            bytes: ($txt | length),
            lines: (if ($info.name | IN("Read","Edit","Write","NotebookEdit","MultiEdit"))
                    then ($txt | split("\n") | length) else 0 end),

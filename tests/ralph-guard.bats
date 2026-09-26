@@ -1350,3 +1350,222 @@ EOF
     ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
   fi
 }
+
+# --- 0.26.0: denials carry the guard's marker --------------------------------
+# agent-adapter.sh reads the marker to tell a denial (the command never ran)
+# from a command that ran and failed.
+
+@test "a denial reason opens with the guard marker (0.26.0)" {
+  run _run_guard Bash "rm -rf .ralph/"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | startswith("[ralph-guard] State tampering")'
+}
+
+# --- 0.26.0: deletions are judged one chained command at a time --------------
+
+_assert_allowed() {
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' 2>/dev/null
+  fi
+}
+
+_assert_tamper_denied() {
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("State tampering")'
+}
+
+@test "rm of another path, then a read of .ralph/ later in the chain, is allowed (0.26.0)" {
+  run _run_guard Bash 'rm -rf .playwright-mcp; git status --porcelain; grep -n "Final gate" .ralph/acceptance-report.md'
+  _assert_allowed
+}
+
+@test "rm naming .ralph/ is denied wherever it sits in the chain (0.26.0)" {
+  run _run_guard Bash "cd sub && rm -f .ralph/gates/final-latest.exit"
+  _assert_tamper_denied
+}
+
+@test "rm of .ralph/ is denied without any flag (0.26.0)" {
+  run _run_guard Bash "rm .ralph/handoff.md"
+  _assert_tamper_denied
+}
+
+@test "rm of .ralph as a path component is denied, whatever follows it (0.26.0)" {
+  run _run_guard Bash 'rm -rf "$PWD/.ralph" other-dir'
+  _assert_tamper_denied
+}
+
+@test "rm of .ralph-postmortems is not .ralph state (0.26.0)" {
+  run _run_guard Bash "rm -rf .ralph-postmortems/old"
+  _assert_allowed
+}
+
+@test "rm behind env assignments and sudo is still judged (0.26.0)" {
+  run _run_guard Bash "FOO=1 sudo rm -rf .ralph"
+  _assert_tamper_denied
+}
+
+@test "rm run by xargs is still judged (0.26.0)" {
+  run _run_guard Bash "echo x | xargs -n 1 rm -rf .ralph/gates"
+  _assert_tamper_denied
+}
+
+@test "find -delete elsewhere, then a read of .ralph/, is allowed (0.26.0)" {
+  run _run_guard Bash "find src -name '*.tmp' -delete; cat .ralph/activity.log"
+  _assert_allowed
+}
+
+# --- 0.26.0: package-local binaries canonicalize to the package manager's exec form
+
+@test "./node_modules/.bin/vitest is a direct runner in a pnpm workspace (0.26.0)" {
+  touch "$MOCK_WORKSPACE/pnpm-lock.yaml"
+  run _run_guard Bash "./node_modules/.bin/vitest run src/a.spec.ts"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Direct test runner")'
+}
+
+@test "./node_modules/.bin/jest is a direct runner in a pnpm workspace (0.26.0)" {
+  touch "$MOCK_WORKSPACE/pnpm-lock.yaml"
+  run _run_guard Bash "./node_modules/.bin/jest --watch=false"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Direct test runner")'
+}
+
+@test "an absolute node_modules/.bin/vitest path in an npm workspace is a direct runner (0.26.0)" {
+  touch "$MOCK_WORKSPACE/package-lock.json"
+  run _run_guard Bash "$MOCK_WORKSPACE/node_modules/.bin/vitest run"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Direct test runner")'
+}
+
+@test "../node_modules/.bin/tsc --noEmit is denied in a yarn workspace (0.26.0)" {
+  touch "$MOCK_WORKSPACE/yarn.lock"
+  run _run_guard Bash "../node_modules/.bin/tsc --noEmit -p apps/api"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Direct tsc")'
+}
+
+@test "./node_modules/.bin/nx meets the project's nx rewrite and [wrap] (0.26.0)" {
+  touch "$MOCK_WORKSPACE/pnpm-lock.yaml"
+  echo '{"scripts":{"api:test-coverage":"nx run api:test-coverage"}}' >"$MOCK_WORKSPACE/package.json"
+  printf '%s\n' '[rewrite]' '^pnpm nx (.+)$ | pnpm \1 | pnpm nx bypasses [wrap]' '' \
+    '[wrap]' 'pnpm api:test-coverage | unit' >"$MOCK_WORKSPACE/.ralph/command-policy"
+  run _run_guard Bash "./node_modules/.bin/nx run api:test-coverage --skip-nx-cache 2>&1 | tail -20"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh unit pnpm api:test-coverage --skip-nx-cache")'
+}
+
+@test "a script path that is not node_modules/.bin is left alone (0.26.0)" {
+  touch "$MOCK_WORKSPACE/pnpm-lock.yaml"
+  run _run_guard Bash "./scripts/vitest-report.sh --summary"
+  _assert_allowed
+}
+
+# --- 0.26.0: a [rewrite] must not produce a pnpm script that does not exist ---
+
+_nx_rewrite_policy() {
+  printf '%s\n' '[rewrite]' \
+    '^pnpm nx (.+)$ | pnpm \1 | pnpm nx bypasses [wrap]' \
+    "^npx pnpm (.+)\$ | pnpm \\1 | use the project's local pnpm" \
+    '^npx (eslint.*)$ | pnpm \1 | use the workspace binary' '' \
+    '[deny]' 'pnpm forbidden:thing | forbidden by the project' \
+    >"$MOCK_WORKSPACE/.ralph/command-policy"
+  echo '{"scripts":{"test-unit":"nx run-many -t test-unit","api:test-unit":"nx run api:test-unit","lint":"eslint ."}}' \
+    >"$MOCK_WORKSPACE/package.json"
+}
+
+@test "a rewrite to a script that does not exist is denied, naming real ones (0.26.0)" {
+  _nx_rewrite_policy
+  run _run_guard Bash "pnpm nx run canonical-prompt:test-unit"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("canonical-prompt:test-unit. is not a script")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("pnpm api:test-unit, pnpm test-unit")'
+}
+
+@test "a rewrite to a script that exists passes through (0.26.0)" {
+  _nx_rewrite_policy
+  run _run_guard Bash "pnpm nx run api:test-unit"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "pnpm api:test-unit"'
+}
+
+@test "a rewrite to a pnpm subcommand is not treated as a script lookup (0.26.0)" {
+  _nx_rewrite_policy
+  run _run_guard Bash "npx pnpm install --frozen-lockfile"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "pnpm install --frozen-lockfile"'
+}
+
+@test "a rewrite to a package-local binary passes through (0.26.0)" {
+  _nx_rewrite_policy
+  mkdir -p "$MOCK_WORKSPACE/node_modules/.bin"
+  touch "$MOCK_WORKSPACE/node_modules/.bin/eslint"
+  run _run_guard Bash "npx eslint src"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "pnpm eslint src"'
+}
+
+@test "an explicit [deny] row keeps its own reason over the missing-script check (0.26.0)" {
+  _nx_rewrite_policy
+  run _run_guard Bash "pnpm nx forbidden:thing"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("forbidden by the project")'
+}
+
+# --- 0.26.0: the gate cache re-opens when the working tree changed ------------
+# A Bash edit (sed -i, a heredoc) produces no Write/Edit event. gate-run.sh
+# records the tree each verdict ran against; any difference re-opens the gate.
+
+# Commit a tracked file, then land a 'basic' verdict recorded against the
+# current tree, with no Write/Edit since — the timestamps alone would deny.
+_verdict_on_current_tree() {
+  echo "one" >"$MOCK_WORKSPACE/src.ts"
+  git -C "$MOCK_WORKSPACE" add src.ts
+  git -C "$MOCK_WORKSPACE" commit -q -m "add src"
+  echo "0" >"$STATE_DIR/last-write-ts"
+  echo "$(date +%s)" >"$STATE_DIR/last-gate-ts.basic"
+  printf '1' >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.exit"
+  bash "$SCRIPTS_DIR/tree-fingerprint.sh" "$MOCK_WORKSPACE" >"$MOCK_WORKSPACE/.ralph/gates/basic-latest.tree"
+}
+
+@test "gate-cache: an unchanged tree keeps the gate cached (0.26.0)" {
+  _verdict_on_current_tree
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("nothing has changed since")'
+}
+
+@test "gate-cache: a Bash edit of a tracked file re-opens the gate (0.26.0)" {
+  _verdict_on_current_tree
+  echo "two" >>"$MOCK_WORKSPACE/src.ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
+  _assert_allowed
+}
+
+@test "gate-cache: a new untracked file re-opens the gate (0.26.0)" {
+  _verdict_on_current_tree
+  echo "new" >"$MOCK_WORKSPACE/new.spec.ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
+  _assert_allowed
+}
+
+@test "gate-cache: a change to an ignored path keeps the gate cached (0.26.0)" {
+  # Environmental churn lands in ignored paths and is not a code change.
+  _verdict_on_current_tree
+  echo "scratch" >"$MOCK_WORKSPACE/.ralph/scratch"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh basic pnpm test"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "gate-cache: an auto-wrapped gate re-opens after a Bash edit too (0.26.0)" {
+  setup_v14_gates_policy
+  _verdict_on_current_tree
+  echo "two" >>"$MOCK_WORKSPACE/src.ts"
+  run _run_guard Bash "pnpm basic-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic")'
+}

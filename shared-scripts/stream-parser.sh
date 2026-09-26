@@ -47,6 +47,16 @@ PROMPT_CHARS=3000 # rough estimate of the framing prompt + state files
 # rotate it early for no reason. Excluded from calc_tokens, still reported on
 # the TOKENS line so the work stays visible to an operator.
 SIDECHAIN_CHARS=0
+# 0.26.0: the context size the API last reported for this session (a `usage`
+# event — claude only), and the byte total at that moment. When set, it is the
+# figure rotation keys on: the byte count above never sees the system prompt,
+# retained thinking or any tool call's input, so it runs far below the real
+# context. Bytes that arrive after a report still count, as an estimate, until
+# the next report replaces it. cursor-agent reports nothing and keeps the
+# byte estimate.
+REPORTED_TOKENS=0
+REPORTED_AT_BYTES=0
+TOTAL_BYTES=0
 WARN_SENT=0
 TOOL_CALL_COUNT=0
 RATE_LIMITED=0
@@ -138,9 +148,18 @@ get_health_emoji() {
   fi
 }
 
+# Sets TOTAL_BYTES to every byte this session has accounted (sub-agents excluded).
+_sum_bytes() {
+  TOTAL_BYTES=$((PROMPT_CHARS + BYTES_READ + BYTES_WRITTEN + ASSISTANT_CHARS + SHELL_OUTPUT_CHARS))
+}
+
 calc_tokens() {
-  local total_bytes=$((PROMPT_CHARS + BYTES_READ + BYTES_WRITTEN + ASSISTANT_CHARS + SHELL_OUTPUT_CHARS))
-  echo $((total_bytes / 4))
+  _sum_bytes
+  if [[ $REPORTED_TOKENS -gt 0 ]]; then
+    echo $((REPORTED_TOKENS + (TOTAL_BYTES - REPORTED_AT_BYTES) / 4))
+  else
+    echo $((TOTAL_BYTES / 4))
+  fi
 }
 
 # 0.4.0: emit a HEARTBEAT token to stdout so the main loop's `read -t`
@@ -241,23 +260,43 @@ update_handoff_gate_state() {
   rm -f "$body_tmp"
 }
 
-# 0.24.0: record WHEN the agent last wrote handoff.md.
+# 0.24.0: record WHEN the agent last changed the ## Working set.
 #
 # handoff.md's own mtime cannot answer this — the plugin rewrites the file
 # itself (## Last gate state, ## Auto-enriched state), so mtime tracks the
-# plugin, not the agent. Only a tool event proves the agent touched it, and
-# only the parser sees tool events.
+# plugin, not the agent. _auto_enrich_handoff turns this stamp into a visible
+# age line, and a stale block reads exactly like a fresh one without it.
+# Deliberately NOT cleared at loop start: an age that spans loops is exactly
+# the signal.
 #
-# The point is staleness. cur-71's loop 2 ran 2h49m and 21 tasks without
-# touching the handoff, and the ## Working set it inherited opened with a
-# fresh "Next: Tranche D" above a stale "Current task: T012" — nothing on the
-# page said which was current, or how old either was. _auto_enrich_handoff
-# turns this stamp into a visible age line. Deliberately NOT cleared at loop
-# start: an age that spans loops is exactly the signal.
-_note_handoff_touch() {
-  case "$1" in
-    */handoff.md | handoff.md) date +%s >"$RALPH_DIR/handoff-agent-ts" 2>/dev/null || true ;;
-  esac
+# 0.26.0: keyed on the section's CONTENT, not on a Write/Edit tool event. The
+# agent also rewrites the handoff through Bash (python heredocs, `cat >`,
+# `sed -i`), which no tool event reports, so the event-keyed stamp aged a
+# section that had just been rewritten. Whenever handoff.md may have changed,
+# hash the section: a different hash is a new working set, however it was
+# written. The plugin's own rewrites of the other sections leave it alone, and
+# an identical rewrite is not news. The first look only records a baseline —
+# it cannot know when the section it finds was written.
+#   $1 = the path or command of the tool call just seen; the file is hashed
+#        when it names handoff.md, or when the file is newer than the last look
+_check_handoff_working_set() {
+  local handoff="$RALPH_DIR/handoff.md" sum_file="$RALPH_DIR/handoff-working-set.sum"
+  if [[ -f "$sum_file" && "${1:-}" != *handoff.md* && ! "$handoff" -nt "$sum_file" ]]; then
+    return 0
+  fi
+  local sum prev=""
+  if [[ -f "$handoff" ]]; then
+    sum=$(awk '/^## Working set[[:space:]]*$/ { f = 1; next } f && /^## / { f = 0 } f' \
+      "$handoff" 2>/dev/null | cksum) || return 0
+  else
+    # No file yet is an empty working set, so the one that creates it counts.
+    sum=$(printf '' | cksum)
+  fi
+  [[ -f "$sum_file" ]] && prev=$(cat "$sum_file" 2>/dev/null)
+  if [[ -n "$prev" && "$sum" != "$prev" ]]; then
+    date +%s >"$RALPH_DIR/handoff-agent-ts" 2>/dev/null || true
+  fi
+  printf '%s\n' "$sum" >"$sum_file" 2>/dev/null || true
 }
 
 # 0.24.0: consume the gate's own end-of-run marker.
@@ -333,7 +372,12 @@ log_token_status() {
     status_msg="$status_msg - approaching limit"
   fi
 
-  local breakdown="[read:$((BYTES_READ / 1024))KB write:$((BYTES_WRITTEN / 1024))KB assist:$((ASSISTANT_CHARS / 1024))KB shell:$((SHELL_OUTPUT_CHARS / 1024))KB"
+  # 0.26.0: `ctx:api` marks a figure anchored on the API-reported context; the
+  # byte breakdown after it is then only the traffic, not the total. Absent on
+  # the byte-estimate path, whose line is unchanged.
+  local source=""
+  [[ $REPORTED_TOKENS -gt 0 ]] && source="ctx:api "
+  local breakdown="[${source}read:$((BYTES_READ / 1024))KB write:$((BYTES_WRITTEN / 1024))KB assist:$((ASSISTANT_CHARS / 1024))KB shell:$((SHELL_OUTPUT_CHARS / 1024))KB"
   # 0.23.0: only present when the loop actually delegated, so a non-delegating
   # run's line is byte-identical to before. `sub:` is outside the rotation
   # total on purpose — it is the sub-agents' context, not this session's.
@@ -762,6 +806,35 @@ _is_expected_nonzero_diagnostic() {
   return 0
 }
 
+# Records one more failure of $1 and prints how many times it has failed
+# since the last task boundary. One line per failure in FAILURES_FILE: the
+# command base64-encoded with the wrapping removed, so a long command is one
+# line, not several.
+_count_repeat() {
+  local key count
+  key=$(printf '%s' "$1" | base64 | tr -d '\n')
+  count=$(grep -cxF "$key" "$FAILURES_FILE" 2>/dev/null) || count=0
+  echo "$key" >>"$FAILURES_FILE"
+  echo $((count + 1))
+}
+
+# 0.26.0: a guard denial is not a failure of the command — the command never
+# ran. It goes to errors.log under its own name with the guard's reason, so
+# the next agent reads a policy answer rather than a red command. Repeats still
+# count toward GUTTER: re-issuing a call the guard keeps refusing is stuck,
+# whatever the reason.
+#   $1 = what was denied (the command, or "WRITE <path>"), $2 = the reason
+track_guard_deny() {
+  local subject="$1" reason="$2"
+  local count
+  count=$(_count_repeat "$subject")
+  log_error "GUARD DENY: $subject → $reason (attempt $count)"
+  if [[ $count -ge $SHELL_FAIL_THRESHOLD ]]; then
+    log_error "⚠️ GUTTER: same call denied ${count}x"
+    echo "GUTTER" 2>/dev/null || true
+  fi
+}
+
 track_shell_failure() {
   local cmd="$1"
   local exit_code="$2"
@@ -772,11 +845,7 @@ track_shell_failure() {
       return 0
     fi
     local count
-    local single_line_cmd
-    single_line_cmd=$(echo -n "$cmd" | base64)
-    count=$(grep -cxF "$single_line_cmd" "$FAILURES_FILE" 2>/dev/null) || count=0
-    count=$((count + 1))
-    echo "$single_line_cmd" >>"$FAILURES_FILE"
+    count=$(_count_repeat "$cmd")
     log_error "SHELL FAIL: $cmd → exit $exit_code (attempt $count)"
     # When `git commit` fails (or `git add && git commit`), surface common
     # causes the agent might miss. Most common is staging a gitignored path
@@ -926,6 +995,10 @@ process_line() {
         log_activity "🔄 CONTEXT RESTART (#$SESSION_INDEX): agent CLI rotated its own context at ~${_pct}% of the Ralph budget — model=$model"
       fi
       SESSION_TOKENS_BASE=$(calc_tokens)
+      # 0.26.0: an API-reported context is one session's own — the session
+      # that follows counts from its own first report, not from the figure it
+      # inherits (which a CONTEXT RESTART has just made stale).
+      [[ $REPORTED_TOKENS -gt 0 ]] && SESSION_TOKENS_BASE=0
 
       # Prefer LIVE counts from the resolved task file so the banner tracks
       # progress on every rotation; fall back to the static task-summary
@@ -1019,8 +1092,23 @@ process_line() {
       TOOL_CALL_COUNT=$((TOOL_CALL_COUNT + 1))
       ;;
 
+    usage)
+      local ctx
+      ctx=$(echo "$line" | jq -r '.context_tokens // 0' 2>/dev/null) || ctx=0
+      if [[ "$ctx" =~ ^[0-9]+$ ]] && [[ $ctx -gt 0 ]]; then
+        # The first report replaces the byte estimate for this session outright.
+        [[ $REPORTED_TOKENS -eq 0 ]] && SESSION_TOKENS_BASE=0
+        REPORTED_TOKENS=$ctx
+        _sum_bytes
+        REPORTED_AT_BYTES=$TOTAL_BYTES
+        # The report alone can cross a threshold — a long thinking turn grows
+        # the context with no tool result in between.
+        check_gutter
+      fi
+      ;;
+
     tool_result)
-      local name bytes lines exit_code path cmd sidechain acct
+      local name bytes lines exit_code path cmd sidechain acct denied deny_reason
       name=$(echo "$line" | jq -r '.name // "Other"' 2>/dev/null) || name="Other"
       bytes=$(echo "$line" | jq -r '.bytes // 0' 2>/dev/null) || bytes=0
       lines=$(echo "$line" | jq -r '.lines // 0' 2>/dev/null) || lines=0
@@ -1028,6 +1116,12 @@ process_line() {
       path=$(echo "$line" | jq -r '.path // ""' 2>/dev/null) || path=""
       cmd=$(echo "$line" | jq -r '.cmd // ""' 2>/dev/null) || cmd=""
       sidechain=$(echo "$line" | jq -r '.sidechain // false' 2>/dev/null) || sidechain="false"
+      # 0.26.0: the guard refused the call — nothing ran, nothing was written.
+      denied=$(echo "$line" | jq -r '.denied // false' 2>/dev/null) || denied="false"
+      deny_reason=""
+      if [[ "$denied" == "true" ]]; then
+        deny_reason=$(echo "$line" | jq -r '.deny_reason // ""' 2>/dev/null) || deny_reason=""
+      fi
 
       # 0.23.0: a Task sub-agent's bytes are ITS context, not this session's.
       # Route them to SIDECHAIN_CHARS and zero the ACCOUNTING figure, so every
@@ -1058,24 +1152,37 @@ process_line() {
           # Write thrash (Edit is for fix-up loops; Write is for new files).
           BYTES_WRITTEN=$((BYTES_WRITTEN + acct))
           local kb=$((bytes / 1024))
-          log_activity "EDIT $path (${lines} lines, ${kb}KB)"
-          track_file_write "$path"
-          _note_handoff_touch "$path"
+          if [[ "$denied" == "true" ]]; then
+            log_activity "EDIT $path → denied by guard"
+            track_guard_deny "EDIT $path" "$deny_reason"
+          else
+            log_activity "EDIT $path (${lines} lines, ${kb}KB)"
+            track_file_write "$path"
+          fi
           ;;
         Write)
           BYTES_WRITTEN=$((BYTES_WRITTEN + acct))
           local kb=$((bytes / 1024))
-          log_activity "WRITE $path (${lines} lines, ${kb}KB)"
-          track_file_write "$path"
-          _note_handoff_touch "$path"
+          if [[ "$denied" == "true" ]]; then
+            log_activity "WRITE $path → denied by guard"
+            track_guard_deny "WRITE $path" "$deny_reason"
+          else
+            log_activity "WRITE $path (${lines} lines, ${kb}KB)"
+            track_file_write "$path"
+          fi
           ;;
         Shell)
           SHELL_OUTPUT_CHARS=$((SHELL_OUTPUT_CHARS + acct))
+          if [[ "$denied" == "true" ]]; then
+            # 0.26.0: never ran, so not a SHELL FAIL, a COMMIT FAILED, or a
+            # PUSH FAILED — the guard already logged why as ⛔ GUARD DENY.
+            log_activity "SHELL $cmd → denied by guard"
+            track_guard_deny "$cmd" "$deny_reason"
           # 0.5.4: anchor the `git commit` and `git push` matches to either
           # start-of-string OR a shell separator (whitespace, &, ;, |, `(`).
           # 0.10.4: allow global flags between `git` and the subcommand
           # (e.g. `git -C /path commit`). Each flag is -<letter> <value>.
-          if [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git([[:space:]]+-[[:alpha:]][[:space:]]+[^[:space:]]+)*[[:space:]]+commit ]]; then
+          elif [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git([[:space:]]+-[[:alpha:]][[:space:]]+[^[:space:]]+)*[[:space:]]+commit ]]; then
             local commit_msg=""
             if [[ "$cmd" =~ -m[[:space:]]+[\"\']([^\"\']+)[\"\'] ]]; then
               commit_msg="${BASH_REMATCH[1]}"
@@ -1142,6 +1249,7 @@ process_line() {
           ;;
       esac
 
+      [[ "$denied" == "true" ]] || _check_handoff_working_set "$path $cmd"
       check_gutter
       ;;
 
@@ -1261,6 +1369,10 @@ main() {
   local last_token_log
   last_token_log=$(date +%s)
 
+  # Settle the working set's baseline before the agent can touch it, and catch
+  # a rewrite the previous loop made after its last look.
+  _check_handoff_working_set "handoff.md"
+
   while IFS= read -r line; do
     process_line "$line"
     local now
@@ -1271,6 +1383,8 @@ main() {
     fi
   done
 
+  # The stream ended — catch a last rewrite before the loop renders its age.
+  _check_handoff_working_set "handoff.md"
   log_token_status
 }
 

@@ -254,3 +254,64 @@ Re-run the exact same command to keep waiting.'
   run _claude_exit 'pnpm all-check' true 'Error: something broke'
   [ "$output" = "1" ]
 }
+
+# --- 0.26.0: API-reported context, and guard denials ------------------------
+# The byte count the parser keeps never sees the system prompt, retained
+# thinking, or any tool call's input, so rotation keys on the context the API
+# reports for each main-chain request. A denial by ralph-guard.sh is marked so
+# the parser can log it as one: the command never ran.
+
+# Normalize one assistant event carrying $1 as message.usage, with $2 extra
+# top-level fields (e.g. a sub-agent's parent_tool_use_id).
+_claude_usage() { # $1=usage json, $2=extra top-level json object
+  local extra="${2:-}"
+  [[ -n "$extra" ]] || extra='{}'
+  jq -cn --argjson u "$1" --argjson extra "$extra" \
+    '{type:"assistant",message:{id:"m1",usage:$u,content:[{type:"text",text:"hi"}]}} + $extra' |
+    jq -n -c -f "$CLAUDE_FILTER" | jq -rc 'select(.kind=="usage").context_tokens'
+}
+
+@test "claude: main-chain usage reports every input token as the context (0.26.0)" {
+  run _claude_usage '{"input_tokens":2,"cache_creation_input_tokens":1455,"cache_read_input_tokens":816546,"output_tokens":881}'
+  [ "$output" = "818003" ]
+}
+
+@test "claude: a sub-agent's usage is its own window, not this session's (0.26.0)" {
+  run _claude_usage '{"input_tokens":5,"cache_read_input_tokens":90000}' '{"parent_tool_use_id":"toolu_1"}'
+  [ -z "$output" ]
+}
+
+@test "claude: an assistant event without usage reports nothing (0.26.0)" {
+  run bash -c "jq -cn '{type:\"assistant\",message:{content:[{type:\"text\",text:\"hi\"}]}}' |
+    jq -n -c -f '$CLAUDE_FILTER' | jq -rc 'select(.kind==\"usage\")'"
+  [ -z "$output" ]
+}
+
+# Normalize a Bash tool_use + its result and print the tool_result event.
+_claude_result() { # $1=cmd $2=is_error $3=result text
+  {
+    jq -cn --arg cmd "$1" \
+      '{type:"assistant",message:{content:[{type:"tool_use",id:"t1",name:"Bash",input:{command:$cmd}}]}}'
+    jq -cn --argjson err "$2" --arg t "$3" \
+      '{type:"user",message:{content:[{type:"tool_result",tool_use_id:"t1",is_error:$err,content:$t}]}}'
+  } | jq -n -c -f "$CLAUDE_FILTER" | jq -c 'select(.kind=="tool_result")'
+}
+
+@test "claude: a guard denial is marked denied, with the reason unprefixed (0.26.0)" {
+  run _claude_result "rm -rf .ralph/" true "[ralph-guard] State tampering denied: cannot delete .ralph/"
+  echo "$output" | jq -e '.denied == true'
+  echo "$output" | jq -e '.deny_reason == "State tampering denied: cannot delete .ralph/"'
+}
+
+@test "claude: a command that ran and failed is not a denial (0.26.0)" {
+  run _claude_result "pnpm test" true "Error: 3 tests failed"
+  echo "$output" | jq -e '.denied == false'
+  echo "$output" | jq -e '.exit_code == 1'
+}
+
+@test "claude: the guard marker in successful output is not a denial (0.26.0)" {
+  # A denial is an error result; printing the marker (e.g. grepping a log for
+  # it) is not one.
+  run _claude_result "grep ralph-guard notes.txt" false "[ralph-guard] seen in a note"
+  echo "$output" | jq -e '.denied == false'
+}
