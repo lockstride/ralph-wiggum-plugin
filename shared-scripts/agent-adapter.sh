@@ -17,6 +17,7 @@
 #   {"kind":"assistant_text","text":"<chunk>"}
 #   {"kind":"tool_use","name":"<Read|Write|Shell|Other>","path":"<path>","cmd":"<cmd>"}
 #   {"kind":"tool_result","name":"<Read|Write|Shell|Other>","path":"<path>","cmd":"<cmd>","bytes":N,"lines":N,"exit_code":N,"denied":B,"deny_reason":"<why>"}
+#     (bytes/lines: the text a Write/Edit-family call wrote; otherwise its result)
 #   {"kind":"usage","context_tokens":N}   (claude only: the API-reported context size)
 #   {"kind":"result","duration_ms":N}
 #   {"kind":"error","message":"<msg>"}
@@ -191,17 +192,33 @@ agent_normalize_filter() {
       # literal truncation from the CLI) are silently skipped instead of
       # crashing the entire pipeline.
       cat <<'JQ'
+# Line count of a text: a trailing newline ends the last line, it does not
+# start another.
+def text_lines: if . == "" then 0
+  else (split("\n") | length) - (if endswith("\n") then 1 else 0 end) end;
 foreach (try inputs catch empty) as $e (
   {};
   if $e.type == "assistant" then
     reduce (($e.message.content // [])[] | select(.type == "tool_use")) as $tu (
       .;
-      .[$tu.id] = {
-        name: (($tu.name // "Other") | if IN("Read","Edit","Write","NotebookEdit","MultiEdit") then .
-              elif . == "Bash" then "Shell" else . end),
-        path: ($tu.input.file_path // $tu.input.path // $tu.input.notebook_path // ""),
-        cmd: (if $tu.name == "Bash" then ($tu.input.command // "") else "" end)
-      }
+      # 0.26.1: what a Write/Edit-family call writes lives in its INPUT; its
+      # result is only "File created successfully at: …". Size the call by
+      # the text written — the whole content, or each replacement — and keep
+      # just the counts, not the text.
+      (($tu.input // {}) as $in
+        | ( if $tu.name == "Write" then [$in.content]
+            elif $tu.name == "Edit" then [$in.new_string]
+            elif $tu.name == "MultiEdit" then [($in.edits // [])[] | .new_string]
+            elif $tu.name == "NotebookEdit" then [$in.new_source]
+            else null end ) as $written
+        | .[$tu.id] = {
+            name: (($tu.name // "Other") | if IN("Read","Edit","Write","NotebookEdit","MultiEdit") then .
+                  elif . == "Bash" then "Shell" else . end),
+            path: ($in.file_path // $in.path // $in.notebook_path // ""),
+            cmd: (if $tu.name == "Bash" then ($in.command // "") else "" end),
+            written_bytes: (if $written then ($written | map(. // "" | length) | add // 0) else null end),
+            written_lines: (if $written then ($written | map(. // "" | text_lines) | add // 0) else null end)
+          })
     )
   else . end;
   if $e.type == "system" and ($e.subtype // "") == "init" then
@@ -270,8 +287,10 @@ foreach (try inputs catch empty) as $e (
            sidechain: $sc,
            denied: $denied,
            deny_reason: (if $denied then ($txt | ltrimstr("[ralph-guard] ") | .[0:240]) else "" end),
-           bytes: ($txt | length),
-           lines: (if ($info.name | IN("Read","Edit","Write","NotebookEdit","MultiEdit"))
+           # A write is sized by what it wrote (0.26.1), a Read by what came back.
+           bytes: ($info.written_bytes // ($txt | length)),
+           lines: (if $info.written_lines != null then $info.written_lines
+                   elif ($info.name | IN("Read","Edit","Write","NotebookEdit","MultiEdit"))
                    then ($txt | split("\n") | length) else 0 end),
            exit_code: (
              # 0.16.1: gate-run runs detached (0.16.0). Its waiter's transport

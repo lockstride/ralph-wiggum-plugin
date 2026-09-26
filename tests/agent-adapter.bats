@@ -315,3 +315,51 @@ _claude_result() { # $1=cmd $2=is_error $3=result text
   run _claude_result "grep ralph-guard notes.txt" false "[ralph-guard] seen in a note"
   echo "$output" | jq -e '.denied == false'
 }
+
+# --- 0.26.1: a write is sized by what it wrote --------------------------------
+# A Write/Edit-family result is only "File created successfully at: …", so
+# sizing by it logged every write as "1 lines, 0KB". The text written is in the
+# call's input.
+
+# Normalize one tool_use ($1 = name, $2 = input json) and its plain result,
+# and print "<bytes> <lines>" from the tool_result event.
+_claude_size() {
+  {
+    jq -cn --arg n "$1" --argjson in "$2" \
+      '{type:"assistant",message:{content:[{type:"tool_use",id:"t1",name:$n,input:$in}]}}'
+    jq -cn '{type:"user",message:{content:[{type:"tool_result",tool_use_id:"t1",content:"File created successfully at: /x"}]}}'
+  } | jq -n -c -f "$CLAUDE_FILTER" | jq -r 'select(.kind=="tool_result") | "\(.bytes) \(.lines)"'
+}
+
+@test "claude: a Write is sized by the content it wrote (0.26.1)" {
+  run _claude_size Write '{"file_path":"/x/install.sh","content":"#!/bin/sh\necho hi\nexit 0\n"}'
+  [ "$output" = "25 3" ]
+}
+
+@test "claude: an Edit is sized by its replacement text (0.26.1)" {
+  run _claude_size Edit '{"file_path":"/x/a.ts","old_string":"a","new_string":"b\nc"}'
+  [ "$output" = "3 2" ]
+}
+
+@test "claude: a MultiEdit is sized by all of its replacements (0.26.1)" {
+  run _claude_size MultiEdit '{"file_path":"/x/b.ts","edits":[{"old_string":"x","new_string":"y\n"},{"old_string":"z","new_string":"ww"}]}'
+  [ "$output" = "4 2" ]
+}
+
+@test "claude: a NotebookEdit is sized by its new cell source (0.26.1)" {
+  run _claude_size NotebookEdit '{"notebook_path":"/x/n.ipynb","new_source":"print(1)"}'
+  [ "$output" = "8 1" ]
+}
+
+@test "claude: an empty Write is zero lines, zero bytes (0.26.1)" {
+  run _claude_size Write '{"file_path":"/x/empty.txt","content":""}'
+  [ "$output" = "0 0" ]
+}
+
+@test "claude: a Read is still sized by what came back (0.26.1 regression guard)" {
+  run bash -c "{
+    jq -cn '{type:\"assistant\",message:{content:[{type:\"tool_use\",id:\"t1\",name:\"Read\",input:{file_path:\"/x/r.ts\"}}]}}'
+    jq -cn '{type:\"user\",message:{content:[{type:\"tool_result\",tool_use_id:\"t1\",content:\"1\\tone\\n2\\ttwo\\n3\\tthree\"}]}}'
+  } | jq -n -c -f '$CLAUDE_FILTER' | jq -r 'select(.kind==\"tool_result\") | \"\\(.bytes) \\(.lines)\"'"
+  [ "$output" = "19 3" ]
+}

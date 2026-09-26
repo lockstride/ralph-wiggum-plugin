@@ -88,6 +88,8 @@ Then `sed -n 'A,Bp'` the interesting regions. Read the activity-log legend from
 the emoji: 🧪 gate, 🔀 guard rewrite, ⛔ guard deny, 🚨 GUTTER (agent stuck),
 ⏱ SHELL CUT OFF (the command's own `timeout`/`kill` fired — an answer, not a
 failure; 0.24.0), ✅ COMPLETE, 🛑 COMPLETE BLOCKED, 🟢 normal shell/tool.
+`WRITE`/`EDIT` sizes are the text written since 0.26.1; before that they were
+the tool's one-line result, so every write read `1 lines, 0KB`.
 
 ## Step 3 — Distinguish loop types
 
