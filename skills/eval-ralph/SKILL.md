@@ -114,10 +114,12 @@ Most "why did it thrash?" questions come down to the guard. Key mechanics
 version** the run used — the activity log shows the path, e.g.
 `…/ralph-wiggum-plugin/<version>/shared-scripts/gate-run.sh`.
 
-- **Per-label gate cache** (`ralph-guard.sh` `_guard_gate_invocation`): a gate is
-  blocked with *"Gate '<label>' already ran and nothing has changed since"* when
-  `last_gate_ts.<label> >= last-write-ts` **and** the working tree matches the one
-  recorded with that label's last verdict (`gates/<label>-latest.tree`, 0.26.0).
+- **Per-label, per-command gate cache** (`ralph-guard.sh` `_guard_gate_invocation`):
+  a gate is blocked with *"Gate '<label>' already ran '<command>' and nothing has
+  changed since"* when the command is the one that label's last verdict ran
+  (`gates/<label>-latest.cmd`, 0.27.1), `last_gate_ts.<label> >= last-write-ts`,
+  **and** the working tree matches the one recorded with that verdict
+  (`gates/<label>-latest.tree`, 0.26.0).
   `last-write-ts` is bumped only by Write/Edit/MultiEdit; the tree record catches
   edits made through Bash (`sed -i`, heredocs, scripts). Neither moves for
   environmental remediation (`nx reset`, `docker compose up/down`, daemon
@@ -125,6 +127,9 @@ version** the run used — the activity log shows the path, e.g.
   cache. There is intentionally no `--force`; deleting breadcrumbs doesn't help;
   `rm` of `.ralph/` is denied as state-tampering. Before 0.26.0 a Bash edit did not
   re-open the gate: a denial right after a `python3`/`sed -i` edit was a false one.
+  Before 0.27.1 the cache was keyed on the label alone: a denial of a different
+  command under the same label (another project's `pnpm test-unit <project>`, or
+  `pnpm test-coverage` after `pnpm test-unit`) was a false one.
 - **Completion check** (`ralph-common.sh` `_complete_allowed`): the impl loop and
   the eval loop gate on **different tiers** (0.14.3+). The tier command comes from
   `.ralph/command-policy` `[gates]` (the single source of truth — no defaults, no

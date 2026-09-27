@@ -5,8 +5,8 @@
 # (Bash, Write, Edit, MultiEdit) to enforce mechanical constraints the
 # agent cannot route around:
 #
-#   - Gate-without-change block (Bash: a gate re-run with no Write/Edit and no
-#     working-tree change since that label's last verdict)
+#   - Gate-without-change block (Bash: a re-run of the command a gate label
+#     last ran, with no Write/Edit and no working-tree change since its verdict)
 #   - Direct-test-tool denial (Bash: vitest/cypress/tsc without gate-run.sh)
 #   - Command-policy enforcement (Bash: .ralph/command-policy —
 #     gates/rewrite/deny/wrap/protect)
@@ -910,12 +910,12 @@ _enforce_command_policy() {
   # gate, which is the normal path: the cache's `last_gate > 0` precondition
   # could then never hold, so no re-run was ever blocked.
   if [[ -n "$_WRAP_REWRITE" ]]; then
-    _guard_gate_invocation "$_WRAP_REWRITE" "$_WRAP_REWRITE"
+    _guard_gate_invocation "$_WRAP_REWRITE"
     _emit_rewrite "$_WRAP_REWRITE"
   elif [[ -n "$rewritten" ]]; then
     local joined
     joined=$(_join_chain)
-    _guard_gate_invocation "$joined" "$joined"
+    _guard_chained_gates
     _emit_rewrite "$joined"
   fi
   return 0
@@ -1042,19 +1042,30 @@ _guard_bash() {
   # .ralph/command-policy: [gates] [rewrite] [deny] [wrap] [protect].
   _enforce_command_policy "$cmd"
 
-  # --- Gate-without-change check (per-label) ---
+  # --- Gate-without-change check ---
   # Runs here for a command that already invokes the harness itself. The
-  # auto-wrapped path cannot reach this point — _enforce_command_policy
-  # exits via _emit_rewrite — so it calls _guard_gate_invocation directly
-  # on the wrapped form before emitting (0.24.1).
-  _guard_gate_invocation "$cmd" "$canonical"
+  # rewritten paths cannot reach this point — _enforce_command_policy exits
+  # via _emit_rewrite — so it judges the form it emits before emitting (0.24.1).
+  _guard_chained_gates
 }
 
-# --- Gate-without-change check (per-label) ---
+# Judges every chained command that runs the harness, in the form it will run,
+# so a `cd "$ws" && bash gate-run.sh …` meets the cache and the tier lock with
+# its own label and command.
+_guard_chained_gates() {
+  local i
+  for ((i = 0; i < ${#_SEG_FINAL[@]}; i++)); do
+    _guard_gate_invocation "${_SEG_FINAL[i]}"
+  done
+}
+
+# --- Gate-without-change check ---
 # Different labels run different commands, so a successful 'basic' does
 # NOT make a subsequent 'full' redundant — the cache must be tracked
 # per label, not globally. (Without this, [risky] tasks that need 'full'
-# after 'basic' would get incorrectly blocked.)
+# after 'basic' would get incorrectly blocked.) Within a label, only a
+# re-run of the command its last verdict ran is refused — see
+# _same_command_as_verdict.
 #
 # 0.14.2: Only match actual gate invocations — commands where the harness
 # is being EXECUTED (via bash/sh), not merely referenced (ls, cat, grep,
@@ -1069,14 +1080,14 @@ _guard_bash() {
 # written, so the `last_gate > 0` precondition below could never hold and
 # no re-run was ever blocked.
 #
-#   $1 = command as it will actually run (wrapped form on the rewrite path)
-#   $2 = its canonical form, used for the tier comparison
+#   $1 = a command as it will run: one chained command in canonical form, or
+#        the [wrap] rewrite. Judged only when it runs the harness.
 _guard_gate_invocation() {
-  local cmd="$1" canonical="$2"
-  _is_gate_invocation "$cmd" || return 0
+  local gate="$1"
+  _is_gate_invocation "$gate" || return 0
 
   local label
-  label=$(_gate_invocation_tail "$cmd" | awk '{print $1}')
+  label=$(_gate_invocation_tail "$gate" | awk '{print $1}')
   # An unrecognized label is not a gate we can reason about — enforcing a
   # cache on it would repeat the 0.14.2 false-positive. Let it through.
   case "$label" in
@@ -1106,14 +1117,11 @@ _guard_gate_invocation() {
   _final_gate=$(_normalize_pnpm "$_final_gate")
   _final_gate=$(printf '%s' "$_final_gate" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
 
-  # Drop the runner token and the label, leaving the gated command. Trailing
-  # shell segments (`; echo "GATE_EXIT=$?"`, ` | tail -20`) are stripped too —
-  # without that the comparison never matched the pin for the eval loop's
-  # usual `…; echo` shape, silently disarming the lock.
+  # Drop the runner token and the label, leaving the gated command. $1 is a
+  # single chained command with its pipes and redirects stripped, so the eval
+  # loop's trailing `; echo "GATE_EXIT=$?"` or a `| tail -20` never reaches it.
   local gated_cmd expected_tiers=""
-  gated_cmd=$(_gate_invocation_tail "$canonical" | awk '{ $1=""; sub(/^ /, ""); print }')
-  gated_cmd=$(_strip_pipes_redirects "$gated_cmd")
-  gated_cmd=$(printf '%s' "$gated_cmd" | sed -E 's/[[:space:]]*;.*$//')
+  gated_cmd=$(_gate_invocation_tail "$gate" | awk '{ $1=""; sub(/^ /, ""); print }')
   gated_cmd=$(_normalize_pnpm "$gated_cmd")
   gated_cmd=$(printf '%s' "$gated_cmd" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
 
@@ -1159,17 +1167,45 @@ _guard_gate_invocation() {
     _verdict_ts=$(stat -f '%m' "$_gate_exit_f" 2>/dev/null || stat -c '%Y' "$_gate_exit_f" 2>/dev/null || echo 0)
   fi
 
-  # 0.26.0: a Write/Edit event is not the only way code changes — a Bash
-  # edit re-opens the gate too, via _tree_changed_since_verdict. Checked last,
-  # and only when everything else says deny: it is the one costly test.
+  # A different command re-opens the gate (_same_command_as_verdict), and so
+  # does a Bash edit (_tree_changed_since_verdict) — a Write/Edit event is not
+  # the only way code changes. The tree is checked last, and only when
+  # everything else says deny: it is the one costly test.
   if [[ $_inflight -eq 0 ]] && [[ "$_verdict_ts" -ge "$last_gate" ]] &&
     [[ "$last_gate" -gt 0 ]] && [[ "$last_gate" -ge "$last_write" ]] &&
+    _same_command_as_verdict "$label" "$gated_cmd" &&
     ! _tree_changed_since_verdict "$label"; then
-    _block "Gate '${label}' already ran and nothing has changed since — no Write/Edit, and no tracked or untracked file differs from the tree it ran against. Output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: change code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose. (Other gate labels can still run — this cache is per-label.)"
+    _block "Gate '${label}' already ran '${gated_cmd}' and nothing has changed since — no Write/Edit, and no tracked or untracked file differs from the tree it ran against. Output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: change code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose. (The cache is per label and per command: a different command still runs.)"
   fi
 
   # Record the per-label gate invocation timestamp
   _write_ts "$last_gate_ts_file"
+}
+
+# Whether the gated command is the one the label's last verdict ran.
+#
+# A label covers many commands — `unit` runs every project's
+# `pnpm test-unit <project>` and `pnpm test-coverage` alike — and a verdict for
+# one says nothing about another. A cache keyed on the label alone denies a
+# different command, which teaches the agent to route around the gate.
+#
+# gate-run.sh records the command it ran as <label>-latest.cmd. Like the tree
+# record, it can only re-open a gate, never close one: no record means
+# "unknown" and the other checks decide.
+_same_command_as_verdict() {
+  local label="$1" gated_cmd="$2" recorded
+  recorded=$(cat "$WORKSPACE/.ralph/gates/${label}-latest.cmd" 2>/dev/null) || recorded=""
+  [[ -n "$recorded" ]] || return 0
+  [[ "$(_command_key "$recorded")" == "$(_command_key "$gated_cmd")" ]]
+}
+
+# The form a gated command is compared in: without quotes, which the shell
+# removed before gate-run.sh recorded its command; whitespace collapsed, as
+# gate-run.sh records it; and pnpm's spellings of one script run normalized.
+_command_key() {
+  local key="${1//[\"\']/}"
+  key=$(printf '%s' "$key" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  _normalize_pnpm "$key"
 }
 
 # 0.26.0: whether the working tree differs from the one the label's last

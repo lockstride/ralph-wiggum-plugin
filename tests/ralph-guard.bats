@@ -1748,3 +1748,109 @@ _assert_passes_unchanged() {
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "pnpm install"'
 }
+
+# --- 0.27.1: the gate cache is per label and per command ----------------------
+# A label covers many commands — `unit` runs every project's `pnpm test-unit
+# <project>` — so only a re-run of the command the label's last verdict ran,
+# against an unchanged tree, is refused.
+
+_unit_policy() {
+  printf '%s\n' '[wrap]' 'pnpm test-unit | unit' 'pnpm test-coverage | unit' \
+    >"$MOCK_WORKSPACE/.ralph/command-policy"
+}
+
+# Land a 'unit' verdict for command $1, recorded as gate-run.sh records it:
+# invoked 10 s ago, against the current tree, no Write/Edit since.
+_unit_verdict() {
+  echo "0" >"$STATE_DIR/last-write-ts"
+  echo "$(($(date +%s) - 10))" >"$STATE_DIR/last-gate-ts.unit"
+  printf '1' >"$MOCK_WORKSPACE/.ralph/gates/unit-latest.exit"
+  printf '%s' "$1" >"$MOCK_WORKSPACE/.ralph/gates/unit-latest.cmd"
+  bash "$SCRIPTS_DIR/tree-fingerprint.sh" "$MOCK_WORKSPACE" >"$MOCK_WORKSPACE/.ralph/gates/unit-latest.tree"
+}
+
+_assert_cached() {
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("nothing has changed since")'
+}
+
+#   $1 = the gated command the rewrite must hand gate-run.sh under 'unit'
+_assert_runs_under_unit() {
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg c "$1" '.hookSpecificOutput.updatedInput.command | endswith("/gate-run.sh unit " + $c)'
+}
+
+@test "gate-cache: a re-run of the same command is blocked (0.27.1)" {
+  _unit_policy
+  _unit_verdict "pnpm test-unit canonical-prompt"
+  run _run_guard Bash "pnpm test-unit canonical-prompt 2>&1 | tail -20"
+  _assert_cached
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("already ran .pnpm test-unit canonical-prompt.")'
+}
+
+@test "gate-cache: a different command under the same label runs (0.27.1)" {
+  _unit_policy
+  _unit_verdict "pnpm test-unit canonical-prompt"
+  run _run_guard Bash "pnpm test-unit marketing"
+  _assert_runs_under_unit "pnpm test-unit marketing"
+  _unit_verdict "pnpm test-unit canonical-prompt"
+  run _run_guard Bash "pnpm test-coverage canonical-prompt"
+  _assert_runs_under_unit "pnpm test-coverage canonical-prompt"
+}
+
+@test "gate-cache: the same command runs again after a Write (0.27.1)" {
+  _unit_policy
+  _unit_verdict "pnpm test-unit canonical-prompt"
+  run _run_guard Write "$MOCK_WORKSPACE/apps/marketing/src/install.ts"
+  [ "$status" -eq 0 ]
+  run _run_guard Bash "pnpm test-unit canonical-prompt"
+  _assert_runs_under_unit "pnpm test-unit canonical-prompt"
+}
+
+@test "gate-cache: a respelling of the same command is still that command (0.27.1)" {
+  # gate-run.sh records the command as the shell handed it over: quotes
+  # removed, `pnpm run` as typed.
+  _unit_policy
+  _unit_verdict "pnpm run test-unit canonical-prompt -t build msi"
+  run _run_guard Bash 'pnpm test-unit canonical-prompt -t "build msi"'
+  _assert_cached
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh unit \"pnpm -s test-unit canonical-prompt -t build msi\""
+  _assert_cached
+}
+
+@test "gate-cache: a gate chained after a cd is judged by its own command (0.27.1)" {
+  _unit_verdict "pnpm test-unit canonical-prompt"
+  run _run_guard Bash "cd $MOCK_WORKSPACE && bash $SCRIPTS_DIR/gate-run.sh unit pnpm test-unit canonical-prompt"
+  _assert_cached
+  run _run_guard Bash "cd $MOCK_WORKSPACE && bash $SCRIPTS_DIR/gate-run.sh unit pnpm test-unit marketing"
+  _assert_allowed
+}
+
+@test "gate-cache: judges the command gate-run.sh itself recorded (0.27.1)" {
+  local gate="bash $SCRIPTS_DIR/gate-run.sh unit true -t \"build msi\""
+  echo "0" >"$STATE_DIR/last-write-ts"
+  run _run_guard Bash "$gate"
+  _assert_allowed
+  eval "$gate" >/dev/null
+  # The runner releases the label lock just after the waiter returns; until
+  # then a re-run would join the in-flight gate.
+  local i
+  for ((i = 0; i < 50; i++)); do
+    [ -d "$MOCK_WORKSPACE/.ralph/gates/.unit.lock" ] || break
+    sleep 0.1
+  done
+  run _run_guard Bash "$gate"
+  _assert_cached
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh unit true -t other"
+  _assert_allowed
+}
+
+@test "label-lock: a tier command chained after a cd triggers the lock (0.27.1)" {
+  setup_v14_gates_policy
+  echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
+  run _run_guard Bash "cd $MOCK_WORKSPACE && bash \"\$(cat .ralph/gate-runner)\" unit pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("must run under label .full.")'
+}

@@ -42,7 +42,7 @@ the inventory when reviewing the loop's reliability end-to-end.
 - Activity-log emoji: 🔀 `GUARD REWRITE` on transparent rewrites, ⛔ `GUARD DENY` on hard blocks.
 
 ### Multi-consecutive gate checks without an interleaving change
-- `ralph-guard.sh`'s gate cache blocks re-running a gate label when nothing has changed since its last verdict: no Write/Edit since the last run (`LAST_WRITE_TS` vs `LAST_GATE_TS` in `$XDG_STATE_HOME/ralph/<workspace-hash>/`), and a working tree — `HEAD`, tracked changes, untracked files git does not ignore — identical to the one `gate-run.sh` recorded with that verdict (`.ralph/gates/<label>-latest.tree`). An edit made through Bash re-opens the gate; environmental remediation (daemon restarts, cache resets) touches no such file and does not.
+- `ralph-guard.sh`'s gate cache blocks re-running the command a gate label last ran when nothing has changed since its verdict: the same command `gate-run.sh` recorded with that verdict (`.ralph/gates/<label>-latest.cmd`, compared without quotes and with `pnpm run`/`pnpm -s` spellings normalized), no Write/Edit since the last run (`LAST_WRITE_TS` vs `LAST_GATE_TS` in `$XDG_STATE_HOME/ralph/<workspace-hash>/`), and a working tree — `HEAD`, tracked changes, untracked files git does not ignore — identical to the one `gate-run.sh` recorded with that verdict (`.ralph/gates/<label>-latest.tree`). A different command under the same label — another project's `pnpm test-unit <project>` — runs. An edit made through Bash re-opens the gate; environmental remediation (daemon restarts, cache resets) touches no such file and does not.
 - Prevents the "run gate → read output → re-run gate for more output" anti-pattern that wastes minutes per loop.
 
 ### Gate-level adherence (three-tier model)
@@ -264,7 +264,7 @@ When installed as a Claude Code plugin, Ralph registers a `PreToolUse` hook (`ra
 
 - **Transparent rewrites** — `[rewrite]` regex transforms and `[wrap]` auto-routing through `gate-run.sh` happen via `updatedInput` (no block, no agent retry). Logged to `activity.log` as 🔀 `GUARD REWRITE`.
 - **Hard denies** — state tampering (an `rm` or `find -delete` of `.ralph/`), direct test-tool invocations (`vitest`/`jest`/`cypress`/`tsc --noEmit` and their `pnpm`/`npx`/`yarn` and `node_modules/.bin` variants), `[deny]` rules — each judged per chained command. Logged as ⛔ `GUARD DENY`. The reason reaches the agent prefixed `[ralph-guard]`, and `errors.log` records it as `GUARD DENY` — the command never ran, so never as `SHELL FAIL`.
-- **Gate-without-change detection** — blocks re-running a gate label when no file has changed since its last verdict, whether through Write/Edit or any other edit to the working tree.
+- **Gate-without-change detection** — blocks re-running the command a gate label last ran when no file has changed since its verdict, whether through Write/Edit or any other edit to the working tree. Other commands under that label still run.
 - **State-file protection** — prevents the agent from tampering with `.ralph/gates/`, `.ralph/activity.log`, and other loop-owned state.
 
 A `Stop` hook (`handoff-check.sh`) emits a soft reminder (`systemMessage` payload) when the `## Working set` section of `handoff.md` wasn't updated during the loop. Advisory only — does not block the agent from yielding.

@@ -429,8 +429,8 @@ if [[ "${RALPH_GATE_ROLE:-}" == "runner" ]]; then
     else
       rm -f "$gates_dir/$label-latest.tree"
     fi
-    # 0.3.3 / 0.6.4 breadcrumbs, consumed by the loop's COMPLETE guard and
-    # the tier-command label-lock.
+    # 0.3.3 / 0.6.4 breadcrumbs, consumed by the loop's COMPLETE guard, the
+    # tier-command label-lock, and ralph-guard.sh's gate cache.
     printf '%s' "$code" >"$gates_dir/$label-latest.exit"
     printf '%s' "$_cmd_norm" >"$gates_dir/$label-latest.cmd"
     if [[ "$code" -ne 0 ]]; then
