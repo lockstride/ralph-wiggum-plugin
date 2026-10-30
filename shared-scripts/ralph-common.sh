@@ -1035,6 +1035,18 @@ _classify_heartbeat_exit() {
   echo "eof"
 }
 
+# True while any gate's detached runner holds its label lock
+# (.ralph/gates/.<label>.lock/pid names a live process).
+_gate_running() {
+  local workspace="$1" pidfile pid
+  for pidfile in "$workspace"/.ralph/gates/.*.lock/pid; do
+    [[ -f "$pidfile" ]] || continue
+    pid=$(cat "$pidfile" 2>/dev/null) || continue
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && return 0
+  done
+  return 1
+}
+
 # Probe whether the agent subshell is still alive after a grace window.
 #
 # Disambiguates between two EOF-on-FIFO cases:
@@ -1404,6 +1416,14 @@ run_loop() {
   # with exponential backoff.
   local heartbeat="${RALPH_HEARTBEAT_TIMEOUT:-300}"
 
+  # Idle watchdog: the parser's sidecar PINGs keep the read timer alive
+  # whenever the parser is, so the heartbeat cannot see a CLI that wedges
+  # with its stdout open. This one measures time since the last real stream
+  # event; a running gate counts as activity (its waiter is legitimately
+  # silent for up to the gate timeout).
+  local idle_limit="${RALPH_AGENT_IDLE_TIMEOUT:-900}"
+  local last_activity=$SECONDS
+
   local signal=""
   # 0.3.9: capture `read`'s ACTUAL exit status.
   #
@@ -1428,6 +1448,16 @@ run_loop() {
       _read_rc=$?
       break
     }
+    if [[ "$line" != "PING" ]] || _gate_running "$workspace"; then
+      last_activity=$SECONDS
+    elif [[ $((SECONDS - last_activity)) -ge $idle_limit ]]; then
+      [[ -t 2 ]] && printf "\r\033[K" >&2
+      echo "⏰ Agent idle — no stream event in ${idle_limit}s, killing agent..." >&2
+      log_activity "$workspace" "⏰ AGENT IDLE after ${idle_limit}s — no stream event while the pipeline is alive"
+      _reap_process_tree "$agent_pid"
+      signal="DEFER"
+      break
+    fi
     case "$line" in
       "HEARTBEAT")
         # 0.4.0: no-op control token. Stream-parser emits HEARTBEAT on

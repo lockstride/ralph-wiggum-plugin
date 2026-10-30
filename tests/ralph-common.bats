@@ -1612,3 +1612,62 @@ TASKS
   grep -q "## Auto-enriched state" "$MOCK_WORKSPACE/.ralph/handoff.md"
   ! grep -q "Working set written" "$MOCK_WORKSPACE/.ralph/handoff.md"
 }
+
+# ---------------------------------------------------------------------------
+# 0.28.0: idle watchdog — real stream events, not the parser's PINGs
+# ---------------------------------------------------------------------------
+
+@test "_gate_running: true while a gate runner holds its label lock (0.28.0)" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
+  sleep 30 3>&- &
+  echo $! >"$MOCK_WORKSPACE/.ralph/gates/.basic.lock/pid"
+  run _gate_running "$MOCK_WORKSPACE"
+  kill $! 2>/dev/null || true
+  [ "$status" -eq 0 ]
+}
+
+@test "_gate_running: false with no lock, or a lock whose runner is dead (0.28.0)" {
+  run _gate_running "$MOCK_WORKSPACE"
+  [ "$status" -eq 1 ]
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates/.full.lock"
+  sh -c 'exit 0' &
+  local dead=$!
+  wait "$dead"
+  echo "$dead" >"$MOCK_WORKSPACE/.ralph/gates/.full.lock/pid"
+  run _gate_running "$MOCK_WORKSPACE"
+  [ "$status" -eq 1 ]
+}
+
+# A CLI that emits nothing yet keeps its stdout open: the parser lives and
+# PINGs, so only the idle watchdog can end the loop. Runs in its own bash,
+# its output in a file, so the spinner's orphaned sleep cannot hold bats'
+# pipes open.
+_run_wedged_loop() {
+  local out="$MOCK_WORKSPACE/loop-signal"
+  bash -c '
+    source "$1/agent-adapter.sh"
+    source "$1/ralph-common.sh"
+    agent_build_cmd() { echo "sleep 53"; }
+    run_loop "$2" 1 "" "$1"
+  ' _ "$SCRIPTS_DIR" "$MOCK_WORKSPACE" >"$out" 2>/dev/null 3>&-
+  cat "$out"
+}
+
+@test "idle watchdog kills an agent that is silent while its pipeline lives (0.28.0)" {
+  export RALPH_AGENT_CLI=claude MODEL=test RALPH_PARSER_HEARTBEAT_INTERVAL=1 RALPH_AGENT_IDLE_TIMEOUT=2
+  run _run_wedged_loop
+  [ "$output" = "DEFER" ]
+  grep -q "AGENT IDLE after 2s" "$MOCK_WORKSPACE/.ralph/activity.log"
+  ! pgrep -f "^sleep 53$" >/dev/null
+}
+
+@test "idle watchdog holds while a gate runner is alive (0.28.0)" {
+  export RALPH_AGENT_CLI=claude MODEL=test RALPH_PARSER_HEARTBEAT_INTERVAL=1 RALPH_AGENT_IDLE_TIMEOUT=2
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates/.basic.lock"
+  sleep 5 3>&- &
+  echo $! >"$MOCK_WORKSPACE/.ralph/gates/.basic.lock/pid"
+  local start=$SECONDS
+  run _run_wedged_loop
+  [ $((SECONDS - start)) -ge 6 ]
+  grep -q "AGENT IDLE after 2s" "$MOCK_WORKSPACE/.ralph/activity.log"
+}

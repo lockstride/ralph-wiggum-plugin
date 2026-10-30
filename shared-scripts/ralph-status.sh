@@ -463,7 +463,7 @@ if [[ -f "$activity_log" ]]; then
   # Pattern list kept narrow on purpose — every pattern here is either a
   # state transition or a decision point. Expand only if it would answer
   # "what is the loop doing right now?" without re-reading the raw log.
-  _recent=$(grep -E 'COMMIT|🧪 GATE|(LOOP|ITERATION) [0-9.]+ (START|END)|PARSER EXIT|HEARTBEAT TIMEOUT|RECOVER_ATTEMPT|GUTTER|DEFERRED|ORPHAN|PIPELINE DRAIN|STOP_REQUESTED|ROTATE|RALPH STOP|🛌 NATURAL END' \
+  _recent=$(grep -E 'COMMIT|🧪 GATE|(LOOP|ITERATION) [0-9.]+ (START|END)|PARSER EXIT|HEARTBEAT TIMEOUT|AGENT IDLE|RECOVER_ATTEMPT|GUTTER|DEFERRED|ORPHAN|PIPELINE DRAIN|STOP_REQUESTED|ROTATE|RALPH STOP|🛌 NATURAL END' \
     "$activity_log" 2>/dev/null |
     grep -vE 'test -f .*stop-requested|cat .*handoff\.md|READ .*handoff\.md' |
     tail -8 || true)

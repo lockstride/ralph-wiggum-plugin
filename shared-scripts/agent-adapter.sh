@@ -290,15 +290,17 @@ foreach (try inputs catch empty) as $e (
           ) as $txt
         # 0.26.0: a denial by ralph-guard.sh — the call never ran. Its reason
         # opens with the guard's marker (RALPH_GUARD_DENY_MARKER there; keep
-        # the two in sync).
-        | ((.is_error // false) and ($txt | startswith("[ralph-guard] "))) as $denied
+        # the two in sync), after any "<Event>:<Tool> hook error: " the CLI
+        # puts before a hook's reason.
+        | "^(\\S+ hook error: )?\\[ralph-guard\\] " as $deny_re
+        | ((.is_error // false) and ($txt | test($deny_re))) as $denied
         | {kind:"tool_result",
            name: $info.name,
            path: $info.path,
            cmd: $info.cmd,
            sidechain: $sc,
            denied: $denied,
-           deny_reason: (if $denied then ($txt | ltrimstr("[ralph-guard] ") | .[0:240]) else "" end),
+           deny_reason: (if $denied then ($txt | sub($deny_re; "") | .[0:240]) else "" end),
            # A write is sized by what it wrote (0.26.1), a Read by what came back.
            bytes: ($info.written_bytes // ($txt | length)),
            lines: (if $info.written_lines != null then $info.written_lines

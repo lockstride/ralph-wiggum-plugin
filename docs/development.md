@@ -23,7 +23,7 @@ Tests cover:
 
 - `gate-run.sh` — timeout, exit codes, log retention, mkdir-mutex serialization, the per-verdict working-tree record
 - `tree-fingerprint.sh` — stability, and which working-tree changes move the fingerprint
-- `stream-parser.sh` — signal detection (ROTATE, WARN, GUTTER, TURN_END, DEFER, COMPLETE, RECOVER, HEARTBEAT), stall patterns, heartbeat sidecar
+- `stream-parser.sh` — signal detection (ROTATE, WARN, GUTTER, TURN_END, DEFER, COMPLETE, RECOVER, HEARTBEAT, PING), stall patterns, heartbeat sidecar
 - `prompt-resolver.sh` — caching, hash checks, fallbacks, multi-line `{{ACTIVITY_TAIL}}` rendering, `task-file-path` breadcrumb across all prompt modes
 - `ralph-evaluate.sh` — flag parsing, ground-truth resolution, report seeding, orchestrator prompt rendering
 - `ralph-status.sh` — PROGRESS banner, PREVIOUS/CURRENT/NEXT sections, terminal-width-aware wrapping
@@ -51,11 +51,12 @@ The hook runs shellcheck and shfmt on staged `.sh` files. Bypass with `git commi
 
 ## Watchdogs
 
-Two watchdogs prevent the loop from hanging indefinitely.
+Three watchdogs prevent the loop from hanging indefinitely.
 
 | Watchdog | Env var | Default | What it does |
 |---|---|---|---|
-| **Heartbeat timeout** | `RALPH_HEARTBEAT_TIMEOUT` | 300s | If the stream parser produces no output for this long, kills the agent and retries via DEFER with exponential backoff. The 0.5.3 sidecar emits a synthetic `HEARTBEAT` every 60s so this only fires when the agent is genuinely silent (not just deep in a long tool call). |
+| **Heartbeat timeout** | `RALPH_HEARTBEAT_TIMEOUT` | 300s | If the stream parser produces no output for this long, kills the agent and retries via DEFER with exponential backoff. The parser's sidecar `PING`s every 60s, so this fires only when the parser pipeline itself is dead or wedged. |
+| **Idle timeout** | `RALPH_AGENT_IDLE_TIMEOUT` | 900s | If no real stream event (anything but a sidecar `PING`) arrives for this long, kills the agent and retries via DEFER. Catches a CLI that wedges with its stdout still open, which the heartbeat cannot see. A gate whose runner holds its label lock counts as activity, so a long gate never trips it. Logged as `⏰ AGENT IDLE`. |
 | **Gate timeout** | `RALPH_GATE_TIMEOUT` (blanket) / `RALPH_BASIC_GATE_TIMEOUT` / `RALPH_FULL_GATE_TIMEOUT` / `RALPH_FINAL_GATE_TIMEOUT` | 1200s all tiers | If a gate command doesn't finish within this time, kills it and returns exit 124. Catches hung nx daemons and build processes. Requires `timeout` (Linux) or `gtimeout` (macOS via `brew install coreutils`). |
 
 ## Signals the loop understands
@@ -68,7 +69,8 @@ Emitted by the stream parser to the loop on stdout:
 - `RECOVER` — emitted on every successful `git commit`. Clears any latched GUTTER, the per-loop shell-failure counter, and the per-file write/edit thrash history (a successful commit is evidence of progress).
 - `COMPLETE` — agent emits `<ralph>COMPLETE</ralph>` or `<promise>ALL_TASKS_DONE</promise>`. The parser re-checks the real checkbox state before honoring.
 - `DEFER` — retryable API / network error (rate limit, 5xx, timeout). Loop waits with exponential backoff (15s → 120s + 0–25% jitter) and retries.
-- `HEARTBEAT` — synthetic liveness ping from the parser sidecar (0.5.3+). Resets the loop's `read -t` timer; never causes any agent-side action.
+- `HEARTBEAT` — emitted on every parser activity line. Resets the loop's `read -t` timer and its idle watchdog; never causes any agent-side action.
+- `PING` — the parser sidecar's fixed-interval liveness line. Resets only the `read -t` timer: it proves the parser is alive, not that the agent did anything.
 
 ## Acceptance evaluation loop — internals
 

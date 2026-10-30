@@ -750,18 +750,19 @@ EOF
   echo "$output" | grep -q "RECOVER"
 }
 
-@test "heartbeat sidecar emits HEARTBEAT on its interval even with no input (0.5.3)" {
-  # The sidecar must emit a HEARTBEAT line on a fixed schedule independent
+@test "heartbeat sidecar emits PING on its interval even with no input (0.5.3, 0.28.0)" {
+  # The sidecar must emit a liveness line on a fixed schedule independent
   # of the input stream. Without input the read loop blocks forever, but
   # downstream consumers (the main loop's `read -t RALPH_HEARTBEAT_TIMEOUT`)
   # must still see liveness. We pin the interval to 1s, hold stdin open
-  # with no input for 3s, then close stdin and capture stdout. Expect at
-  # least one HEARTBEAT line.
+  # with no input for 3s, then close stdin and capture stdout. The interval
+  # lines are PING, not HEARTBEAT, so the loop's idle watchdog can tell the
+  # parser being alive from the agent doing something.
   local out
   out=$(RALPH_PARSER_HEARTBEAT_INTERVAL=1 \
     bash -c 'sleep 3 | bash "$0" "$1" 1' \
     "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE")
-  echo "$out" | grep -q "^HEARTBEAT$"
+  [ "$(echo "$out" | grep -c "^PING$")" -ge 2 ]
 }
 
 @test "heartbeat sidecar exits when parser exits (no leaked process) (0.5.4)" {

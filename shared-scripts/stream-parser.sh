@@ -1367,10 +1367,14 @@ main() {
   # timer always resets while the parser is alive. The interval must stay
   # well below RALPH_HEARTBEAT_TIMEOUT (default 300s) for the sidecar to
   # actually keep the loop unblocked.
+  #
+  # The sidecar says PING, not HEARTBEAT: it proves the parser is alive, not
+  # that the agent did anything. The loop's idle watchdog counts only real
+  # events, so a CLI that wedges with its stdout still open is caught.
   local hb_interval="${RALPH_PARSER_HEARTBEAT_INTERVAL:-60}"
   (
     while sleep "$hb_interval"; do
-      echo "HEARTBEAT" 2>/dev/null || break
+      echo "PING" 2>/dev/null || break
     done
   ) &
   HB_SIDECAR_PID=$!

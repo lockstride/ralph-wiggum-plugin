@@ -64,7 +64,7 @@ Read breadcrumbs before narrative; they're cheap and orient you.
 | `.ralph/gates/` | Per-label gate results: `<label>-latest.{exit,cmd,log,summary,tree}`. `exit` is the authoritative pass/fail; `tree` (0.26.0) fingerprints the working tree the verdict ran against. Labels: `basic`, `final`, `e2e`, `lint`, `custom`, `eval-*`. Also `last-run` (`<label> <exit> <run-id>`, 0.24.0) — the end-of-run marker stream-parser consumes. |
 | `.ralph/gates.impl/` | The IMPLEMENTATION phase's gates, moved aside when the eval loop started (0.24.0). If an eval loop ran, this is where the impl-phase record lives — `gates/` holds only the eval loop's own. Absent ⇒ no eval loop ran. |
 | `.ralph/handoff-agent-ts` | Epoch seconds of the last time the `## Working set` content changed (0.24.0; keyed on content, however written, since 0.26.0 — before that only Write/Edit counted, so a Bash-written handoff read as stale). Compare against loop boundaries to judge how stale the working set was. |
-| `.ralph/errors.log` | Append-only list of every failed shell/gate — the fastest map of where it struggled. `GUARD DENY` entries (0.26.0) are commands the guard refused, which never ran; before 0.26.0 they were logged as `SHELL FAIL … exit 1`. `ADAPTER:` entries (0.26.2) are stream events the adapter could not read and skipped — usually a sign the CLI changed its event shape. |
+| `.ralph/errors.log` | Append-only list of every failed shell/gate — the fastest map of where it struggled. `GUARD DENY` entries (0.26.0) are commands the guard refused, which never ran; before 0.26.0 — and on Claude CLI 2.1.310+ before 0.28.0, which prefixes the reason with `PreToolUse:Bash hook error: ` — they were logged as `SHELL FAIL … exit 1` (the activity log's `⛔ GUARD DENY` line is right either way). `ADAPTER:` entries (0.26.2) are stream events the adapter could not read and skipped — usually a sign the CLI changed its event shape. |
 | `.ralph/handoff.md` | What the agent left for its next self. Reveals where it got stuck. |
 | `.ralph/activity.log` | The full narrative (can be thousands of lines). Read last after you know what to look for. |
 
@@ -87,7 +87,11 @@ the true size from the session transcript under
 Then `sed -n 'A,Bp'` the interesting regions. Read the activity-log legend from
 the emoji: 🧪 gate, 🔀 guard rewrite, ⛔ guard deny, 🚨 GUTTER (agent stuck),
 ⏱ SHELL CUT OFF (the command's own `timeout`/`kill` fired — an answer, not a
-failure; 0.24.0), ✅ COMPLETE, 🛑 COMPLETE BLOCKED, 🟢 normal shell/tool.
+failure; 0.24.0), ⏰ AGENT IDLE (no real stream event for
+`RALPH_AGENT_IDLE_TIMEOUT` while the pipeline lived — a wedged CLI, killed and
+retried; 0.28.0), ✅ COMPLETE, 🛑 COMPLETE BLOCKED, 🟢 normal shell/tool. A loop
+with a START but no END and a long silence after its last line is a wedged CLI
+on a plugin older than 0.28.0.
 `WRITE`/`EDIT` sizes are the text written since 0.26.1; before that they were
 the tool's one-line result, so every write read `1 lines, 0KB`.
 

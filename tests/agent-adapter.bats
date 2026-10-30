@@ -303,6 +303,17 @@ _claude_result() { # $1=cmd $2=is_error $3=result text
   echo "$output" | jq -e '.deny_reason == "State tampering denied: cannot delete .ralph/"'
 }
 
+@test "claude: a denial behind the CLI's hook-error prefix is still a denial (0.28.0)" {
+  run _claude_result "pnpm nx run api:serve" true "PreToolUse:Bash hook error: [ralph-guard] This nx target has no gated route."
+  echo "$output" | jq -e '.denied == true'
+  echo "$output" | jq -e '.deny_reason == "This nx target has no gated route."'
+}
+
+@test "claude: the guard marker mid-way through a failure is not a denial (0.28.0)" {
+  run _claude_result "grep -c x notes.txt" true "notes.txt: [ralph-guard] seen in a note"
+  echo "$output" | jq -e '.denied == false'
+}
+
 @test "claude: a command that ran and failed is not a denial (0.26.0)" {
   run _claude_result "pnpm test" true "Error: 3 tests failed"
   echo "$output" | jq -e '.denied == false'

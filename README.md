@@ -282,7 +282,8 @@ The stream parser emits signals that the main loop uses to decide when to rotate
 | `COMPLETE` | Agent emits `<promise>ALL_TASKS_DONE</promise>` | Loop exits successfully; chains `--evaluate` if set |
 | `DEFER` | Rate limit or transient API error | Backoff and retry (does not increment respawn count) |
 | `RECOVER` | Successful `git commit` after a gate failure | Resets the gate-fail streak counter |
-| `HEARTBEAT` | Any tool activity | Resets the main loop's read-timeout — internal, not user-visible |
+| `HEARTBEAT` | Any tool activity | Resets the main loop's read-timeout and idle watchdog — internal, not user-visible |
+| `PING` | Every 60s while the parser lives | Resets the read-timeout only — internal, not user-visible |
 
 Loop-end activity-log labels: 🤝 `GRACEFUL YIELD` (agent honored a breadcrumb and wrote handoff), 🔄 `ROTATE` (context cliff), 🛑 `TURN_END` (gate-fail streak), 🛌 `NATURAL END` (agent bailed politely without yielding).
 
