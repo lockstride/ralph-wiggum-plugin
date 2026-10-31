@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Loop status snapshot
 #
 # Prints a one-screen summary of the current Ralph loop's state for an

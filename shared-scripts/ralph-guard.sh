@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: PreToolUse hook guard
 #
 # Single entry point for all PreToolUse decisions. Dispatches on tool_name

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Prompt Source Resolver
 #
 # Selects and renders the "effective prompt" that the loop feeds the

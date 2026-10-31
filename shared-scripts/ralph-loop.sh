@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: The Loop (CLI-agnostic)
 #
 # Drives either the Claude Code (`claude`) or Cursor (`cursor-agent`)

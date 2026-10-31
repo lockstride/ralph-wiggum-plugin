@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Agent Adapter
 #
 # Abstracts the differences between Claude Code (`claude`) and Cursor

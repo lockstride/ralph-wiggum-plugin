@@ -100,7 +100,7 @@ First-class utility — treat changes to it with the same care as `ralph-common.
 
 ## Shell conventions
 
-- All scripts use `#!/bin/bash` and `set -euo pipefail`
+- All scripts use `#!/usr/bin/env bash` and `set -euo pipefail`. Never pin `#!/bin/bash`: macOS `/bin/bash` 3.2 crashes in `fork` under load (`./lint.sh` rejects it). Code still targets the 3.2 floor, which the pre-commit hook tests.
 - Use `local` for function variables; declare and assign separately (`local x; x=$(cmd)`)
 - Guard `cd` with `|| return` or `|| exit`
 - Use `read -r` to prevent backslash mangling

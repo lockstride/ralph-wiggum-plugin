@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Gate runner wrapper
 #
 # Executes a gate command (typically `pnpm all-check`, `pnpm test-e2e:local`,

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Lint and format-check all shell scripts in the project.
 #
 # Usage:
@@ -27,6 +27,18 @@ while IFS= read -r f; do
 done < <(find "$REPO_ROOT" -name '*.sh' -not -path '*/.git/*' -not -path '*/.ralph/*' | sort)
 
 errors=0
+
+# -----------------------------------------------------------------------------
+# Shebang — scripts take bash from PATH, never a pinned /bin/bash: macOS
+# /bin/bash 3.2 crashes in fork under load. The pre-commit hook still tests
+# the 3.2 floor by putting /bin first on PATH.
+# -----------------------------------------------------------------------------
+for f in "${SH_FILES[@]}"; do
+  if [[ "$(head -n1 "$f")" == '#!/bin/bash' ]]; then
+    echo "❌ shebang: $f uses #!/bin/bash — use #!/usr/bin/env bash" >&2
+    errors=1
+  fi
+done
 
 # -----------------------------------------------------------------------------
 # Shellcheck stage (parallel via xargs -P)

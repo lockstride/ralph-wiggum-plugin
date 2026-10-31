@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Stop-event hook
 #
 # Soft reminder that emits a notice if .ralph/handoff.md was not updated

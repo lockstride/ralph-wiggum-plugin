@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Task Parser with YAML Backend
 #
 # Parses RALPH_TASK.md and extracts tasks, with optional YAML caching.

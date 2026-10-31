@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Install script for non-Claude-Code users
 #
 # Drops the ralph shell scripts into .claude/ralph-scripts/ in the

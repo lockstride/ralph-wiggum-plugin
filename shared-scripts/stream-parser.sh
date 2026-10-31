@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Stream Parser (canonical schema)
 #
 # Reads canonical-schema JSON events (one per line) produced by

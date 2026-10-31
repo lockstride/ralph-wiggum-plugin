@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: working-tree fingerprint
 #
 # Prints one hash that changes whenever the CONTENT of the workspace does:

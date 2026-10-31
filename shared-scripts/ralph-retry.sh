@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Retry Logic with Exponential Backoff
 #
 # Provides retry utilities for handling transient failures:

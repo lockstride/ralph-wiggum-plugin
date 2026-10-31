@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Interactive Setup & Loop (CLI-agnostic)
 #
 # The main entry point for Ralph. Uses gum for a nice CLI experience,

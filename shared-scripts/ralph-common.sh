@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Common utilities and loop logic (CLI-agnostic)
 #
 # Shared functions for ralph-loop.sh, ralph-once.sh and ralph-setup.sh.

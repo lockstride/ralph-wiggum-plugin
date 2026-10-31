@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Single Loop (Human-in-the-Loop)
 #
 # Runs exactly ONE Ralph loop, then stops.

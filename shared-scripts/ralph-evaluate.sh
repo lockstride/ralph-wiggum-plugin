@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ralph Wiggum: Acceptance Evaluation Loop
 #
 # Runs a second Ralph loop *after* a main implementation loop has finished,
