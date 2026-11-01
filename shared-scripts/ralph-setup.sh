@@ -485,9 +485,11 @@ main() {
   [[ -n "$USE_BRANCH" ]] && echo "✓ Branch: $USE_BRANCH"
   [[ "${OPEN_PR:-false}" == "true" ]] && echo "✓ Will open PR when complete"
 
-  # Re-derive thresholds for selected CLI + model (Opus or [1m] → 300K/250K)
-  ROTATE_THRESHOLD="$(agent_default_rotate_threshold "$RALPH_AGENT_CLI" "$MODEL")"
-  WARN_THRESHOLD="$(agent_default_warn_threshold "$RALPH_AGENT_CLI" "$MODEL")"
+  # Re-derive thresholds for selected CLI + model (Opus or [1m] → 300K/250K),
+  # keeping any the operator set.
+  derive_thresholds
+  agent_check_thresholds "$RALPH_AGENT_CLI" "$MODEL" "$ROTATE_THRESHOLD" "$WARN_THRESHOLD" || exit 64
+  echo "✓ Context: warn at $WARN_THRESHOLD, rotate at $ROTATE_THRESHOLD"
   export RALPH_AGENT_CLI MODEL MAX_LOOPS USE_BRANCH OPEN_PR ROTATE_THRESHOLD WARN_THRESHOLD
 
   echo ""

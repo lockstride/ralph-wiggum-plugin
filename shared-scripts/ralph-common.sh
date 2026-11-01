@@ -55,10 +55,20 @@ else
   EFFORT="${RALPH_EFFORT:-}"
 fi
 
-# Token thresholds — derived from CLI + model (1M window vs standard 200K)
+# Token thresholds — derived from CLI + model (1M window vs standard 200K).
+# Operator-set values win. They are captured before the first derivation
+# fills the same names, so a launcher re-deriving once the model is final
+# (derive_thresholds) still keeps them.
+OPERATOR_ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-}"
+OPERATOR_WARN_THRESHOLD="${WARN_THRESHOLD:-}"
+
+derive_thresholds() {
+  ROTATE_THRESHOLD="${OPERATOR_ROTATE_THRESHOLD:-$(agent_default_rotate_threshold "$RALPH_AGENT_CLI" "$MODEL")}"
+  WARN_THRESHOLD="${OPERATOR_WARN_THRESHOLD:-$(agent_default_warn_threshold "$RALPH_AGENT_CLI" "$MODEL" "$ROTATE_THRESHOLD")}"
+}
+
 if type agent_default_rotate_threshold >/dev/null 2>&1; then
-  ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-$(agent_default_rotate_threshold "$RALPH_AGENT_CLI" "$MODEL")}"
-  WARN_THRESHOLD="${WARN_THRESHOLD:-$(agent_default_warn_threshold "$RALPH_AGENT_CLI" "$MODEL")}"
+  derive_thresholds
 else
   ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-80000}"
   WARN_THRESHOLD="${WARN_THRESHOLD:-70000}"

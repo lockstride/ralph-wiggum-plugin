@@ -1188,6 +1188,36 @@ TASKS
 # The tier suffix is matched case-sensitively; an uppercase [1M] silently
 # falls back to the 200K branch, which is a real footgun when hand-passing
 # -m from a launcher script.
+# The launchers re-derive thresholds once the model is final; they used to
+# overwrite an operator's ROTATE_THRESHOLD, so the documented knob did nothing.
+@test "an operator ROTATE_THRESHOLD survives and moves the warn point with it (0.28.2)" {
+  ROTATE_THRESHOLD=450000
+  unset WARN_THRESHOLD
+  RALPH_MODEL=opus
+  source "$SCRIPTS_DIR/ralph-common.sh"
+  [ "$OPERATOR_ROTATE_THRESHOLD" = "450000" ]
+  [ -z "$OPERATOR_WARN_THRESHOLD" ]
+  [ "$ROTATE_THRESHOLD" = "450000" ]
+  [ "$WARN_THRESHOLD" = "400000" ]
+}
+
+@test "warn derives from the rotate in effect: 50K below on 1M, 7/8 elsewhere (0.28.2)" {
+  [ "$(agent_default_warn_threshold claude opus 450000)" = "400000" ]
+  [ "$(agent_default_warn_threshold claude sonnet 160000)" = "140000" ]
+}
+
+@test "threshold check accepts a raised 1M budget and refuses unusable ones (0.28.2)" {
+  agent_check_thresholds claude opus 450000 400000
+  run agent_check_thresholds claude opus 450k 400000
+  [ "$status" -ne 0 ]
+  run agent_check_thresholds claude opus 400000 400000
+  [ "$status" -ne 0 ]
+  run agent_check_thresholds claude opus 1000000 950000
+  [ "$status" -ne 0 ]
+  run agent_check_thresholds claude sonnet 250000 200000
+  [ "$status" -ne 0 ]
+}
+
 @test "uppercase [1M] does NOT get the 1M thresholds (0.22.0)" {
   [ "$(agent_default_rotate_threshold claude "sonnet[1M]")" = "170000" ]
 }

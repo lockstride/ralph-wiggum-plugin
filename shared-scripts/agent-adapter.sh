@@ -517,20 +517,48 @@ agent_default_rotate_threshold() {
 # .ralph/context-warning-active, so the agent yields at its next post-commit
 # check instead of being force-killed at ROTATE_THRESHOLD.
 #
-# 1M-window models pin this at 250K against a 300K ceiling rather than taking
-# the generic 7/8, which would leave only 37.5K to land the work. A flat 50K
-# landing zone is what makes the difference between a 🤝 GRACEFUL YIELD and a
-# 🔄 ROTATE force-kill on a long loop.
+# 1M-window models sit 50K below rotate (250K against the default 300K)
+# rather than taking the generic 7/8, which would leave only 37.5K to land the
+# work. A flat 50K landing zone is what makes the difference between a 🤝
+# GRACEFUL YIELD and a 🔄 ROTATE force-kill on a long loop.
+#
+# Derived from the rotate threshold in effect — pass an operator-set one as
+# $3 — so raising ROTATE_THRESHOLD alone moves the warn point with it.
 agent_default_warn_threshold() {
   local cli model rotate
   cli="$(agent_normalize_cli_name "$1")"
   model="${2:-}"
+  rotate="${3:-$(agent_default_rotate_threshold "$cli" "$model")}"
 
   if agent_model_has_1m_window "$cli" "$model"; then
-    echo "250000"
+    echo $((rotate - 50000))
     return
   fi
 
-  rotate="$(agent_default_rotate_threshold "$cli" "$model")"
   echo $((rotate * 7 / 8))
+}
+
+# Refuse thresholds the loop cannot act on: a non-integer breaks the stream
+# parser's arithmetic, a warn at or above rotate never requests a yield, and a
+# rotate at or past the model's window never fires.
+agent_check_thresholds() {
+  local cli model rotate warn window=200000
+  cli="$(agent_normalize_cli_name "$1")"
+  model="${2:-}"
+  rotate="$3"
+  warn="$4"
+  agent_model_has_1m_window "$cli" "$model" && window=1000000
+
+  if ! [[ "$rotate" =~ ^[1-9][0-9]*$ && "$warn" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ROTATE_THRESHOLD and WARN_THRESHOLD must be positive integers (got '$rotate' / '$warn')" >&2
+    return 1
+  fi
+  if ((warn >= rotate)); then
+    echo "WARN_THRESHOLD ($warn) must be below ROTATE_THRESHOLD ($rotate)" >&2
+    return 1
+  fi
+  if ((rotate >= window)); then
+    echo "ROTATE_THRESHOLD ($rotate) must be below $model's $window-token window" >&2
+    return 1
+  fi
 }

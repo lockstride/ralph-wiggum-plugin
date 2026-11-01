@@ -322,8 +322,8 @@ main() {
     MODEL="$(agent_default_model "$RALPH_AGENT_CLI")"
   fi
   local ROTATE_THRESHOLD WARN_THRESHOLD
-  ROTATE_THRESHOLD="$(agent_default_rotate_threshold "$RALPH_AGENT_CLI" "$MODEL")"
-  WARN_THRESHOLD="$(agent_default_warn_threshold "$RALPH_AGENT_CLI" "$MODEL")"
+  derive_thresholds
+  agent_check_thresholds "$RALPH_AGENT_CLI" "$MODEL" "$ROTATE_THRESHOLD" "$WARN_THRESHOLD" || exit 64
   local MAX_LOOPS="${EVAL_ITER_FROM_FLAG:-${RALPH_EVAL_MAX_LOOPS:-10}}"
 
   # Tell run_ralph_loop's completion guard (_complete_allowed) that this is
