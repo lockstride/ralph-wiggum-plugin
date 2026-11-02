@@ -1961,3 +1961,13 @@ EOF
   echo "$output" | jq -e --arg c "bash $SCRIPTS_DIR/gate-run.sh e2e 'pnpm test-e2e-ai:full --x; touch pwned'" \
     '.hookSpecificOutput.updatedInput.command == $c'
 }
+
+@test "gate-run: shell options before the harness still make it a gate invocation" {
+  _nx_policy
+  local opt
+  for opt in "--rcfile x" "--norc" "-o pipefail" "-e -x" "--noprofile --norc"; do
+    run _run_guard Bash "bash $opt $SCRIPTS_DIR/gate-run.sh e2e pnpm nx run api:lint"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  done
+}
