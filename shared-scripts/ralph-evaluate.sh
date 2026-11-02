@@ -251,18 +251,30 @@ record_gate_runner() {
 # gates and finished with exactly one still readable. Moving the directory
 # aside gives the guard the same empty slate and keeps the evidence.
 #
-# An existing archive is from a PRIOR eval run over the same worktree; the
-# implementation gates it held were already superseded by the ones we are
-# about to move. Falls back to deleting if the move fails — an empty gates
-# dir is the invariant, the archive is a courtesy.
+# No archive is ever deleted. The eval loop marks the dir it starts with
+# (EVAL_GATES_MARKER), so a relaunch can tell its own gates from the
+# implementation phase's: a prior eval run's dir is archived as
+# gates.eval-<UTC stamp>, leaving gates.impl/ — the implementation record —
+# untouched. An unmarked dir is the implementation phase's and becomes
+# gates.impl/; an older gates.impl/, from an earlier cycle on this worktree,
+# is kept as gates.impl-<UTC stamp>. Falls back to deleting if the move
+# fails — an empty gates dir is the invariant, the archive is a courtesy.
+EVAL_GATES_MARKER=".eval-run"
 archive_impl_gates() {
   local workspace="$1"
   local gates="$workspace/.ralph/gates"
   if [[ -d "$gates" ]]; then
-    rm -rf "$gates.impl"
-    mv "$gates" "$gates.impl" 2>/dev/null || rm -rf "$gates"
+    local stamp dest="$gates.impl"
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    if [[ -f "$gates/$EVAL_GATES_MARKER" ]]; then
+      dest="$gates.eval-$stamp"
+    elif [[ -d "$dest" ]]; then
+      mv "$dest" "$gates.impl-$stamp" 2>/dev/null || true
+    fi
+    mv "$gates" "$dest" 2>/dev/null || rm -rf "$gates"
   fi
   mkdir -p "$gates"
+  : >"$gates/$EVAL_GATES_MARKER"
 }
 
 # Render a thin framing prompt that points the agent at the

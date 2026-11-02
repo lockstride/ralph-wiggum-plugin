@@ -58,6 +58,9 @@ REPORTED_TOKENS=0
 REPORTED_AT_BYTES=0
 TOTAL_BYTES=0
 WARN_SENT=0
+# Rotation is asked for once per loop: check_gutter runs from two call
+# sites, and both can see the same threshold crossing.
+ROTATE_SENT=0
 TOOL_CALL_COUNT=0
 RATE_LIMITED=0
 
@@ -501,6 +504,8 @@ check_gutter() {
   tokens=$(calc_tokens)
 
   if [[ $tokens -ge $ROTATE_THRESHOLD ]]; then
+    [[ $ROTATE_SENT -eq 0 ]] || return 0
+    ROTATE_SENT=1
     log_activity "ROTATE: Token threshold reached ($tokens >= $ROTATE_THRESHOLD)"
     echo "ROTATE" 2>/dev/null || true
     return

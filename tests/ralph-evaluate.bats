@@ -388,24 +388,45 @@ TPL
 
   archive_impl_gates "$MOCK_WORKSPACE"
 
-  # The guard's invariant: a fresh, empty gates dir.
+  # The guard's invariant: a fresh gates dir with no verdict in it, marked as
+  # the eval loop's.
   [ -d "$MOCK_WORKSPACE/.ralph/gates" ]
-  [ -z "$(ls -A "$MOCK_WORKSPACE/.ralph/gates")" ]
+  [ "$(ls -A "$MOCK_WORKSPACE/.ralph/gates")" = ".eval-run" ]
   # The evidence survives.
   [ "$(cat "$MOCK_WORKSPACE/.ralph/gates.impl/full-latest.exit")" = "0" ]
   [ -f "$MOCK_WORKSPACE/.ralph/gates.impl/full-20260808T195621Z-1.log" ]
 }
 
-@test "archive_impl_gates: a stale archive from a prior eval run is replaced" {
+@test "archive_impl_gates: an eval relaunch keeps the impl record (0.29.0)" {
+  # A relaunched eval loop found its own prior run's gates in gates/ and moved
+  # them over gates.impl/: the implementation phase's 67 `full` runs had no
+  # surviving record.
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'pnpm all-check' > "$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  archive_impl_gates "$MOCK_WORKSPACE"
+  printf 'pnpm all-check:no-cache' > "$MOCK_WORKSPACE/.ralph/gates/final-latest.cmd"
+
+  archive_impl_gates "$MOCK_WORKSPACE"
+
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/gates.impl/full-latest.cmd")" = "pnpm all-check" ]
+  local eval_dirs=("$MOCK_WORKSPACE"/.ralph/gates.eval-*)
+  [ "${#eval_dirs[@]}" -eq 1 ]
+  [ "$(cat "${eval_dirs[0]}/final-latest.cmd")" = "pnpm all-check:no-cache" ]
+  [ "$(ls -A "$MOCK_WORKSPACE/.ralph/gates")" = ".eval-run" ]
+}
+
+@test "archive_impl_gates: an older impl archive is kept, not replaced (0.29.0)" {
   mkdir -p "$MOCK_WORKSPACE/.ralph/gates.impl"
-  printf 'from the run before' > "$MOCK_WORKSPACE/.ralph/gates.impl/stale.log"
+  printf 'from the cycle before' > "$MOCK_WORKSPACE/.ralph/gates.impl/full-latest.cmd"
   mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
   printf '0' > "$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
 
   archive_impl_gates "$MOCK_WORKSPACE"
 
-  [ ! -f "$MOCK_WORKSPACE/.ralph/gates.impl/stale.log" ]
   [ -f "$MOCK_WORKSPACE/.ralph/gates.impl/full-latest.exit" ]
+  local older=("$MOCK_WORKSPACE"/.ralph/gates.impl-*)
+  [ "${#older[@]}" -eq 1 ]
+  [ "$(cat "${older[0]}/full-latest.cmd")" = "from the cycle before" ]
 }
 
 @test "archive_impl_gates: creates the gates dir when there was none" {

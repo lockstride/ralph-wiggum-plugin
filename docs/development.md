@@ -63,7 +63,7 @@ Three watchdogs prevent the loop from hanging indefinitely.
 
 Emitted by the stream parser to the loop on stdout:
 
-- `ROTATE` — context threshold hit; loop kills the agent and starts a fresh loop. On the Claude CLI the context is the size the API reports for each request; cursor-agent uses a byte estimate.
+- `ROTATE` — context threshold hit, sent once per loop; loop kills the agent and starts a fresh loop. On the Claude CLI the context is the size the API reports for each request; cursor-agent uses a byte estimate.
 - `WARN` — approaching the threshold; agent is told to wrap up.
 - `GUTTER` — hard stuck pattern (e.g., 10 writes/edits to the same file inside a 5-min window with no commit; 5 shell failures — or guard denials — of the same command since the last commit), OR agent self-signals via `<ralph>GUTTER</ralph>`. Loop ends with a postmortem bundle. Thresholds tunable via `RALPH_FILE_THRASH_THRESHOLD`, `RALPH_FILE_THRASH_WINDOW_SECONDS`, `RALPH_SHELL_FAIL_THRESHOLD`.
 - `RECOVER` — emitted on every successful `git commit`. Clears any latched GUTTER, the per-loop shell-failure counter, and the per-file write/edit thrash history (a successful commit is evidence of progress).

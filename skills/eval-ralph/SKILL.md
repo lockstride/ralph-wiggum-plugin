@@ -62,7 +62,7 @@ Read breadcrumbs before narrative; they're cheap and orient you.
 | `.ralph/acceptance-report.md` | Eval-loop output: Status (CLEAN/…), Last loop, Last mode (VERIFIER/REWORK), Gaps, History. Present ⇒ an eval loop ran. |
 | `.ralph/eval-ground-truth` | Path to the spec `tasks.md` the eval graded against. |
 | `.ralph/gates/` | Per-label gate results: `<label>-latest.{exit,cmd,log,summary,tree}`. `exit` is the authoritative pass/fail; `tree` (0.26.0) fingerprints the working tree the verdict ran against. Labels: `basic`, `final`, `e2e`, `lint`, `custom`, `eval-*`. Also `last-run` (`<label> <exit> <run-id>`, 0.24.0) — the end-of-run marker stream-parser consumes. |
-| `.ralph/gates.impl/` | The IMPLEMENTATION phase's gates, moved aside when the eval loop started (0.24.0). If an eval loop ran, this is where the impl-phase record lives — `gates/` holds only the eval loop's own. Absent ⇒ no eval loop ran. |
+| `.ralph/gates.impl/` | The IMPLEMENTATION phase's gates, moved aside when the eval loop started (0.24.0). If an eval loop ran, this is where the impl-phase record lives — `gates/` holds only the eval loop's own. Absent ⇒ no eval loop ran. Before 0.29.0 each eval *relaunch* moved the previous eval run's gates over it, so on a relaunched eval it may hold eval gates and no `full-*` files. Since 0.29.0 a relaunch archives the prior eval run's dir as `gates.eval-<UTC stamp>/` (the eval loop marks its dir with `.eval-run`), and an older impl archive is kept as `gates.impl-<UTC stamp>/`. |
 | `.ralph/handoff-agent-ts` | Epoch seconds of the last time the `## Working set` content changed (0.24.0; keyed on content, however written, since 0.26.0 — before that only Write/Edit counted, so a Bash-written handoff read as stale). Compare against loop boundaries to judge how stale the working set was. |
 | `.ralph/errors.log` | Append-only list of every failed shell/gate — the fastest map of where it struggled. `GUARD DENY` entries (0.26.0) are commands the guard refused, which never ran; before 0.26.0 — and on Claude CLI 2.1.310+ before 0.28.0, which prefixes the reason with `PreToolUse:Bash hook error: ` — they were logged as `SHELL FAIL … exit 1` (the activity log's `⛔ GUARD DENY` line is right either way). `ADAPTER:` entries (0.26.2) are stream events the adapter could not read and skipped — usually a sign the CLI changed its event shape. |
 | `.ralph/handoff.md` | What the agent left for its next self. Reveals where it got stuck. |
@@ -89,9 +89,15 @@ the emoji: 🧪 gate, 🔀 guard rewrite, ⛔ guard deny, 🚨 GUTTER (agent stu
 ⏱ SHELL CUT OFF (the command's own `timeout`/`kill` fired — an answer, not a
 failure; 0.24.0), ⏰ AGENT IDLE (no real stream event for
 `RALPH_AGENT_IDLE_TIMEOUT` while the pipeline lived — a wedged CLI, killed and
-retried; 0.28.0), ✅ COMPLETE, 🛑 COMPLETE BLOCKED, 🟢 normal shell/tool. A loop
-with a START but no END and a long silence after its last line is a wedged CLI
-on a plugin older than 0.28.0.
+retried; 0.28.0), ⚡ LOOP N caught SIG… (the loop was torn down by a signal;
+0.29.0), 💀 DRIVER GONE (the driver died mid-loop, so no LOOP END follows;
+0.29.0), 🧹 STRAY AGENT SWEEP (an agent outlived its reap — since 0.29.0 the
+line says whether it was a prior loop's or this loop's, with its parent pid;
+ppid 1 means it had been orphaned), ✅ COMPLETE, 🛑 COMPLETE BLOCKED, 🟢 normal
+shell/tool. A loop with a START but no END and a long silence after its last
+line is a wedged CLI on a plugin older than 0.28.0; one with no END and no
+silence, on a plugin older than 0.29.0, is a driver that died. `bail #N` and
+the Max-loops `bails:` count graceful yields too before 0.29.0.
 `WRITE`/`EDIT` sizes are the text written since 0.26.1; before that they were
 the tool's one-line result, so every write read `1 lines, 0KB`.
 
@@ -161,6 +167,10 @@ version** the run used — the activity log shows the path, e.g.
   every command in a chain (`cd x && …`, `a; b`, one per line) meets `[rewrite]`,
   `[deny]` and the direct-runner check, and `pnpm -s` / `--silent` is normalized
   away — so a guard-evasion finding against an older run may no longer reproduce.
+  Since 0.29.0 the command a direct `gate-run.sh <label> <command>` call gates
+  meets `[rewrite]` and `[deny]` too, and runs and is cached in its rewritten
+  form: before that, respelling a cache-denied command as one the policy routes
+  elsewhere (`pnpm nx run <project>:<target>`) ran it raw under a fresh key.
 
 **The cache is a forcing function, not a bug.** Its purpose is to enforce a core
 Ralph principle: *whenever a gate/test fails, the agent owns it and must fix the

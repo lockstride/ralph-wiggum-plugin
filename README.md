@@ -37,7 +37,7 @@ the inventory when reviewing the loop's reliability end-to-end.
   - `[deny]` — hard block with `permissionDecision: deny` (e.g. containerized E2E).
   - `[wrap]` — auto-routes other commands through `gate-run.sh <label> <cmd>` transparently. Labels: `basic | full | final | unit | integration | e2e | lint | format`.
   - `[protect]` — bare invocation OK; pipe/redirect denied.
-- Canonicalization (`_canonicalize` in `ralph-guard.sh`): env-prefix stripped, pipes/redirects stripped, a package-local binary path (`./node_modules/.bin/X`) mapped to the lockfile's exec form (`pnpm X`, `yarn X` or `npx X`), `pnpm run X` / `pnpm exec X` / `pnpm -s X` / `pnpm --silent X` normalized to `pnpm X`. Compound chains (`cd dir && pnpm A; pnpm B`, and commands on separate lines) split the way the shell reads them — quoted strings, substitutions and heredoc bodies never split — and every command in the chain meets `[rewrite]`, `[deny]` and the direct-runner check. If any command matches `[wrap]`, the whole chain is rewrapped on just that command; otherwise a rewrite replaces only the command it matched.
+- Canonicalization (`_canonicalize` in `ralph-guard.sh`): env-prefix stripped, pipes/redirects stripped, a package-local binary path (`./node_modules/.bin/X`) mapped to the lockfile's exec form (`pnpm X`, `yarn X` or `npx X`), `pnpm run X` / `pnpm exec X` / `pnpm -s X` / `pnpm --silent X` normalized to `pnpm X`. Compound chains (`cd dir && pnpm A; pnpm B`, and commands on separate lines) split the way the shell reads them — quoted strings, substitutions and heredoc bodies never split — and every command in the chain meets `[rewrite]`, `[deny]` and the direct-runner check. If any command matches `[wrap]`, the whole chain is rewrapped on just that command; otherwise a rewrite replaces only the command it matched. A command that runs the gate harness (`bash …/gate-run.sh <label> <cmd>`, or the `.ralph/gate-runner` form) puts `<cmd>` to `[rewrite]` and `[deny]`, and a rewritten one runs and is cached in its rewritten form.
 - A `[rewrite]` that produces `pnpm <name>` where `<name>` is no root `package.json` script, pnpm subcommand or package-local binary is denied instead of emitted — the denial names the root scripts that do exist.
 - Activity-log emoji: 🔀 `GUARD REWRITE` on transparent rewrites, ⛔ `GUARD DENY` on hard blocks.
 
@@ -62,6 +62,7 @@ the inventory when reviewing the loop's reliability end-to-end.
 - `--evaluate` chains an acceptance-evaluation loop after the main loop emits `ALL_TASKS_DONE`.
 - `ralph-evaluate.sh` orchestrates two roles in alternation: `running-acceptance-evaluation` skill (orchestrator), which delegates to `verifying-acceptance-criteria` (VERIFIER role) or `addressing-acceptance-gaps` (REWORK role) via the `Task` tool.
 - Drives `.ralph/acceptance-report.md` — checkbox state advances the loop. Verifier runs the project's `[gates].final` command under label `final` independently; rework loops fix logged gaps.
+- Starts on an empty gates dir, so no implementation-phase verdict can satisfy its guard. The implementation phase's gates are kept in `.ralph/gates.impl/`; a relaunched eval keeps its prior run's as `.ralph/gates.eval-<UTC stamp>/`. Nothing is deleted.
 
 ### Proper dynamic prompt generation
 - `prompt-resolver.sh` reads the project's `speckit-implement` skill, applies the adaptation guide, and invokes `claude -p --model sonnet --effort medium` to produce a loop-adapted body.
@@ -285,7 +286,9 @@ The stream parser emits signals that the main loop uses to decide when to rotate
 | `HEARTBEAT` | Any tool activity | Resets the main loop's read-timeout and idle watchdog — internal, not user-visible |
 | `PING` | Every 60s while the parser lives | Resets the read-timeout only — internal, not user-visible |
 
-Loop-end activity-log labels: 🤝 `GRACEFUL YIELD` (agent honored a breadcrumb and wrote handoff), 🔄 `ROTATE` (context cliff), 🛑 `TURN_END` (gate-fail streak), 🛌 `NATURAL END` (agent bailed politely without yielding).
+Loop-end activity-log labels: 🤝 `GRACEFUL YIELD` (agent honored a breadcrumb and wrote handoff), 🔄 `ROTATE` (context cliff), 🛑 `TURN_END` (gate-fail streak), 🛌 `NATURAL END` (agent bailed politely without yielding; `bail #N` counts only these).
+
+A loop torn down from outside logs ⚡ `LOOP N caught SIG…`; a driver that dies mid-loop gets 💀 `DRIVER GONE` from the loop it left behind, since it can log no END itself. 🧹 `STRAY AGENT SWEEP` names whether the agent it killed was a prior loop's or this loop's, and its parent pid.
 
 ## Spec Kit mode
 

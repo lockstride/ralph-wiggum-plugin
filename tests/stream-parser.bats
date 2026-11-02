@@ -72,6 +72,21 @@ EOF
   echo "$output" | grep -q "ROTATE"
 }
 
+@test "asks for ROTATE once (0.29.0)" {
+  # Two events in the same second reached the threshold check from both of its
+  # call sites, and the activity log recorded the rotation twice.
+  local events=""
+  for i in $(seq 1 10); do
+    events+=$(tool_result_json "Read" 100 10 0 "/tmp/file${i}.ts")
+    events+=$'\n'
+  done
+
+  local output
+  output=$(run_parser "$events")
+  [ "$(echo "$output" | grep -c "^ROTATE$")" -eq 1 ]
+  [ "$(grep -c "ROTATE: Token threshold reached" "$MOCK_WORKSPACE/.ralph/activity.log")" -eq 1 ]
+}
+
 @test "emits WARN before ROTATE" {
   # Use wider thresholds so WARN fires without ROTATE stealing the show.
   # WARN at 500 tokens = 2000 bytes, ROTATE at 1000 tokens = 4000 bytes.

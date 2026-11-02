@@ -1701,3 +1701,140 @@ _run_wedged_loop() {
   [ $((SECONDS - start)) -ge 6 ]
   grep -q "AGENT IDLE after 2s" "$MOCK_WORKSPACE/.ralph/activity.log"
 }
+
+# =============================================================================
+# Loop-end accounting and breadcrumbs (0.29.0)
+# =============================================================================
+
+# Drives run_ralph_loop through loops that end with no signal, without an
+# agent: run_loop is stubbed, and each loop's outcome is read from $@ —
+# `yield` (the context warning was honored) or `bail`. With `progress`
+# first, every loop lands a commit, so none counts toward a STALL.
+_drive_natural_ends() {
+  local progress=""
+  if [[ "$1" == progress ]]; then
+    progress=1
+    shift
+  fi
+  printf '%s\n' "$@" >"$BATS_TEST_TMPDIR/outcomes"
+  export _PROGRESS="$progress"
+  run_loop() {
+    local outcome
+    outcome=$(sed -n "${2}p" "$BATS_TEST_TMPDIR/outcomes")
+    if [[ "$outcome" == yield ]]; then
+      touch "$1/.ralph/context-warning-active"
+    else
+      rm -f "$1/.ralph/context-warning-active"
+    fi
+    [[ -z "$_PROGRESS" ]] || git -C "$1" commit -q --allow-empty -m "loop $2"
+    echo ""
+  }
+  check_task_complete() { echo "INCOMPLETE:2"; }
+  count_criteria() { echo "1:3"; }
+  _detect_graceful_yield() { return 0; }
+  _write_postmortem() { :; }
+  _auto_enrich_handoff() { :; }
+  sleep() { :; }
+  MAX_LOOPS=$#
+  run run_ralph_loop "$MOCK_WORKSPACE" "$SCRIPTS_DIR"
+}
+
+@test "a graceful yield is not counted as a bail (0.29.0)" {
+  _drive_natural_ends progress yield bail yield
+  local log="$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -q "LOOP 1 END — 🤝 GRACEFUL YIELD" "$log"
+  grep -q "LOOP 2 END — 🛌 NATURAL END (agent ended turn; 2 remaining; bail #1 this run)" "$log"
+  grep -q "RALPH STOP — ⚠️ Max loops (3) reached (Tasks: 1/3 complete; bails: 1)" "$log"
+}
+
+@test "a STALL stop follows the stalled loop's END line (0.29.0)" {
+  _drive_natural_ends yield bail bail
+  [ "$status" -eq 1 ]
+  local log="$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -q "LOOP 3 END — 🛌 NATURAL END (agent ended turn; 2 remaining; bail #2 this run)" "$log"
+  local end stop
+  end=$(grep -n "LOOP 3 END" "$log" | cut -d: -f1)
+  stop=$(grep -n "RALPH STOP — 🚨 STALL" "$log" | cut -d: -f1)
+  [ -n "$end" ] && [ -n "$stop" ]
+  [ "$stop" -eq $((end + 1)) ]
+}
+
+@test "_reap_stray_agents says what it reaped and its parent pid (0.29.0)" {
+  bash -c 'sleep 300; :' "Ralph Loop 7 marker $MOCK_WORKSPACE/x" &
+  local mine=$!
+  sleep 0.5
+  _reap_stray_agents "$MOCK_WORKSPACE" "this loop's agent outlived its pipeline (signal=none, exit=eof)"
+  kill -9 "$mine" 2>/dev/null || true
+  pkill -f 'sleep 300' 2>/dev/null || true
+  grep -qE "STRAY AGENT SWEEP — SIGKILL pid $mine \(ppid [0-9]+\): this loop's agent outlived its pipeline \(signal=none, exit=eof\)" \
+    "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "a loop torn down under a dead driver says both (0.29.0)" {
+  # The shape of an eval loop that vanished mid-run: the driver died without
+  # a trap for its signal, and the loop it was waiting on logged no END.
+  local log="$MOCK_WORKSPACE/.ralph/activity.log"
+  bash -c '
+    source "$1/agent-adapter.sh"
+    source "$1/ralph-common.sh"
+    agent_build_cmd() { echo "sleep 30"; }
+    signal=$(run_loop "$2" 1)
+  ' _ "$SCRIPTS_DIR" "$MOCK_WORKSPACE" >/dev/null 2>&1 3>&- &
+  local driver=$! loop="" i
+  for ((i = 0; i < 100; i++)); do
+    loop=$(pgrep -P "$driver" 2>/dev/null | head -1) || loop=""
+    if [[ -n "$loop" ]] && pgrep -f "^sleep 30$" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+  done
+  [ -n "$loop" ]
+  kill -KILL "$driver"
+  kill -TERM "$loop"
+  for ((i = 0; i < 150; i++)); do
+    grep -q "DRIVER GONE" "$log" 2>/dev/null && break
+    sleep 0.1
+  done
+  # The trap's reap ran while `IFS= read` held IFS empty, and once left the
+  # agent running until it exited on its own.
+  local survived=0
+  pgrep -f "^sleep 30$" >/dev/null 2>&1 && survived=1
+  pkill -f "^sleep 30$" 2>/dev/null || true
+  [ "$survived" -eq 0 ]
+  grep -q "⚡ LOOP 1 caught SIGTERM — reaping the agent pipeline" "$log"
+  grep -q "💀 DRIVER GONE — the loop driver (pid $driver) died during loop 1; no LOOP END follows" "$log"
+  ! grep -q "HEARTBEAT TIMEOUT" "$log"
+}
+
+@test "a file an earlier loop of the run left untracked is not an orphan leak (0.29.0)" {
+  # A loop wrote a file and was rotated out before committing it; the next
+  # loop committed it and tripped the detector — 24 post-mortem bundles in
+  # one run, every one for the run's own work.
+  local ws="$MOCK_WORKSPACE"
+  echo "operator scratch" >"$ws/scratch.txt"
+  _capture_loop_baseline "$ws"
+  echo "loop 1 work" >"$ws/feature.ts"
+  _capture_loop_baseline "$ws"
+  git -C "$ws" add feature.ts
+  git -C "$ws" commit -q -m "feat: finish loop 1's work"
+
+  _check_orphan_leak "$ws"
+
+  ! grep -q "ORPHAN LEAK" "$ws/.ralph/activity.log" 2>/dev/null
+}
+
+@test "a file untracked before the run is still an orphan leak (0.29.0)" {
+  local ws="$MOCK_WORKSPACE"
+  echo "operator scratch" >"$ws/scratch.txt"
+  _capture_loop_baseline "$ws"
+  echo "loop 1 work" >"$ws/feature.ts"
+  _capture_loop_baseline "$ws"
+  git -C "$ws" add scratch.txt feature.ts
+  git -C "$ws" commit -q -m "feat: sweep"
+
+  local rc=0
+  _check_orphan_leak "$ws" || rc=$?
+
+  [ "$rc" -eq 1 ]
+  grep -q "ORPHAN LEAK: loop committed files that were untracked at start: scratch.txt$" "$ws/.ralph/activity.log"
+}

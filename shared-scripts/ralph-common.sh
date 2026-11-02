@@ -603,13 +603,27 @@ spinner() {
 # _check_orphan_leak after the loop to detect whether the agent
 # committed any files that were untracked at start (a strong signal that
 # `git add .` / `git add <dir>` swept up orphans).
+#
+# Files that appeared untracked since the previous loop's baseline were left
+# by that loop — this run's own work in progress, cut off by a rotation before
+# it was committed — and are added to the run's carry-over set, which
+# _check_orphan_leak does not count. run_ralph_loop clears both at run start,
+# so files from outside the run are never carried over.
 _capture_loop_baseline() {
   local workspace="$1"
   local ralph_dir="$workspace/.ralph"
+  local baseline="$ralph_dir/loop-baseline-untracked" carry="$ralph_dir/run-carryover-untracked"
   mkdir -p "$ralph_dir"
   (cd "$workspace" && git rev-parse HEAD 2>/dev/null) >"$ralph_dir/loop-baseline-head" || true
-  (cd "$workspace" && git ls-files --others --exclude-standard 2>/dev/null | LC_ALL=C sort) \
-    >"$ralph_dir/loop-baseline-untracked" || true
+  local untracked
+  untracked=$(cd "$workspace" && git ls-files --others --exclude-standard 2>/dev/null | LC_ALL=C sort) || untracked=""
+  if [[ -f "$baseline" ]]; then
+    {
+      cat "$carry" 2>/dev/null || true
+      LC_ALL=C comm -13 "$baseline" <(printf '%s\n' "$untracked" | sed '/^$/d')
+    } | LC_ALL=C sort -u >"$carry.tmp" && mv -f "$carry.tmp" "$carry"
+  fi
+  printf '%s\n' "$untracked" | sed '/^$/d' >"$baseline"
   # 0.10.0: Clear hook state for this workspace so each new loop gets one
   # free gate run. The hook's gate-without-write check uses external state
   # files (not activity.log), so we clear them here.
@@ -685,6 +699,14 @@ _check_orphan_leak() {
     <(printf '%s\n' "$changed_files" | LC_ALL=C sort -u) \
     "$baseline_untracked" 2>/dev/null)
   [[ -z "$leaked" ]] && return 0
+
+  # 0.29.0: files an earlier loop of this run left untracked are its own work,
+  # not orphans (see _capture_loop_baseline).
+  local carry="$ralph_dir/run-carryover-untracked"
+  if [[ -s "$carry" ]]; then
+    leaked=$(LC_ALL=C comm -23 <(printf '%s\n' "$leaked" | LC_ALL=C sort -u) "$carry" 2>/dev/null)
+    [[ -z "$leaked" ]] && return 0
+  fi
 
   # 0.9.1: Filter out files explicitly named in the current task description.
   # When a task spec says "create E2E test at `apps/api/tests/e2e/foo.spec.ts`",
@@ -1086,6 +1108,14 @@ _probe_agent_liveness() {
   fi
 }
 
+# Whether pid $1 is a running process. `kill -0` and `pgrep` also report a
+# zombie — exited, not yet reaped by its parent — so its state is read instead.
+_pid_running() {
+  local stat
+  stat=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')
+  [[ -n "$stat" && "$stat" != Z* ]]
+}
+
 # Probe liveness of each stage inside the pipeline subshell.
 #
 # Background (0.3.7): the prior PARSER EXIT diagnostic ("pipeline died while
@@ -1137,11 +1167,7 @@ _probe_pipeline_stages() {
   pids=$(pgrep -P "$agent_pid" 2>/dev/null || true)
   local pid
   for pid in $pids; do
-    local stat
-    stat=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
-    # Skip zombies — they're dead, just not yet reaped. Also skip empty
-    # (the pid vanished between pgrep and ps).
-    [[ -z "$stat" || "$stat" == Z* ]] && continue
+    _pid_running "$pid" || continue
     any_alive=1
     local comm args
     comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -1211,8 +1237,13 @@ _descendant_pids() {
 # children, but we already hold their pids), SIGTERMs leaves-first + the root,
 # waits a short grace, then SIGKILLs any survivor. Also hits the root's process
 # group in case it IS a leader — additive and harmless when it isn't.
+#
+# The pid list is word-split under a default IFS of its own: a signal trap
+# runs this while the loop's `IFS= read` holds IFS empty, which joined the
+# list into one word that `kill` rejected, so the pipeline outlived the reap.
 # Args: $1 root pid, $2 grace seconds (default 2).
 _reap_process_tree() {
+  local IFS=$' \t\n'
   local root="$1"
   local grace="${2:-2}"
   [[ "$root" =~ ^[0-9]+$ ]] || return 0
@@ -1254,15 +1285,21 @@ _reap_process_tree() {
 # unlike the pre-0.18 `pkill -f "$workspace.*Ralph (Loop|Iteration)"`, which
 # required the workspace path to precede the banner in argv (it does not: the
 # prompt's "# Ralph Loop N" header comes first) and so never matched.
+#
+# The log line says what a match in this window is ($2) and its parent pid — a
+# ppid of 1 means it had been orphaned, which is what lets it outlive a reap
+# that walks the pipeline's descendants.
+#   $1 = workspace, $2 = what a match is (default: a prior loop's agent)
 _reap_stray_agents() {
-  local workspace="$1"
+  local workspace="$1" what="${2:-prior-loop agent that escaped rotation/cleanup}"
   [[ -n "$workspace" ]] || return 0
-  local pid args
+  local pid args ppid
   for pid in $(pgrep -f 'Ralph (Loop|Iteration)' 2>/dev/null || true); do
     args=$(ps -o args= -p "$pid" 2>/dev/null || true)
     case "$args" in
       *"$workspace"*)
-        log_activity "$workspace" "🧹 STRAY AGENT SWEEP — SIGKILL prior-loop agent pid $pid (escaped rotation/cleanup)"
+        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') || ppid=""
+        log_activity "$workspace" "🧹 STRAY AGENT SWEEP — SIGKILL pid $pid (ppid ${ppid:-?}): $what"
         kill -KILL "$pid" 2>/dev/null || true
         ;;
     esac
@@ -1348,8 +1385,8 @@ run_loop() {
     # not a process-group leader (the pre-0.18 `kill -- -$agent_pid` missed
     # it — see _reap_process_tree). Then record any pid that STILL survived to
     # .orphan-claims.pid as a safety net: the next loop's start-sweep SIGKILLs
-    # whatever outlived even this.
-    local _pid
+    # whatever outlived even this. IFS as in _reap_process_tree.
+    local IFS=$' \t\n' _pid
     _reap_process_tree "$agent_pid" 1
     : >"$orphan_claims"
     for _pid in $(_descendant_pids "$agent_pid") "$agent_pid"; do
@@ -1365,13 +1402,26 @@ run_loop() {
     [[ -t 2 ]] && printf "\r\033[K" >&2
   }
 
+  # A signal is logged before the reap, so a loop torn down from outside says
+  # so. It also ends the `read` below early with a status the heartbeat
+  # classifier would take for a timeout; _caught tells the two apart.
+  local _caught=""
+  # shellcheck disable=SC2329 # invoked indirectly via trap
+  _loop_signal() {
+    _caught="$1"
+    log_activity "$workspace" "⚡ LOOP $loop_label caught SIG$1 — reaping the agent pipeline"
+    _loop_cleanup
+  }
+
   rm -f "$fifo"
   mkfifo "$fifo"
 
   # Save and install trap; restore on exit
   local _prev_trap
   _prev_trap=$(trap -p EXIT)
-  trap '_loop_cleanup' EXIT SIGTERM SIGHUP
+  trap '_loop_cleanup' EXIT
+  trap '_loop_signal TERM' SIGTERM
+  trap '_loop_signal HUP' SIGHUP
 
   echo "" >&2
   echo "═══════════════════════════════════════════════════════════════════" >&2
@@ -1555,6 +1605,7 @@ run_loop() {
 
   local exit_class
   exit_class=$(_classify_heartbeat_exit "$_read_rc" "$signal")
+  [[ -z "$_caught" ]] || exit_class="caught"
   case "$exit_class" in
     timeout)
       [[ -t 2 ]] && printf "\r\033[K" >&2
@@ -1660,7 +1711,18 @@ run_loop() {
   # (the pre-0.18 `pkill -f "$workspace.*Ralph (Loop|Iteration)"` required the
   # workspace path to precede the banner in argv; it never does, so that
   # mop-up silently never fired — one root of the rotation-zombie escape).
-  _reap_stray_agents "$workspace"
+  #
+  # The pipeline has exited by now, so a match is this loop's own agent: the
+  # pipeline's other stages ended while the CLI lived on.
+  #
+  # run_loop runs in its caller's command substitution, where $$ is that
+  # caller: the loop driver. A driver that died (a signal it has no trap for,
+  # or one sent to it alone) reads no signal from here and logs no LOOP END,
+  # so say so while a process is left to say it.
+  if ! _pid_running "$$"; then
+    log_activity "$workspace" "💀 DRIVER GONE — the loop driver (pid $$) died during loop $loop_label; no LOOP END follows"
+  fi
+  _reap_stray_agents "$workspace" "this loop's agent outlived its pipeline (signal=${signal:-none}, exit=${exit_class:-none})"
 
   # 0.5.4: also reap the gate-run.sh subtree rooted at this workspace.
   # Gate runs spawn a deep tree (bash → pnpm → nx → vitest → N node
@@ -1674,10 +1736,11 @@ run_loop() {
   pkill -9 -f "gate-run.sh.*$workspace" 2>/dev/null || true
 
   # Restore previous trap
+  trap - SIGTERM SIGHUP
   if [[ -n "$_prev_trap" ]]; then
     eval "$_prev_trap"
   else
-    trap - EXIT SIGTERM SIGHUP
+    trap - EXIT
   fi
 
   echo "$signal"
@@ -1963,6 +2026,8 @@ run_ralph_loop() {
   export RALPH_WORKSPACE="$workspace"
 
   cd "$workspace" || return
+  # A new run carries over no untracked files (_capture_loop_baseline).
+  rm -f "$workspace/.ralph/loop-baseline-untracked" "$workspace/.ralph/run-carryover-untracked"
   if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
     echo "📦 Committing uncommitted changes..."
     git add -A
@@ -1998,7 +2063,7 @@ run_ralph_loop() {
   # and the loop-end chokepoint reset below.
   _COMPLETE_BLOCK_COUNT=0
   _LAST_COMPLETE_BLOCK_REASON=""
-  local natural_end_count=0 # 0.6.3: any natural-end (with or without progress) — measures "agent bailed politely instead of staying in flow"
+  local natural_end_count=0 # 0.6.3: natural ends that were not a graceful yield — measures "agent bailed politely instead of staying in flow"
   local DEFER_COUNT=0
   local QUOTA_WAIT_COUNT=0 # deferrals slept off against an API-reported reset time
 
@@ -2311,8 +2376,12 @@ run_ralph_loop() {
         # (~10-30k tokens of re-read framing + handoff + tasks + plan)
         # without any necessary boundary. Tracked via natural_end_count
         # so operators can grep activity.log for the bail-out rate per spec
-        # and see whether the framing prompt's flow framing is working.
-        natural_end_count=$((natural_end_count + 1))
+        # and see whether the framing prompt's flow framing is working. A
+        # graceful yield is the boundary the context warning asked for, not
+        # a bail, so it is not counted.
+        #
+        # The loop's END line is logged before any STALL stop, so the last
+        # loop of a stalled run reads as ended rather than cut off.
         if [[ "$task_status" == INCOMPLETE:* ]]; then
           local remaining_count=${task_status#INCOMPLETE:}
           # 0.15.4: a loop that committed code (HEAD advanced) made forward
@@ -2329,6 +2398,22 @@ run_ralph_loop() {
             stall_count=0
             DEFER_COUNT=0
           fi
+          # 0.12.5: a natural-end that follows a context-warning IS a
+          # graceful yield — agent honored the breadcrumb instead of
+          # blowing through to forced rotation. Distinguish in the log
+          # so operators can grep `🤝 GRACEFUL YIELD` to count
+          # well-behaved boundaries vs `🛌 NATURAL END` bailouts.
+          local _next_msg
+          if [[ -f "$workspace/.ralph/context-warning-active" ]] && _detect_graceful_yield "$workspace"; then
+            log_activity "$workspace" "LOOP $loop_label END — 🤝 GRACEFUL YIELD (context-warning honored; handoff written; $remaining_count remaining)$task_suffix"
+            log_progress "$workspace" "**Loop $loop_label ended** — 🤝 Graceful yield ($remaining_count remaining)"
+            _next_msg="🤝 Agent honored context warning and yielded with handoff. Rotating to fresh context ($remaining_count remaining)..."
+          else
+            natural_end_count=$((natural_end_count + 1))
+            log_activity "$workspace" "LOOP $loop_label END — 🛌 NATURAL END (agent ended turn; $remaining_count remaining; bail #$natural_end_count this run)$task_suffix"
+            log_progress "$workspace" "**Loop $loop_label ended** — 🛌 Agent ended turn naturally ($remaining_count remaining)"
+            _next_msg="🛌 Agent ended its turn but $remaining_count criteria remaining. Starting another loop (cold start, ~10-30k tokens)..."
+          fi
           if [[ $zero_progress_count -ge 3 ]]; then
             log_activity "$workspace" "RALPH STOP — 🚨 STALL: $zero_progress_count consecutive natural-end loops with zero task progress"
             log_progress "$workspace" "**Ralph stopped** — 🚨 STALL: $zero_progress_count consecutive natural-end loops with zero task progress"
@@ -2337,21 +2422,9 @@ run_ralph_loop() {
             _write_postmortem "$workspace" "stall-natural"
             return 1
           fi
-          # 0.12.5: a natural-end that follows a context-warning IS a
-          # graceful yield — agent honored the breadcrumb instead of
-          # blowing through to forced rotation. Distinguish in the log
-          # so operators can grep `🤝 GRACEFUL YIELD` to count
-          # well-behaved boundaries vs `🛌 NATURAL END` bailouts.
-          if [[ -f "$workspace/.ralph/context-warning-active" ]] && _detect_graceful_yield "$workspace"; then
-            log_activity "$workspace" "LOOP $loop_label END — 🤝 GRACEFUL YIELD (context-warning honored; handoff written; $remaining_count remaining)$task_suffix"
-            log_progress "$workspace" "**Loop $loop_label ended** — 🤝 Graceful yield ($remaining_count remaining)"
-            echo "🤝 Agent honored context warning and yielded with handoff. Rotating to fresh context ($remaining_count remaining)..."
-          else
-            log_activity "$workspace" "LOOP $loop_label END — 🛌 NATURAL END (agent ended turn; $remaining_count remaining; bail #$natural_end_count this run)$task_suffix"
-            log_progress "$workspace" "**Loop $loop_label ended** — 🛌 Agent ended turn naturally ($remaining_count remaining)"
-            echo "🛌 Agent ended its turn but $remaining_count criteria remaining. Starting another loop (cold start, ~10-30k tokens)..."
-          fi
+          echo "$_next_msg"
         else
+          natural_end_count=$((natural_end_count + 1))
           log_activity "$workspace" "LOOP $loop_label END — 🛌 NATURAL END (no checkbox tracking; bail #$natural_end_count this run)$task_suffix"
           log_progress "$workspace" "**Loop $loop_label ended** — 🛌 Agent ended turn naturally (no checkbox tracking)"
           stall_count=0

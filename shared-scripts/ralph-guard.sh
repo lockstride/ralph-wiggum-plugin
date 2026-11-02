@@ -412,6 +412,49 @@ _gate_invocation_tail() {
     -e 's|.*/gate-run\.sh[[:space:]]+||'
 }
 
+# The command each chained command puts to [rewrite] and [deny]: for a gate
+# invocation, the command it hands the harness; for any other, itself.
+# Matched as written, `bash …/gate-run.sh <label> <command>` starts with
+# `bash`, so no row would ever see <command>, and a spelling the policy routes
+# or refuses would run raw under the harness — and under a cache key of its
+# own. A command passed as one quoted argument is unwrapped, as gate-run.sh
+# word-splits it. Fills _SEG_SUBJECT and _SEG_GATE_HEAD (the runner and label
+# in front of the gated command; '' when the command runs no gate).
+_SEG_SUBJECT=()
+_SEG_GATE_HEAD=()
+_policy_subjects() {
+  local i seg tail label inner
+  _SEG_SUBJECT=()
+  _SEG_GATE_HEAD=()
+  for ((i = 0; i < ${#_SEG_CANON[@]}; i++)); do
+    seg="${_SEG_CANON[i]}"
+    _SEG_SUBJECT[i]="$seg"
+    _SEG_GATE_HEAD[i]=""
+    _is_gate_invocation "$seg" || continue
+    tail=$(_gate_invocation_tail "$seg")
+    [[ "$tail" != "$seg" ]] || continue
+    label="${tail%%[[:space:]]*}"
+    _trim "${tail#"$label"}"
+    inner="$_TRIMMED"
+    [[ -n "$inner" ]] || continue
+    if [[ "$inner" =~ ^\"([^\"]*)\"$ || "$inner" =~ ^\'([^\']*)\'$ ]]; then
+      inner="${BASH_REMATCH[1]}"
+    fi
+    _SEG_GATE_HEAD[i]="${seg%"$tail"}$label"
+    _SEG_SUBJECT[i]=$(_canonicalize "$inner")
+  done
+}
+
+# Puts each gate invocation back together around its gated command as the
+# policy left it, so the cache, the tier lock and the shell all see the
+# command the harness will run.
+_rejoin_gate_invocations() {
+  local i
+  for ((i = 0; i < ${#_SEG_FINAL[@]}; i++)); do
+    [[ -z "${_SEG_GATE_HEAD[i]:-}" ]] || _SEG_FINAL[i]="${_SEG_GATE_HEAD[i]} ${_SEG_FINAL[i]}"
+  done
+}
+
 # Inline copy of _load_gates_from_policy. The guard runs as a standalone
 # hook process and does not source ralph-common.sh; keeping a small private
 # copy mirrors the existing pattern (see _canonicalize, _normalize_pnpm).
@@ -637,19 +680,20 @@ _add_protect_row() {
 # 0.12.2: Rewrites are passthrough — the command is transparently
 # corrected via the hook's updatedInput mechanism, not blocked.
 #
-# Each chained command meets the rows in order; the first matching row
-# rewrites it, and the result meets [deny] and [wrap] but no further rewrite.
+# Each chained command's policy subject (_policy_subjects) meets the rows in
+# order; the first matching row rewrites it, and the result meets [deny] and
+# [wrap] but no further rewrite.
 # Fills _SEG_FINAL (each command as the later checks judge it) and
 # _SEG_REWRITTEN (1 where a row fired). Matching is grep -E, as it has always
 # been, so a row's regex dialect does not depend on the shell.
 _SEG_FINAL=()
 _SEG_REWRITTEN=()
 _apply_rewrites() {
-  local n=${#_SEG_CANON[@]} rows=${#_RW_PAT[@]} i r
+  local n=${#_SEG_SUBJECT[@]} rows=${#_RW_PAT[@]} i r
   _SEG_FINAL=()
   _SEG_REWRITTEN=()
   for ((i = 0; i < n; i++)); do
-    _SEG_FINAL[i]="${_SEG_CANON[i]}"
+    _SEG_FINAL[i]="${_SEG_SUBJECT[i]}"
     _SEG_REWRITTEN[i]=""
   done
   ((n > 0 && rows > 0)) || return 0
@@ -664,7 +708,7 @@ _apply_rewrites() {
     patterns+=(-e "${_RW_PAT[r]}")
   done
   local hits="" status=0 pending=$n newlines
-  hits=$(printf '%s\n' "${_SEG_CANON[@]}" | grep -nE "${patterns[@]}" 2>/dev/null) || status=$?
+  hits=$(printf '%s\n' "${_SEG_SUBJECT[@]}" | grep -nE "${patterns[@]}" 2>/dev/null) || status=$?
   ((status != 1)) || return 0
   if ((status == 0)); then
     newlines="${hits//[!$'\n']/}"
@@ -673,11 +717,11 @@ _apply_rewrites() {
 
   local delim=$'\001' line idx
   for ((r = 0; r < rows && pending > 0; r++)); do
-    hits=$(printf '%s\n' "${_SEG_CANON[@]}" | grep -nE -e "${_RW_PAT[r]}" 2>/dev/null) || continue
+    hits=$(printf '%s\n' "${_SEG_SUBJECT[@]}" | grep -nE -e "${_RW_PAT[r]}" 2>/dev/null) || continue
     while IFS= read -r line; do
       idx=$((${line%%:*} - 1))
       [[ -z "${_SEG_REWRITTEN[idx]}" ]] || continue
-      _SEG_FINAL[idx]=$(printf '%s\n' "${_SEG_CANON[idx]}" |
+      _SEG_FINAL[idx]=$(printf '%s\n' "${_SEG_SUBJECT[idx]}" |
         sed -E "s${delim}${_RW_PAT[r]}${delim}${_RW_REPL[r]}${delim}")
       # 0.12.4: re-normalize pnpm wrappers after rewrite. A rule like
       # `^pnpm nx (.+)$ | pnpm \1` turns `pnpm nx run api:test-coverage`
@@ -758,8 +802,9 @@ _emit_rewrite() {
   # the wrapped test command's group and recorded a spurious exit=130 on four
   # `full` gates. Forcing the ceiling here makes the fix mechanical, not
   # advisory — the 120 s kill window never opens. Non-gate rewrites keep the
-  # tool's own default timeout (no timeout field emitted).
-  if [[ "$cmd" == *gate-run.sh* ]]; then
+  # tool's own default timeout (no timeout field emitted). The
+  # `.ralph/gate-runner` form is a gate invocation too.
+  if [[ "$cmd" == *gate-run.sh* ]] || _is_gate_invocation "$cmd"; then
     jq -n --arg cmd "$cmd" \
       '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":$cmd,"timeout":600000}}}' 2>/dev/null
   else
@@ -874,9 +919,9 @@ _enforce_command_policy() {
   _load_command_policy "$WORKSPACE/.ralph/command-policy"
 
   # Enforcement order: rewrite → deny → wrap → protect.
-  #   - [rewrite] applies regex transforms to each chained command.
-  #     Project-specific (e.g. `pnpm nx X → pnpm X`). Results feed into all
-  #     downstream checks.
+  #   - [rewrite] applies regex transforms to each chained command — to a
+  #     gate invocation's gated command (_policy_subjects). Project-specific
+  #     (e.g. `pnpm nx X → pnpm X`). Results feed into all downstream checks.
   #   - [deny] hard-blocks any chained command it matches. Only path that
   #     calls _block().
   #   - [wrap] sets _WRAP_REWRITE to the gate-run.sh-wrapped form, which we
@@ -884,6 +929,7 @@ _enforce_command_policy() {
   #     execute transparently.
   #   - [protect] hard-blocks pipe/redirect of bare commands (separate from
   #     wrap because protected scripts may not be gate-runnable).
+  _policy_subjects
   _apply_rewrites
   for ((i = 0; i < ${#_SEG_FINAL[@]}; i++)); do
     _apply_deny "${_SEG_FINAL[i]}"
@@ -893,6 +939,7 @@ _enforce_command_policy() {
       _deny_unresolvable_rewrite "${_SEG_FINAL[i]}"
     fi
   done
+  _rejoin_gate_invocations
   _apply_wrap "$cmd"
   _apply_protect "$cmd" "${_SEG_FINAL[0]:-}"
 
@@ -1201,10 +1248,13 @@ _same_command_as_verdict() {
 
 # The form a gated command is compared in: without quotes, which the shell
 # removed before gate-run.sh recorded its command; whitespace collapsed, as
-# gate-run.sh records it; and pnpm's spellings of one script run normalized.
+# gate-run.sh records it; and spelled as the policy judged it — a
+# package-local binary path as its exec form, pnpm's spellings of one script
+# run normalized.
 _command_key() {
   local key="${1//[\"\']/}"
   key=$(printf '%s' "$key" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  key=$(_normalize_local_bin "$key")
   _normalize_pnpm "$key"
 }
 

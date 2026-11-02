@@ -1759,14 +1759,19 @@ _unit_policy() {
     >"$MOCK_WORKSPACE/.ralph/command-policy"
 }
 
-# Land a 'unit' verdict for command $1, recorded as gate-run.sh records it:
-# invoked 10 s ago, against the current tree, no Write/Edit since.
-_unit_verdict() {
+# Land a verdict under label $1 for command $2, recorded as gate-run.sh
+# records it: invoked 10 s ago, against the current tree, no Write/Edit since.
+_verdict() {
+  local label="$1" cmd="$2"
   echo "0" >"$STATE_DIR/last-write-ts"
-  echo "$(($(date +%s) - 10))" >"$STATE_DIR/last-gate-ts.unit"
-  printf '1' >"$MOCK_WORKSPACE/.ralph/gates/unit-latest.exit"
-  printf '%s' "$1" >"$MOCK_WORKSPACE/.ralph/gates/unit-latest.cmd"
-  bash "$SCRIPTS_DIR/tree-fingerprint.sh" "$MOCK_WORKSPACE" >"$MOCK_WORKSPACE/.ralph/gates/unit-latest.tree"
+  echo "$(($(date +%s) - 10))" >"$STATE_DIR/last-gate-ts.$label"
+  printf '1' >"$MOCK_WORKSPACE/.ralph/gates/$label-latest.exit"
+  printf '%s' "$cmd" >"$MOCK_WORKSPACE/.ralph/gates/$label-latest.cmd"
+  bash "$SCRIPTS_DIR/tree-fingerprint.sh" "$MOCK_WORKSPACE" >"$MOCK_WORKSPACE/.ralph/gates/$label-latest.tree"
+}
+
+_unit_verdict() {
+  _verdict unit "$1"
 }
 
 _assert_cached() {
@@ -1850,6 +1855,88 @@ _assert_runs_under_unit() {
   setup_v14_gates_policy
   echo "$(date +%s)" > "$STATE_DIR/last-write-ts"
   run _run_guard Bash "cd $MOCK_WORKSPACE && bash \"\$(cat .ralph/gate-runner)\" unit pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("must run under label .full.")'
+}
+
+# --- 0.29.0: a gate invocation's gated command meets [rewrite] and [deny] ---
+# Matched as written, `bash gate-run.sh <label> <command>` starts with `bash`,
+# so no row saw <command>: after `pnpm test-e2e-ai` was cache-denied, the
+# agent ran `gate-run.sh e2e pnpm nx run webapp:test-e2e-ai --skip-nx-cache`
+# directly — a spelling the policy routes elsewhere — and it ran raw.
+
+_nx_policy() {
+  cat >"$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[rewrite]
+^pnpm nx run webapp:test-e2e-ai( .*)?$ | pnpm test-e2e-ai:full\1 | webapp is the lane's only project
+
+[deny]
+pnpm nx run | This nx target has no gated route.
+
+[wrap]
+pnpm test-e2e-ai      | e2e
+pnpm test-e2e-ai:full | e2e
+EOF
+  echo '{"scripts":{"test-e2e-ai":"run","test-e2e-ai:full":"run"}}' >"$MOCK_WORKSPACE/package.json"
+}
+
+@test "gate-run: the gated command meets [rewrite] (0.29.0)" {
+  _nx_policy
+  echo "$(date +%s)" >"$STATE_DIR/last-write-ts"
+  run _run_guard Bash "NX_TUI=false bash $SCRIPTS_DIR/gate-run.sh e2e pnpm nx run webapp:test-e2e-ai --skip-nx-cache 2>&1 | tail -40"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg c "bash $SCRIPTS_DIR/gate-run.sh e2e pnpm test-e2e-ai:full --skip-nx-cache" \
+    '.hookSpecificOutput.updatedInput.command == $c'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.timeout == 600000'
+}
+
+@test "gate-run: the gated command meets [deny] (0.29.0)" {
+  _nx_policy
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh lint pnpm nx run api:lint"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("no gated route")'
+}
+
+@test "gate-run: a command passed as one quoted argument meets [rewrite] (0.29.0)" {
+  _nx_policy
+  run _run_guard Bash 'bash "$(cat .ralph/gate-runner)" e2e "pnpm nx run webapp:test-e2e-ai"'
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "bash \"$(cat .ralph/gate-runner)\" e2e pnpm test-e2e-ai:full"'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.timeout == 600000'
+}
+
+@test "gate-run: a gated command no row names runs as written (0.29.0)" {
+  _nx_policy
+  echo "$(date +%s)" >"$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh e2e pnpm test-e2e-ai 2>&1 | tail -5"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "gate-cache: a respelling the policy routes is cached as the command it runs (0.29.0)" {
+  _nx_policy
+  _verdict e2e "pnpm test-e2e-ai:full --skip-nx-cache"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh e2e pnpm nx run webapp:test-e2e-ai --skip-nx-cache"
+  _assert_cached
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("already ran .pnpm test-e2e-ai:full --skip-nx-cache.")'
+}
+
+@test "gate-cache: a package-local binary path is the same command as its exec form (0.29.0)" {
+  touch "$MOCK_WORKSPACE/pnpm-lock.yaml"
+  _verdict unit "./node_modules/.bin/vitest run a.spec.ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh unit pnpm vitest run a.spec.ts"
+  _assert_cached
+  _verdict unit "pnpm vitest run a.spec.ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh unit ./node_modules/.bin/vitest run a.spec.ts"
+  _assert_cached
+}
+
+@test "label-lock: a tier command passed as one quoted argument is still locked (0.29.0)" {
+  setup_v14_gates_policy
+  echo "$(date +%s)" >"$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh unit \"pnpm all-check\""
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("must run under label .full.")'
