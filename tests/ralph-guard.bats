@@ -1903,7 +1903,8 @@ EOF
   _nx_policy
   run _run_guard Bash 'bash "$(cat .ralph/gate-runner)" e2e "pnpm nx run webapp:test-e2e-ai"'
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command == "bash \"$(cat .ralph/gate-runner)\" e2e pnpm test-e2e-ai:full"'
+  echo "$output" | jq -e --arg c "bash \"\$(cat .ralph/gate-runner)\" e2e 'pnpm test-e2e-ai:full'" \
+    '.hookSpecificOutput.updatedInput.command == $c'
   echo "$output" | jq -e '.hookSpecificOutput.updatedInput.timeout == 600000'
 }
 
@@ -1940,4 +1941,23 @@ EOF
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("must run under label .full.")'
+}
+
+# A gate invocation must be the harness run as bash's script. A `-c` string
+# that merely names the harness is not one, so its tail is never judged as the
+# command in its place.
+@test "gate-run: a bash -c string naming the harness is not a gate invocation" {
+  _nx_policy
+  echo "$(date +%s)" >"$STATE_DIR/last-write-ts"
+  run _run_guard Bash "bash -c 'true' $SCRIPTS_DIR/gate-run.sh e2e pnpm nx run api:lint"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "gate-run: a rewritten quoted gated command stays one quoted argument" {
+  _nx_policy
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh e2e \"pnpm nx run webapp:test-e2e-ai --x; touch pwned\""
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg c "bash $SCRIPTS_DIR/gate-run.sh e2e 'pnpm test-e2e-ai:full --x; touch pwned'" \
+    '.hookSpecificOutput.updatedInput.command == $c'
 }

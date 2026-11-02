@@ -365,13 +365,27 @@ _canonicalize_chain() {
   done
 }
 
+# One rewritten command as it will run. A gated command the agent passed as one
+# quoted argument is quoted again, so a separator inside it stays an argument
+# to the harness instead of splitting the shell command the harness runs in.
+_emit_segment() {
+  local i="$1" inner q="'"
+  if [[ -n "${_SEG_GATE_QUOTED[i]:-}" ]]; then
+    inner="${_SEG_FINAL[i]#"${_SEG_GATE_HEAD[i]} "}"
+    inner="${inner//$q/$q\\$q$q}"
+    printf '%s' "${_SEG_GATE_HEAD[i]} $q$inner$q"
+  else
+    printf '%s' "${_SEG_FINAL[i]}"
+  fi
+}
+
 # The chain as it will run: each command a [rewrite] row fired on in its
 # rewritten form, every other command exactly as the agent wrote it.
 _join_chain() {
   local i last=$((${#_SEG_TEXT[@]} - 1)) sep out=""
   for ((i = 0; i <= last; i++)); do
     if [[ -n "${_SEG_REWRITTEN[i]}" ]]; then
-      out+="${_SEG_FINAL[i]}"
+      out+="$(_emit_segment "$i")"
     else
       out+="${_SEG_TEXT[i]}"
     fi
@@ -398,9 +412,11 @@ _join_chain() {
 # phase (0.24.1).
 #
 # Merely REFERENCING the harness (ls, cat, grep, test -f, wc -l) is not a
-# match — the command must actually run it via bash/sh.
+# match — the command must actually run it via bash/sh, as the script that
+# shell runs. `bash -c '…' x/gate-run.sh` runs its -c string, not the harness,
+# so the runner must be the first argument after any non-`-c` flags.
 _is_gate_invocation() {
-  echo "$1" | grep -qE '(^|[;&|] *)(bash|sh) .*(/gate-run\.sh\b|\.ralph/gate-runner)'
+  echo "$1" | grep -qE "(^|[;&|] *)(bash|sh)( +-[^ c]+)* +[\"']?([^ \"']*/gate-run\.sh|\\\$\\(cat [^)]*\.ralph/gate-runner\\))[\"']?( |\$)"
 }
 
 # Reduce a gate invocation to "<label> <command…>" by stripping the runner
@@ -422,14 +438,17 @@ _gate_invocation_tail() {
 # in front of the gated command; '' when the command runs no gate).
 _SEG_SUBJECT=()
 _SEG_GATE_HEAD=()
+_SEG_GATE_QUOTED=()
 _policy_subjects() {
   local i seg tail label inner
   _SEG_SUBJECT=()
   _SEG_GATE_HEAD=()
+  _SEG_GATE_QUOTED=()
   for ((i = 0; i < ${#_SEG_CANON[@]}; i++)); do
     seg="${_SEG_CANON[i]}"
     _SEG_SUBJECT[i]="$seg"
     _SEG_GATE_HEAD[i]=""
+    _SEG_GATE_QUOTED[i]=""
     _is_gate_invocation "$seg" || continue
     tail=$(_gate_invocation_tail "$seg")
     [[ "$tail" != "$seg" ]] || continue
@@ -439,6 +458,7 @@ _policy_subjects() {
     [[ -n "$inner" ]] || continue
     if [[ "$inner" =~ ^\"([^\"]*)\"$ || "$inner" =~ ^\'([^\']*)\'$ ]]; then
       inner="${BASH_REMATCH[1]}"
+      _SEG_GATE_QUOTED[i]=1
     fi
     _SEG_GATE_HEAD[i]="${seg%"$tail"}$label"
     _SEG_SUBJECT[i]=$(_canonicalize "$inner")
@@ -932,6 +952,8 @@ _enforce_command_policy() {
   _policy_subjects
   _apply_rewrites
   for ((i = 0; i < ${#_SEG_FINAL[@]}; i++)); do
+    # The command as written is judged as well as the gated command under it.
+    _apply_deny "${_SEG_CANON[i]}"
     _apply_deny "${_SEG_FINAL[i]}"
     if [[ -n "${_SEG_REWRITTEN[i]}" ]]; then
       rewritten=1
