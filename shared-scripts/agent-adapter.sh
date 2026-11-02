@@ -470,7 +470,7 @@ agent_default_effort() {
 }
 
 # Whether CLI + model run against a 1M-token context window — the tier that
-# unlocks the 300K/250K rotate/warn budget. True for the Claude CLI when the
+# unlocks the 450K/400K rotate/warn budget. True for the Claude CLI when the
 # model is any Opus (the bare "opus" alias or a full id such as
 # claude-opus-5; every Opus has the 1M window natively) or when it carries
 # the explicit [1m] context tier, which is the opt-in for non-Opus models
@@ -488,11 +488,11 @@ agent_model_has_1m_window() {
 
 # Default rotate threshold based on CLI and model (in tokens).
 #
-# 1M-window models (see agent_model_has_1m_window) rotate at 300K — the
+# 1M-window models (see agent_model_has_1m_window) rotate at 450K — the
 # window is the ceiling, not the target. Past a few hundred K the agent's
-# recall and instruction-following degrade well before the hard limit, so a
-# bigger budget buys tokens we can't use. 300K still fits a whole spec in
-# one loop and leaves 700K deliberately unspent.
+# recall and instruction-following degrade well before the hard limit. A loop
+# spends ~150K re-orienting before its first edit, so 450K leaves enough for
+# real work per loop while keeping over half the window deliberately unspent.
 #
 # Standard models (200K window) rotate at 170K.
 agent_default_rotate_threshold() {
@@ -503,7 +503,7 @@ agent_default_rotate_threshold() {
   case "$cli" in
     claude)
       if agent_model_has_1m_window "$cli" "$model"; then
-        echo "300000"
+        echo "450000"
       else
         echo "170000"
       fi
@@ -517,7 +517,7 @@ agent_default_rotate_threshold() {
 # .ralph/context-warning-active, so the agent yields at its next post-commit
 # check instead of being force-killed at ROTATE_THRESHOLD.
 #
-# 1M-window models sit 50K below rotate (250K against the default 300K)
+# 1M-window models sit 50K below rotate (400K against the default 450K)
 # rather than taking the generic 7/8, which would leave only 37.5K to land the
 # work. A flat 50K landing zone is what makes the difference between a 🤝
 # GRACEFUL YIELD and a 🔄 ROTATE force-kill on a long loop.

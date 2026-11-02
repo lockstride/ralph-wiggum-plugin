@@ -1146,36 +1146,36 @@ TASKS
   [ "$threshold" = "148750" ]
 }
 
-@test "1M-model rotate threshold is 300000 (0.22.0)" {
+@test "1M-model rotate threshold is 450000" {
   local threshold
   threshold=$(agent_default_rotate_threshold claude "opus[1m]")
-  [ "$threshold" = "300000" ]
+  [ "$threshold" = "450000" ]
 }
 
-# Pinned, not derived: 7/8 of 300000 would be 262500, leaving only 37.5K to
-# land the work. 250000 gives the agent a flat 50K to yield gracefully.
-@test "1M-model warn threshold is pinned at 250000, not 7/8 of rotate (0.22.0)" {
+# Pinned, not derived: 7/8 of 450000 would be 393750, leaving only 56.25K to
+# land the work. 400000 gives the agent a flat 50K to yield gracefully.
+@test "1M-model warn threshold is pinned at 400000, not 7/8 of rotate" {
   local warn
   warn=$(agent_default_warn_threshold claude "opus[1m]")
-  [ "$warn" = "250000" ]
-  [ "$warn" != "262500" ]
+  [ "$warn" = "400000" ]
+  [ "$warn" != "393750" ]
 }
 
 @test "1M warn/rotate pinning applies to any [1m] model, not just opus (0.22.0)" {
-  [ "$(agent_default_rotate_threshold claude "sonnet[1m]")" = "300000" ]
-  [ "$(agent_default_warn_threshold claude "sonnet[1m]")" = "250000" ]
+  [ "$(agent_default_rotate_threshold claude "sonnet[1m]")" = "450000" ]
+  [ "$(agent_default_warn_threshold claude "sonnet[1m]")" = "400000" ]
 }
 
 # Every Opus has a 1M window natively, so the bare alias — and a full,
 # versioned id — take the 1M budget without any [1m] tier.
 @test "bare opus gets the 1M thresholds without a [1m] suffix (0.25.0)" {
-  [ "$(agent_default_rotate_threshold claude "opus")" = "300000" ]
-  [ "$(agent_default_warn_threshold claude "opus")" = "250000" ]
+  [ "$(agent_default_rotate_threshold claude "opus")" = "450000" ]
+  [ "$(agent_default_warn_threshold claude "opus")" = "400000" ]
 }
 
 @test "a full Opus model id gets the 1M thresholds (0.25.0)" {
-  [ "$(agent_default_rotate_threshold claude "claude-opus-5")" = "300000" ]
-  [ "$(agent_default_warn_threshold claude "claude-opus-5")" = "250000" ]
+  [ "$(agent_default_rotate_threshold claude "claude-opus-5")" = "450000" ]
+  [ "$(agent_default_warn_threshold claude "claude-opus-5")" = "400000" ]
 }
 
 # Opus implies 1M only for the Claude CLI; it never widens cursor-agent.
@@ -1191,14 +1191,14 @@ TASKS
 # The launchers re-derive thresholds once the model is final; they used to
 # overwrite an operator's ROTATE_THRESHOLD, so the documented knob did nothing.
 @test "an operator ROTATE_THRESHOLD survives and moves the warn point with it (0.28.2)" {
-  ROTATE_THRESHOLD=450000
+  ROTATE_THRESHOLD=350000
   unset WARN_THRESHOLD
   RALPH_MODEL=opus
   source "$SCRIPTS_DIR/ralph-common.sh"
-  [ "$OPERATOR_ROTATE_THRESHOLD" = "450000" ]
+  [ "$OPERATOR_ROTATE_THRESHOLD" = "350000" ]
   [ -z "$OPERATOR_WARN_THRESHOLD" ]
-  [ "$ROTATE_THRESHOLD" = "450000" ]
-  [ "$WARN_THRESHOLD" = "400000" ]
+  [ "$ROTATE_THRESHOLD" = "350000" ]
+  [ "$WARN_THRESHOLD" = "300000" ]
 }
 
 @test "warn derives from the rotate in effect: 50K below on 1M, 7/8 elsewhere (0.28.2)" {

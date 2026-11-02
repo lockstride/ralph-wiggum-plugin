@@ -485,7 +485,7 @@ main() {
   [[ -n "$USE_BRANCH" ]] && echo "✓ Branch: $USE_BRANCH"
   [[ "${OPEN_PR:-false}" == "true" ]] && echo "✓ Will open PR when complete"
 
-  # Re-derive thresholds for selected CLI + model (Opus or [1m] → 300K/250K),
+  # Re-derive thresholds for selected CLI + model (Opus or [1m] → 450K/400K),
   # keeping any the operator set.
   derive_thresholds
   agent_check_thresholds "$RALPH_AGENT_CLI" "$MODEL" "$ROTATE_THRESHOLD" "$WARN_THRESHOLD" || exit 64
