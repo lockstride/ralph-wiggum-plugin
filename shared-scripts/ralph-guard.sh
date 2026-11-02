@@ -416,7 +416,7 @@ _join_chain() {
 # shell runs. `bash -c '…' x/gate-run.sh` runs its -c string, not the harness,
 # so the runner must be the first argument after any flags but `-c`.
 _is_gate_invocation() {
-  echo "$1" | grep -qE "(^|[;&|] *)(bash|sh)( +(-[oO] +[^ ]+|--(rcfile|init-file) +[^ ]+|-[^- c]+|--[^ ]+))* +[\"']?([^ \"']*/gate-run\.sh|\\\$\\(cat [^)]*\.ralph/gate-runner\\))[\"']?( |\$)"
+  echo "$1" | grep -qE "(^|[;&|] *)(bash|sh)( +(-[oO] +[^ ]+|--(rcfile|init-file) +[^ ]+|-[^- c]*|--[^ ]*))* +[\"']?([^ \"']*/gate-run\.sh|\\\$\\(cat [^)]*\.ralph/gate-runner\\))[\"']?( |\$)"
 }
 
 # Reduce a gate invocation to "<label> <command…>" by stripping the runner
