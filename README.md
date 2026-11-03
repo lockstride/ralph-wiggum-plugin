@@ -46,10 +46,10 @@ the inventory when reviewing the loop's reliability end-to-end.
 - Prevents the "run gate → read output → re-run gate for more output" anti-pattern that wastes minutes per loop.
 
 ### Gate-level adherence (three-tier model)
-- Framing's `## Gate Selection` block interpolates the project's `[gates].basic` (per-task default) and `[gates].full` (on `[risky]` tasks and at end-of-loop). The `final` tier is reserved for the eval loop.
+- Framing's `## Gate Selection` block interpolates the project's `[gates].basic` (per-task default) and `[gates].full` (on `[risky]` tasks and at end-of-loop), and names the loop's completion gate: `full` in the impl loop, `final` in the eval loop. The `final` tier is reserved for the eval loop.
 - `gate-run.sh` enforces 8 canonical labels (3 tier labels `basic | full | final` + 5 kind labels `unit | integration | e2e | lint | format`) and writes `<label>-latest.{log,exit,cmd,summary}` per label.
 - Tier-command label-lock, both directions. **Command→label:** each of the three `[gates]` commands must run under its own tier label — closes the "relabel to escape the gate cache and fish for green" anti-pattern. **Label→command:** a tier label refuses any command but its pinned one, exiting 64 before anything runs (nothing is executed, no breadcrumb is written). A gate under `full` that isn't `[gates].full` can never satisfy completion, so it fails in seconds instead of surfacing hours later at COMPLETE.
-- Completion guard `_complete_allowed` refuses `<promise>ALL_TASKS_DONE</promise>` unless `full-latest.cmd` matches `[gates].full` AND `full-latest.exit` is 0. A block whose cause is a `[gates]` disagreement (rather than a red or missing gate) is terminal on the **first** occurrence — the agent cannot edit `command-policy`, so looping again is guaranteed waste; it stops and writes a post-mortem instead.
+- Completion guard `_complete_allowed` refuses `<promise>ALL_TASKS_DONE</promise>` unless the loop's completion gate (`full` in the impl loop, `final` in the eval loop) ran its pinned `[gates]` command — `<tier>-latest.cmd` matches — AND `<tier>-latest.exit` is 0. A block whose cause is a `[gates]` disagreement (rather than a red or missing gate) is terminal on the **first** occurrence — the agent cannot edit `command-policy`, so looping again is guaranteed waste; it stops and writes a post-mortem instead.
 
 ### Smooth handoff between loops
 - `.ralph/handoff.md` has three managed sections:

@@ -420,8 +420,9 @@ build_prompt() {
   _load_gates_from_policy "$workspace" _basic_cmd _full_cmd _final_cmd
 
   # The gate this loop's completion guard requires (see _completion_tier).
-  local _complete_cmd="$_full_cmd"
-  if [[ "$(_completion_tier)" == "final" ]]; then
+  local _complete_tier _complete_cmd="$_full_cmd"
+  _complete_tier=$(_completion_tier)
+  if [[ "$_complete_tier" == "final" ]]; then
     _complete_cmd="$_final_cmd"
   fi
 
@@ -496,8 +497,8 @@ Run \`$_basic_cmd\` by default after each task. Only run \`$_full_cmd\`
 when the current task line is marked \`[risky]\` in tasks.md. After a
 \`[risky]\` task or at the end of the loop, one \`$_full_cmd\` is sufficient
 — do not re-run to "double-check" green gates. The completion guard requires
-a green \`$_full_cmd\` under label \`full\` before \`ALL_TASKS_DONE\`; launch
-that gate in the background and read \`.ralph/gates/full-latest.exit\` (see
+a green \`$_complete_cmd\` under label \`$_complete_tier\` before \`ALL_TASKS_DONE\`; launch
+that gate in the background and read \`.ralph/gates/$_complete_tier-latest.exit\` (see
 Gate Runner), not a blocking foreground call.
 
 When a gate fails, the failure summary appears under \`## Last gate state\` in

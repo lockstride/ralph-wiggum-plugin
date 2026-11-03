@@ -234,6 +234,22 @@ HOFF
   echo "$output" | grep -q 'ALL_TASKS_DONE</promise>` — every task `\[x\]` AND `mock verify:final` exits 0'
 }
 
+@test "build_prompt's Gate Selection names the impl loop's full completion gate" {
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+  echo "$output" | grep -q 'green `mock all-check` under label `full` before `ALL_TASKS_DONE`'
+  echo "$output" | grep -q '\.ralph/gates/full-latest\.exit'
+}
+
+@test "build_prompt's Gate Selection names the eval loop's final completion gate" {
+  export RALPH_EVAL_LOOP=1
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+  echo "$output" | grep -q 'green `mock verify:final` under label `final` before `ALL_TASKS_DONE`'
+  echo "$output" | grep -q '\.ralph/gates/final-latest\.exit'
+  ! echo "$output" | grep -q 'under label `full`'
+}
+
 @test "build_prompt's Gate Selection follows [gates] override (0.14.0)" {
   # Swap the policy mid-test to confirm interpolation, not stale literals.
   cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
