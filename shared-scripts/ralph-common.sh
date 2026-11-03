@@ -419,6 +419,12 @@ build_prompt() {
   local _basic_cmd _full_cmd _final_cmd
   _load_gates_from_policy "$workspace" _basic_cmd _full_cmd _final_cmd
 
+  # The gate this loop's completion guard requires (see _completion_tier).
+  local _complete_cmd="$_full_cmd"
+  if [[ "$(_completion_tier)" == "final" ]]; then
+    _complete_cmd="$_final_cmd"
+  fi
+
   # 0.3.6: Surface gate-run.sh in the non-speckit framing. Speckit-mode
   # prompts get a dedicated gate-invocation contract from speckit-prompt.md,
   # but custom-prompt and PROMPT.md loops had no gate awareness at all —
@@ -527,7 +533,7 @@ The handoff block above is already inlined — do NOT re-read \`.ralph/handoff.m
 
 End your turn ONLY when one of these is true. A successful commit is NOT a stop condition.
 
-1. \`<promise>ALL_TASKS_DONE</promise>\` — every task \`[x]\` AND the final gate exits 0.
+1. \`<promise>ALL_TASKS_DONE</promise>\` — every task \`[x]\` AND \`$_complete_cmd\` exits 0.
 2. \`.ralph/stop-requested\` exists — operator asked the loop to wind down.
 3. \`.ralph/context-warning-active\` exists — token budget is in the warning band; if you start another task you will be killed mid-work and lose progress.
 4. \`<ralph>GUTTER</ralph>\` — genuinely stuck after honest investigation.
@@ -1760,10 +1766,17 @@ run_loop() {
 #   - impl loop  → `full`  ([gates].full,  e.g. `pnpm all-check`)
 #   - eval loop  → `final` ([gates].final, e.g. `pnpm all-check:no-cache`)
 # ralph-evaluate.sh exports RALPH_EVAL_LOOP=1 before entering run_ralph_loop;
-# _complete_allowed reads it to pick the right tier. Keying the eval loop on
-# `full` (the pre-0.14.3 behavior) was unsatisfiable: the eval loop runs only
-# `final` and wipes .ralph/gates at start, so full-latest.* never exists and
-# completion blocked forever.
+# _completion_tier reads it to pick the right tier. Keying the eval loop on
+# `full` (the pre-0.14.3 behavior) was unsatisfiable: the eval loop wipes
+# .ralph/gates at start and need not run `full`, so full-latest.* may never
+# exist and completion blocked forever.
+_completion_tier() {
+  if [[ "${RALPH_EVAL_LOOP:-}" == "1" ]]; then
+    printf 'final'
+  else
+    printf 'full'
+  fi
+}
 
 # Load the three tier-gate commands from `.ralph/command-policy` `[gates]`.
 # Sets the three out-vars (passed by name) — basic, full, final. Missing
@@ -1893,14 +1906,11 @@ _complete_allowed() {
   local _basic _full _final
   _load_gates_from_policy "$workspace" _basic _full _final
 
-  # Pick the tier this loop completes on. The eval loop runs `final` and
-  # wipes .ralph/gates at start, so it must NOT be judged against `full`.
   local label pinned_gate
-  if [[ "${RALPH_EVAL_LOOP:-}" == "1" ]]; then
-    label="final"
+  label=$(_completion_tier)
+  if [[ "$label" == "final" ]]; then
     pinned_gate="$_final"
   else
-    label="full"
     pinned_gate="$_full"
   fi
 

@@ -341,8 +341,8 @@ main() {
   # Tell run_ralph_loop's completion guard (_complete_allowed) that this is
   # the eval loop, so it gates on the `final` tier-gate (this loop's bar),
   # not `full` (the impl loop's). Without this the eval loop is unsatisfiable:
-  # it runs only `final` and wipes .ralph/gates at start, so full-latest.*
-  # never exists and completion blocks forever.
+  # it wipes .ralph/gates at start and need not run `full`, so full-latest.*
+  # may never exist and completion blocks forever.
   export RALPH_EVAL_LOOP=1
 
   export RALPH_AGENT_CLI MODEL ROTATE_THRESHOLD WARN_THRESHOLD MAX_LOOPS

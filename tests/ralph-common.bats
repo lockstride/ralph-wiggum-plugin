@@ -221,6 +221,19 @@ HOFF
   ! echo "$output" | grep -q "pnpm all-check"
 }
 
+@test "build_prompt's ALL_TASKS_DONE stop condition names the impl loop's full gate" {
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+  echo "$output" | grep -q 'ALL_TASKS_DONE</promise>` — every task `\[x\]` AND `mock all-check` exits 0'
+}
+
+@test "build_prompt's ALL_TASKS_DONE stop condition names the eval loop's final gate" {
+  export RALPH_EVAL_LOOP=1
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+  echo "$output" | grep -q 'ALL_TASKS_DONE</promise>` — every task `\[x\]` AND `mock verify:final` exits 0'
+}
+
 @test "build_prompt's Gate Selection follows [gates] override (0.14.0)" {
   # Swap the policy mid-test to confirm interpolation, not stale literals.
   cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
