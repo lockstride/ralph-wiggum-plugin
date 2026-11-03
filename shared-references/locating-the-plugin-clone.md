@@ -1,6 +1,6 @@
 # Locating the plugin clone
 
-Some plugin skills (`ralph-wiggum-plugin-update`, `eval-ralph`) need to reach the
+Some plugin skills (`ralph-plugin-update`, `eval-ralph`) need to reach the
 **development clone** of `ralph-wiggum-plugin` from an arbitrary working directory.
 They are normally invoked from the project where the Ralph work is happening — a
 consumer repo or a worktree — not from the plugin repo itself, so neither the

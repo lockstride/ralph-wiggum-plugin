@@ -1,6 +1,6 @@
 ---
-name: ralph-wiggum-plugin-update
-description: Use this skill when the user wants to implement changes to the ralph-wiggum-plugin, including updating plugin code, bumping the version, writing or updating tests, committing with Conventional Commits, pushing to remote, tagging and publishing a GitHub release, and refreshing the local install via `ralph --update`. Trigger whenever the user says things like "update ralph", "implement this in ralph", "push these changes to ralph", "update the plugin", or describes changes that should be applied to the ralph-wiggum-plugin repo.
+name: ralph-plugin-update
+description: Implements a change to the ralph-wiggum-plugin end to end — plugin code, bats tests, version bump, Conventional Commit, push, tag and GitHub release, then a local install refresh via `ralph --update`. Use when the user wants changes applied to the ralph-wiggum-plugin repo — "update ralph", "implement this in ralph", "push these changes to ralph", "update the plugin", or any described change to the plugin.
 argument-hint: "[patch|minor|major] [change note]"
 ---
 

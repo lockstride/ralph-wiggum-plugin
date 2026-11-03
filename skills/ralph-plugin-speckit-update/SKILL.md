@@ -1,6 +1,6 @@
 ---
 name: ralph-plugin-speckit-update
-description: Updates the ralph-wiggum-plugin's own Spec Kit integration when a new Spec Kit version is released. Use when Spec Kit releases a new tagged version and the plugin's internal files need to be brought in sync — covers the adaptation guide, prompt-resolver, fallback prompt template, docs, and any skills or tests that reference Spec Kit conventions. Follows the ralph-wiggum-plugin-update workflow for versioning, testing, commit, push, and local install update.
+description: Updates the ralph-wiggum-plugin's own Spec Kit integration when a new Spec Kit version is released. Use when Spec Kit releases a new tagged version and the plugin's internal files need to be brought in sync — covers the adaptation guide, prompt-resolver, fallback prompt template, docs, and any skills or tests that reference Spec Kit conventions. Follows the ralph-plugin-update workflow for versioning, testing, commit, push, and local install update.
 ---
 
 # ralph-plugin-speckit-update

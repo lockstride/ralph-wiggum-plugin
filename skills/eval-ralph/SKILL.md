@@ -61,7 +61,7 @@ Read breadcrumbs before narrative; they're cheap and orient you.
 | `.ralph/task-summary` | done/total/remaining counts + the task list head. Quick "did it finish?" |
 | `.ralph/acceptance-report.md` | Eval-loop output: Status (CLEAN/…), Last loop, Last mode (VERIFIER/REWORK), Gaps, History. Present ⇒ an eval loop ran. |
 | `.ralph/eval-ground-truth` | Path to the spec `tasks.md` the eval graded against. |
-| `.ralph/gates/` | Per-label gate results: `<label>-latest.{exit,cmd,log,summary,tree}`. `exit` is the authoritative pass/fail; `tree` (0.26.0) fingerprints the working tree the verdict ran against. Labels: `basic`, `final`, `e2e`, `lint`, `custom`, `eval-*`. Also `last-run` (`<label> <exit> <run-id>`, 0.24.0) — the end-of-run marker stream-parser consumes. |
+| `.ralph/gates/` | Per-label gate results: `<label>-latest.{exit,cmd,log,summary,tree}`. `exit` is the authoritative pass/fail; `tree` (0.26.0) fingerprints the working tree the verdict ran against. Labels: the `[gates]` tiers `basic` (per task), `full` (impl-loop completion) and `final` (eval-loop completion), plus the lane labels the project's `[wrap]` rows assign (e.g. `unit`, `integration`, `e2e`, `lint`); `eval-*` labels predate 0.14.0, when they collapsed into `final`. Also `last-run` (`<label> <exit> <run-id>`, 0.24.0) — the end-of-run marker stream-parser consumes. |
 | `.ralph/gates.impl/` | The IMPLEMENTATION phase's gates, moved aside when the eval loop started (0.24.0). If an eval loop ran, this is where the impl-phase record lives — `gates/` holds only the eval loop's own. Absent ⇒ no eval loop ran. Before 0.29.0 each eval *relaunch* moved the previous eval run's gates over it, so on a relaunched eval it may hold eval gates and no `full-*` files. Since 0.29.0 a relaunch archives the prior eval run's dir as `gates.eval-<UTC stamp>/` (the eval loop marks its dir with `.eval-run`), and an older impl archive is kept as `gates.impl-<UTC stamp>/`. |
 | `.ralph/handoff-agent-ts` | Epoch seconds of the last time the `## Working set` content changed (0.24.0; keyed on content, however written, since 0.26.0 — before that only Write/Edit counted, so a Bash-written handoff read as stale). Compare against loop boundaries to judge how stale the working set was. |
 | `.ralph/errors.log` | Append-only list of every failed shell/gate — the fastest map of where it struggled. `GUARD DENY` entries (0.26.0) are commands the guard refused, which never ran; before 0.26.0 — and on Claude CLI 2.1.310+ before 0.28.0, which prefixes the reason with `PreToolUse:Bash hook error: ` — they were logged as `SHELL FAIL … exit 1` (the activity log's `⛔ GUARD DENY` line is right either way). `ADAPTER:` entries (0.26.2) are stream events the adapter could not read and skipped — usually a sign the CLI changed its event shape. |
@@ -106,14 +106,15 @@ the tool's one-line result, so every write read `1 lines, 0KB`.
 A single session often contains two phases back-to-back:
 
 - **Implementation loop** — `speckit-implement`. Starts with many tasks
-  (`LOOP 1 START — Tasks: 0/42 …`). Gates under label `final` (the completion
-  gate, default `pnpm all-check`). Exits when every task is `[x]` **and** the
-  `final` gate exits 0.
+  (`LOOP 1 START — Tasks: 0/42 …`). Gates each task under `basic` and completes
+  on `full` (`[gates].full`, e.g. `pnpm all-check`): it exits when every task is
+  `[x]` **and** the `full` gate exits 0. It needs no `final` gate.
 - **Eval / acceptance loop** — the `running-acceptance-evaluation` orchestrator.
   Starts with `Tasks: 0/1` (the synthetic "All acceptance criteria met"
   task), reads `acceptance-report.md`, picks **VERIFIER** (no open gaps) or
-  **REWORK** (open `[ ]` gaps), and gates under `eval-*` labels (e.g.
-  `eval-final`). Output is `acceptance-report.md`, not committed.
+  **REWORK** (open `[ ]` gaps), and completes on `final` (`[gates].final`, e.g.
+  `pnpm all-check:no-cache`; `eval-*` labels before 0.14.0). Output is
+  `acceptance-report.md`, not committed.
 
 Evaluate each phase on its own terms, then give an overall verdict.
 
@@ -213,8 +214,9 @@ cat .claude-plugin/plugin.json   # current version
 
 Cross-reference the installed version the run used (from the activity-log gate
 paths) against recent commits/tags. For each recent change, find the log
-evidence it exercised: e.g. an `eval-*` label change ⇒ look for
-`GATE start label=eval-final … exit=0`; an acceptance-report write-allowlist
+evidence it exercised: e.g. a tier-gate change ⇒ look for the
+`GATE end label=full … exit=0` that closes the impl phase and the
+`GATE end label=final … exit=0` that closes the eval phase; an acceptance-report write-allowlist
 change ⇒ look for a `WRITE …/acceptance-report.md` with no `⛔ GUARD DENY`;
 a status-report change ⇒ inspect `ralph-status.sh` output if captured. Mark each
 ✅ working / ⚠️ mixed / ❌ broken / ➖ not exercised, with the evidence line.

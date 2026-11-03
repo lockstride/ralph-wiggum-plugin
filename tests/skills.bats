@@ -86,6 +86,24 @@ _all_skills() {
   done < <(_all_skills)
 }
 
+@test "skill and command names do not repeat the plugin namespace" {
+  # Claude Code invokes them as /<plugin>:<name>, so a name carrying the
+  # plugin's own reads doubled in the slash menu.
+  local plugin
+  plugin=$(sed -nE 's/^  "name": "([^"]+)".*/\1/p' "$PLUGIN_ROOT/.claude-plugin/plugin.json")
+  [ -n "$plugin" ]
+  while IFS= read -r skill_md; do
+    [ -n "$skill_md" ] || continue
+    local name
+    name=$(_skill_field "$skill_md" "name")
+    [[ "$name" != *"$plugin"* ]] || { echo "name '$name' repeats the plugin name in $skill_md" >&2; return 1; }
+  done < <(_all_skills)
+  local cmd
+  for cmd in "$PLUGIN_ROOT"/commands/*.md; do
+    [[ "$(basename "$cmd" .md)" != *"$plugin"* ]] || { echo "command $cmd repeats the plugin name" >&2; return 1; }
+  done
+}
+
 @test "skill description is 1024 chars or fewer" {
   while IFS= read -r skill_md; do
     [ -n "$skill_md" ] || continue
@@ -124,16 +142,16 @@ _all_skills() {
   [ -f "$SKILLS_DIR/verifying-acceptance-criteria/SKILL.md" ]
   [ -f "$SKILLS_DIR/addressing-acceptance-gaps/SKILL.md" ]
   [ -f "$SKILLS_DIR/ralph-plugin-speckit-update/SKILL.md" ]
-  [ -f "$SKILLS_DIR/ralph-wiggum-plugin-update/SKILL.md" ]
+  [ -f "$SKILLS_DIR/ralph-plugin-update/SKILL.md" ]
   [ -f "$SKILLS_DIR/eval-ralph/SKILL.md" ]
 }
 
 @test "clone-resolving skills never hardcode an absolute home path (0.19.0)" {
-  # ralph-wiggum-plugin-update and eval-ralph run from an arbitrary cwd and must
+  # ralph-plugin-update and eval-ralph run from an arbitrary cwd and must
   # resolve the dev clone via shared-references/locating-the-plugin-clone.md.
   # A literal /Users/<name>/ or /home/<name>/ path is machine-specific and wrong
   # for every other operator.
-  for skill in ralph-wiggum-plugin-update eval-ralph; do
+  for skill in ralph-plugin-update eval-ralph; do
     if grep -qE '(/Users|/home)/[a-zA-Z0-9._-]+/' "$SKILLS_DIR/$skill/SKILL.md"; then
       echo "$skill/SKILL.md hardcodes an absolute home path" >&2
       grep -nE '(/Users|/home)/[a-zA-Z0-9._-]+/' "$SKILLS_DIR/$skill/SKILL.md" >&2
@@ -143,7 +161,7 @@ _all_skills() {
 }
 
 @test "clone-resolving skills point at the shared resolution reference (0.19.0)" {
-  for skill in ralph-wiggum-plugin-update eval-ralph; do
+  for skill in ralph-plugin-update eval-ralph; do
     grep -q "locating-the-plugin-clone.md" "$SKILLS_DIR/$skill/SKILL.md" || {
       echo "$skill/SKILL.md does not reference locating-the-plugin-clone.md" >&2
       return 1
