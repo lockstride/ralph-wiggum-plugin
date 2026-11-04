@@ -351,17 +351,21 @@ _split_chain() {
   fi
 }
 
-# Each chained command in the canonical form the checks match against. A
-# command's own words are on its first line, once line continuations are
-# joined; any later line belongs to a quoted argument or a heredoc body.
+# A chained command's own words: its first line, once line continuations are
+# joined. Any later line belongs to a quoted argument or a heredoc body.
+_command_line() {
+  local continuation=$'\\\n' line
+  line="${1//"$continuation"/ }"
+  printf '%s' "${line%%$'\n'*}"
+}
+
+# Each chained command in the canonical form the checks match against.
 _SEG_CANON=()
 _canonicalize_chain() {
-  local i line continuation=$'\\\n'
+  local i
   _SEG_CANON=()
   for ((i = 0; i < ${#_SEG_TEXT[@]}; i++)); do
-    line="${_SEG_TEXT[i]//"$continuation"/ }"
-    line="${line%%$'\n'*}"
-    _SEG_CANON[i]=$(_canonicalize "$line")
+    _SEG_CANON[i]=$(_canonicalize "$(_command_line "${_SEG_TEXT[i]}")")
   done
 }
 
@@ -526,13 +530,13 @@ _guard_load_gates() {
 # 0.12.3 enforcement model: canonicalize → rewrite → deny → wrap → protect.
 # Every command a Bash call chains is canonicalized (env-strip +
 # pipe/redirect-strip + pnpm-wrapper-normalize) and matched against the
-# policy on its own: [rewrite] and [deny] judge each chained command, [wrap]
-# rewraps the chain on the first command it matches, [protect] judges the
-# first. Whenever a transformation fires, the hook emits an `updatedInput` so
-# the agent's tool call is TRANSPARENTLY corrected — the agent sees its
-# command "just work" without a block-and-retry puzzle. The only thing that
-# still hard-blocks is [deny] (genuinely dangerous commands) and a small set
-# of state-tampering patterns enforced outside this policy.
+# policy on its own: [rewrite], [deny] and [wrap] judge each chained command,
+# [protect] judges the first. Whenever a transformation fires, the hook emits
+# an `updatedInput` so the agent's tool call is TRANSPARENTLY corrected — the
+# agent sees its command "just work" without a block-and-retry puzzle. What
+# still hard-blocks is [deny] (genuinely dangerous commands), an env prefix a
+# rewrite cannot carry (_deny_lost_env), and a small set of state-tampering
+# patterns enforced outside this policy.
 #
 # .ralph/command-policy syntax:
 #
@@ -600,9 +604,9 @@ _load_command_policy() {
   # 0.14.0: [gates] commands are auto-wrapped under their tier label — the
   # project does not need to duplicate them in [wrap]. The command prefix is
   # canonicalized so it matches the canonical form the [wrap] matcher uses.
-  # (Caveat: env prefixes are dropped at wrap time — if a [gates] command
-  # relies on a leading env var, wrap it in a shell script so the env lives
-  # inside the script.)
+  # (Caveat: a wrapped command cannot carry an env prefix — if a [gates]
+  # command relies on a leading env var, wrap it in a shell script so the env
+  # lives inside the script.)
   local _g_basic _g_full _g_final _g_can
   _guard_load_gates "$policy" _g_basic _g_full _g_final
   if [[ -n "$_g_basic" ]]; then
@@ -866,44 +870,37 @@ _apply_protect() {
 # update, gate-fail streak tracking, completion guard) because the wrapped
 # form is what actually runs.
 #
-# Matching uses the canonical form (env-stripped, pipe-stripped, pnpm-
-# normalized) so every variant of `pnpm X | tail`, `CI=1 pnpm run X`, etc.
-# resolves to the same prefix and gets wrapped identically.
+# Matching uses the canonical form (pipe-stripped, pnpm-normalized) so every
+# variant of `pnpm X | tail`, `pnpm run X`, etc. resolves to the same prefix
+# and gets wrapped identically.
 #
 # Rule syntax (one per line):
 #   command-prefix | label
 # label must be one of basic|full|final|unit|integration|e2e|lint|format.
 # Missing or unrecognized label → the rule is skipped (no silent fallback).
 #
-# On match, sets _WRAP_REWRITE to the rewritten command. _enforce_command_policy
-# emits it via _emit_rewrite after all checks pass.
-_WRAP_REWRITE=""
-
-# Matches one canonical command against the [wrap] rows. Returns 0 with
-# _WRAP_REWRITE set on match, or 1 on no match.
-_try_match_wrap_segment() {
-  local segment="$1" r
+# Routes one chained command through the harness if it matches a [wrap] row.
+#   $1 = its index in _SEG_FINAL
+_wrap_segment() {
+  local i="$1" segment="${_SEG_FINAL[$1]}" r
   local gate_run_path="${PLUGIN_ROOT:-..}/shared-scripts/gate-run.sh"
   for ((r = 0; r < ${#_WR_PREFIX[@]}; r++)); do
     if [[ "$segment" == "${_WR_PREFIX[r]}" || "$segment" == "${_WR_PREFIX[r]} "* ]]; then
-      _WRAP_REWRITE="bash $gate_run_path ${_WR_LABEL[r]} $segment"
+      _SEG_FINAL[i]="bash $gate_run_path ${_WR_LABEL[r]} $segment"
+      _SEG_REWRITTEN[i]=1
       return 0
     fi
   done
-  return 1
 }
 
-# The first chained command that matches a [wrap] row is the one wrapped, and
-# the WHOLE chain is replaced by the gate-wrap of just that command: a
-# `pnpm format:write && pnpm lint:check && pnpm test-coverage` warm-up is
-# dropped because basic-check/all-check already run those steps, and
-# gate-run.sh runs from the workspace root whatever `cd` preceded it. This
-# closes the most common bypass — chained "warm-up" commands leading to a
-# gated target.
+# Every chained command that matches a [wrap] row is wrapped where it stands,
+# and the rest of the chain runs as the agent wrote it. A rewrite must never
+# lose a command the agent believes ran: a heredoc in front of a gate still
+# writes its file, and a mutation in front of a negative test still lands. A
+# gate still in flight exits 75, so a `&&` behind it waits for the verdict.
 #   $1 = original command
 _apply_wrap() {
-  local cmd="$1" i dropped=""
-  _WRAP_REWRITE=""
+  local cmd="$1" i
   ((${#_WR_PREFIX[@]} > 0)) || return 0
 
   # Already wrapped — nothing to do. The agent's deliberate invocation of
@@ -911,26 +908,31 @@ _apply_wrap() {
   [[ "$cmd" != *gate-run.sh* ]] || return 0
 
   for ((i = 0; i < ${#_SEG_FINAL[@]}; i++)); do
-    [[ -n "${_SEG_FINAL[i]}" ]] || continue
-    if _try_match_wrap_segment "${_SEG_FINAL[i]}"; then
-      # 0.12.5: log which prefix commands got dropped. The "drop the prefix"
-      # assumption is safe for `format:write && lint:check`-style warm-ups
-      # but may not be safe for every project's chain. Surface them so an
-      # operator can spot a load-bearing prefix being discarded.
-      if [[ -n "$dropped" ]]; then
-        _log_intercept "🔀" "REWRITE-CHAIN" "dropped prefix: $dropped | wrapped: ${_SEG_FINAL[i]}"
-      fi
-      return 0
-    fi
-    dropped="${dropped:+$dropped, }${_SEG_FINAL[i]}"
+    _wrap_segment "$i"
   done
-  return 0
+}
+
+# A rewritten command runs in its canonical form, which has no env prefix. The
+# prefix cannot ride along on a gate either: it would change what the verdict
+# means while the breadcrumbs name the plain command, and the gate cache could
+# not tell the two runs apart. So the agent is told, rather than handed a run
+# that quietly ignored the setting.
+_deny_lost_env() {
+  local i line words
+  for ((i = 0; i < ${#_SEG_TEXT[@]}; i++)); do
+    [[ -n "${_SEG_REWRITTEN[i]}" ]] || continue
+    line=$(_command_line "${_SEG_TEXT[i]}")
+    words=$(_strip_env_prefix "$line")
+    [[ "$words" != "$line" ]] || continue
+    _trim "${line%"$words"}"
+    _block "'${_TRIMMED}' would not reach '${_SEG_CANON[i]}': the guard rewrites that command, and the rewritten form cannot carry an env prefix. Nothing ran. Pass the setting as a flag on the command, or set it inside the script the command calls, then re-run without the prefix."
+  done
 }
 
 # Judges the chained commands _canonicalize_chain left in _SEG_CANON.
 #   $1 = original command (pipes/redirects/env intact)
 _enforce_command_policy() {
-  local cmd="$1" i rewritten=""
+  local cmd="$1" i first
   # No policy file → no rewrite/deny/wrap/protect rules. Tier-gate
   # validation (in ralph-setup.sh / loop entry points) has already failed
   # the loop if .ralph/command-policy is missing, so this only matters for
@@ -944,8 +946,8 @@ _enforce_command_policy() {
   #     (e.g. `pnpm nx X → pnpm X`). Results feed into all downstream checks.
   #   - [deny] hard-blocks any chained command it matches. Only path that
   #     calls _block().
-  #   - [wrap] sets _WRAP_REWRITE to the gate-run.sh-wrapped form, which we
-  #     emit via updatedInput at the end. Agent sees the wrapped command
+  #   - [wrap] puts each command it matches in its gate-run.sh-wrapped form,
+  #     emitted via updatedInput at the end. Agent sees the wrapped command
   #     execute transparently.
   #   - [protect] hard-blocks pipe/redirect of bare commands (separate from
   #     wrap because protected scripts may not be gate-runnable).
@@ -956,21 +958,19 @@ _enforce_command_policy() {
     _apply_deny "${_SEG_CANON[i]}"
     _apply_deny "${_SEG_FINAL[i]}"
     if [[ -n "${_SEG_REWRITTEN[i]}" ]]; then
-      rewritten=1
       # After [deny], so an explicit deny row keeps its own, more specific reason.
       _deny_unresolvable_rewrite "${_SEG_FINAL[i]}"
     fi
   done
   _rejoin_gate_invocations
+  first="${_SEG_FINAL[0]:-}"
   _apply_wrap "$cmd"
-  _apply_protect "$cmd" "${_SEG_FINAL[0]:-}"
+  _deny_lost_env
+  _apply_protect "$cmd" "$first"
 
-  # Decide what to emit. Priority:
-  #   1. If [wrap] matched, emit the gate-run.sh-wrapped form (the rewritten
-  #      command is already baked in, so [rewrite] transforms are reflected).
-  #   2. Else if [rewrite] matched, emit the chain with each rewritten command
-  #      in its rewritten form and every other command as written.
-  #   3. Otherwise return — the agent's original command runs as-is.
+  # When [rewrite] or [wrap] fired, emit the chain with those commands in their
+  # new form and every other command as written. Otherwise return — the agent's
+  # original command runs as-is.
   #
   # 0.24.1: whichever form we emit is what actually reaches the shell, so the
   # per-label gate cache and the tier lock have to judge THAT form — and have
@@ -978,10 +978,7 @@ _enforce_command_policy() {
   # caller's check left `last-gate-ts.<label>` unwritten for every auto-wrapped
   # gate, which is the normal path: the cache's `last_gate > 0` precondition
   # could then never hold, so no re-run was ever blocked.
-  if [[ -n "$_WRAP_REWRITE" ]]; then
-    _guard_gate_invocation "$_WRAP_REWRITE"
-    _emit_rewrite "$_WRAP_REWRITE"
-  elif [[ -n "$rewritten" ]]; then
+  if [[ "${_SEG_REWRITTEN[*]}" == *1* ]]; then
     local joined
     joined=$(_join_chain)
     _guard_chained_gates
@@ -1149,8 +1146,8 @@ _guard_chained_gates() {
 # written, so the `last_gate > 0` precondition below could never hold and
 # no re-run was ever blocked.
 #
-#   $1 = a command as it will run: one chained command in canonical form, or
-#        the [wrap] rewrite. Judged only when it runs the harness.
+#   $1 = one chained command in the form it will run. Judged only when it runs
+#        the harness.
 _guard_gate_invocation() {
   local gate="$1"
   _is_gate_invocation "$gate" || return 0

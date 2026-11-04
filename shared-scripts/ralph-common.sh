@@ -451,7 +451,9 @@ Tier-gate commands declared in .ralph/command-policy [gates]:
 
 The plugin hook auto-wraps these through \`$gate_run_cmd <label> <cmd>\` and
 captures \`.ralph/gates/<label>-latest.log\` / \`.exit\` / \`.summary\` for you.
-Do not pipe or tail the output — the wrapper already bounds it. Labels:
+Do not pipe or tail the output — the wrapper already bounds it — and give a
+gated command no env prefix: it cannot reach the gate, so the hook denies it.
+Labels:
 \`basic\` \`full\` \`final\` \`unit\` \`integration\` \`e2e\` \`lint\` \`format\`. On
 failure, read the log + any Cypress/Playwright screenshots before re-running.
 
@@ -1279,19 +1281,21 @@ _reap_process_tree() {
   kill -KILL -- -"$root" 2>/dev/null || true
 }
 
-# 0.18.0: Kill agent (claude/cursor-agent) processes left running for THIS
-# workspace by a PRIOR loop. A reparented agent that escaped its loop's reap
-# (e.g. the loop process itself was SIGKILLed before cleanup) is no longer a
-# descendant of any live loop pid, so a PID-tree walk can't find it — but its
-# argv still carries the workspace path (task-file / handoff / plan references
-# baked into the prompt) and the "Ralph Loop"/"Ralph Iteration" banner. Match
-# the banner cheaply (pgrep -f), then CONFIRM the workspace path is in the argv
-# before killing, so a concurrent loop in a DIFFERENT worktree is never
-# touched. Called at loop start (before the new agent spawns) and loop end —
-# in both windows any match is necessarily a stray. This is order-independent,
-# unlike the pre-0.18 `pkill -f "$workspace.*Ralph (Loop|Iteration)"`, which
-# required the workspace path to precede the banner in argv (it does not: the
-# prompt's "# Ralph Loop N" header comes first) and so never matched.
+# Where a loop leaves its prompt and its agent records its pid, relative to the
+# workspace. Relative so the workspace path stays out of the agent's argv.
+_LOOP_PROMPT_FILE=".ralph/.loop-prompt.md"
+_AGENT_PID_FILE=".ralph/.agent.pid"
+
+# 0.18.0: Kill the agent (claude/cursor-agent) left running for THIS workspace
+# by an earlier loop. A reparented agent that escaped its loop's reap (e.g. the
+# loop process itself was SIGKILLed before cleanup) is no longer a descendant of
+# any live loop pid, so a PID-tree walk can't find it. The pid the agent recorded
+# as it started outlives the loop, and it lives in this workspace, so a
+# concurrent loop in a DIFFERENT worktree is never touched. Matching on cwd or
+# flags instead could not promise that: a Claude session someone has open in
+# this worktree looks just like an agent. The flag check only guards against a
+# recycled pid. Called at loop start (before the new agent spawns) and loop end
+# — in both windows a live agent is necessarily a stray.
 #
 # The log line says what a match in this window is ($2) and its parent pid — a
 # ppid of 1 means it had been orphaned, which is what lets it outlive a reap
@@ -1300,17 +1304,18 @@ _reap_process_tree() {
 _reap_stray_agents() {
   local workspace="$1" what="${2:-prior-loop agent that escaped rotation/cleanup}"
   [[ -n "$workspace" ]] || return 0
-  local pid args ppid
-  for pid in $(pgrep -f 'Ralph (Loop|Iteration)' 2>/dev/null || true); do
-    args=$(ps -o args= -p "$pid" 2>/dev/null || true)
-    case "$args" in
-      *"$workspace"*)
-        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') || ppid=""
-        log_activity "$workspace" "🧹 STRAY AGENT SWEEP — SIGKILL pid $pid (ppid ${ppid:-?}): $what"
-        kill -KILL "$pid" 2>/dev/null || true
-        ;;
-    esac
-  done
+  local pid_file="$workspace/$_AGENT_PID_FILE" pid args ppid
+  pid=$(cat "$pid_file" 2>/dev/null) || pid=""
+  rm -f "$pid_file"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+  case "$args" in
+    *"--output-format stream-json"*)
+      ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') || ppid=""
+      log_activity "$workspace" "🧹 STRAY AGENT SWEEP — SIGKILL pid $pid (ppid ${ppid:-?}): $what"
+      kill -KILL "$pid" 2>/dev/null || true
+      ;;
+  esac
 }
 
 # Run a single agent loop. Returns the final signal on stdout
@@ -1377,11 +1382,11 @@ run_loop() {
     rm -f "$orphan_claims"
   fi
 
-  # 0.18.0: argv-scoped backstop for a reparented agent whose pid the pid-based
-  # sweep above couldn't have — its owning loop was SIGKILLed before recording
-  # it. Safe here because the current loop's agent has not spawned yet, so any
-  # match is a prior-loop stray. Workspace-scoped: a concurrent loop in another
-  # worktree is never touched.
+  # 0.18.0: backstop for a reparented agent whose pid the sweep above couldn't
+  # have — its owning loop was SIGKILLed before recording it. Safe here because
+  # the current loop's agent has not spawned yet, so any match is a prior-loop
+  # stray. Workspace-scoped: a concurrent loop in another worktree is never
+  # touched.
   _reap_stray_agents "$workspace"
 
   # shellcheck disable=SC2329 # invoked indirectly via trap
@@ -1444,8 +1449,10 @@ run_loop() {
 
   log_progress "$workspace" "**Session $loop_label started** (cli: $RALPH_AGENT_CLI, model: $MODEL${EFFORT:+, effort: $EFFORT})"
 
+  printf '%s' "$prompt" >"$workspace/$_LOOP_PROMPT_FILE"
+
   local invoke_cmd
-  invoke_cmd=$(agent_build_cmd "$RALPH_AGENT_CLI" "$MODEL" "$prompt" "$session_id")
+  invoke_cmd=$(agent_build_cmd "$RALPH_AGENT_CLI" "$MODEL" "$_LOOP_PROMPT_FILE" "$session_id" "$_AGENT_PID_FILE")
 
   cd "$workspace" || return
 
@@ -1473,8 +1480,8 @@ run_loop() {
 
   # 0.18.0: record the pipeline root immediately, so a loop process that is
   # hard-killed (SIGKILL) before _loop_cleanup runs still leaves a breadcrumb.
-  # The next loop's pid-sweep catches this subshell; its argv-sweep
-  # (_reap_stray_agents) catches the reparented agent grandchild.
+  # The next loop's pid-sweep catches this subshell; _reap_stray_agents catches
+  # the reparented agent grandchild.
   echo "$agent_pid" >"$orphan_claims" 2>/dev/null || true
 
   # Heartbeat timeout: if the stream-parser produces no output for
@@ -1712,12 +1719,7 @@ run_loop() {
   rm -f "$fifo"
 
   # 0.18.0: mop-up any reparented-to-init agent CLI that escaped the reap
-  # above. _reap_stray_agents matches the "Ralph Loop"/"Ralph Iteration" banner
-  # and CONFIRMS the workspace path is in the argv before killing — scoped so a
-  # concurrent loop in another worktree is never touched, and order-independent
-  # (the pre-0.18 `pkill -f "$workspace.*Ralph (Loop|Iteration)"` required the
-  # workspace path to precede the banner in argv; it never does, so that
-  # mop-up silently never fired — one root of the rotation-zombie escape).
+  # above, scoped so a concurrent loop in another worktree is never touched.
   #
   # The pipeline has exited by now, so a match is this loop's own agent: the
   # pipeline's other stages ended while the CLI lived on.
@@ -2420,8 +2422,14 @@ run_ralph_loop() {
             log_progress "$workspace" "**Loop $loop_label ended** — 🤝 Graceful yield ($remaining_count remaining)"
             _next_msg="🤝 Agent honored context warning and yielded with handoff. Rotating to fresh context ($remaining_count remaining)..."
           else
-            natural_end_count=$((natural_end_count + 1))
-            log_activity "$workspace" "LOOP $loop_label END — 🛌 NATURAL END (agent ended turn; $remaining_count remaining; bail #$natural_end_count this run)$task_suffix"
+            # The eval loop ends its turn after each unit of work by design,
+            # so there only a natural end that moved nothing is a bail.
+            local _bail_note=""
+            if [[ "${RALPH_EVAL_LOOP:-}" != "1" || "$zero_progress_count" -gt 0 ]]; then
+              natural_end_count=$((natural_end_count + 1))
+              _bail_note="; bail #$natural_end_count this run"
+            fi
+            log_activity "$workspace" "LOOP $loop_label END — 🛌 NATURAL END (agent ended turn; $remaining_count remaining$_bail_note)$task_suffix"
             log_progress "$workspace" "**Loop $loop_label ended** — 🛌 Agent ended turn naturally ($remaining_count remaining)"
             _next_msg="🛌 Agent ended its turn but $remaining_count criteria remaining. Starting another loop (cold start, ~10-30k tokens)..."
           fi

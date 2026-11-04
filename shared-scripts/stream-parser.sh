@@ -6,7 +6,7 @@
 # failures/gutter, writes to .ralph/ logs, and emits signals on stdout.
 #
 # Usage:
-#   eval "$(agent_build_cmd "$CLI" "$MODEL" "$PROMPT")" 2>&1 \
+#   eval "$(agent_build_cmd "$CLI" "$MODEL" "$PROMPT_FILE")" 2>&1 \
 #     | agent_normalize "$CLI" \
 #     | ./stream-parser.sh /path/to/workspace [loop_label]
 #

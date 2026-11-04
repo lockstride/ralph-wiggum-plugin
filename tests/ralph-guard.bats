@@ -600,18 +600,39 @@ EOF
   echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
 }
 
-@test "[wrap] auto-wraps env-prefixed invocation" {
+@test "[wrap] denies an env prefix it cannot carry, and names it (0.30.0)" {
   setup_wrap_policy
-  run _run_guard Bash "CI=true pnpm all-check"
+  run _run_guard Bash "NX_SKIP_NX_CACHE=true pnpm all-check 2>&1 | tail -5"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("NX_SKIP_NX_CACHE=true") and test("pnpm all-check")'
 }
 
-@test "[wrap] auto-wraps VERBOSE-prefixed invocation" {
+@test "[wrap] leaves an env prefix alone on a command it does not route (0.30.0)" {
   setup_wrap_policy
-  run _run_guard Bash "VERBOSE=1 pnpm all-check"
+  run _run_guard Bash "NX_SKIP_NX_CACHE=true pnpm webapp:test-fidelity"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
+  [ -z "$output" ]
+}
+
+@test "[wrap] the env denial covers every gated command in a chain (0.30.0)" {
+  setup_wrap_policy
+  run _run_guard Bash "git status && CI=1 pnpm basic-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("CI=1")'
+}
+
+@test "[rewrite] denies an env prefix the rewrite would lose (0.30.0)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[rewrite]
+^pnpm nx (.+)$ | pnpm \1 | nx bypass
+EOF
+  echo '{"scripts":{"build":"run"}}' >"$MOCK_WORKSPACE/package.json"
+  run _run_guard Bash "CI=1 pnpm nx build"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("CI=1")'
 }
 
 @test "[wrap] auto-wraps 'pnpm run' variant" {
@@ -817,25 +838,25 @@ EOF
 # rewrite: every form of "pnpm basic-check" the agent might invent must
 # reduce to the same canonical command and produce the same auto-wrap.
 
-@test "canonicalize: env prefix is stripped" {
+@test "canonicalize: a multi-variable env prefix is denied whole" {
   setup_wrap_policy
   run _run_guard Bash "CI=1 NODE_ENV=test pnpm basic-check"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("CI=1 NODE_ENV=test")'
 }
 
-@test "canonicalize: && separator is stripped (only head command matched)" {
+@test "canonicalize: a command behind && still runs, after the gate (0.30.0)" {
   setup_wrap_policy
   run _run_guard Bash "pnpm basic-check && echo done"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check && echo done$")'
 }
 
-@test "canonicalize: semicolon separator is stripped" {
+@test "canonicalize: a command behind a semicolon still runs (0.30.0)" {
   setup_wrap_policy
   run _run_guard Bash "pnpm basic-check ; echo done"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check")'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check ; echo done$")'
 }
 
 @test "canonicalize: append redirect >> is stripped" {
@@ -849,31 +870,72 @@ EOF
 # 0.12.4: compound-chain wrap matching
 # =============================================================================
 # Bypass closed: an && / ; / || chain where a non-wrapped warm-up command
-# precedes a wrapped target. Previously the head was matched and the wrap
-# target was invisible. Now we split, canonicalize each segment, and rewrap
-# to gate-run.sh on the wrap-target segment alone (dropping the prefix).
+# precedes a wrapped target. Each segment is split and canonicalized, and every
+# one a [wrap] row matches is wrapped in place; the rest of the chain is kept.
 
-@test "compound chain: pnpm format:write && pnpm test-coverage rewraps to test-coverage (0.12.4)" {
+@test "compound chain: the target is wrapped and the warm-up is kept (0.30.0)" {
   cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
 [wrap]
 pnpm test-coverage | basic
 EOF
   run _run_guard Bash "pnpm format:write && pnpm lint:check && pnpm test-coverage 2>&1 | tail -20"
   [ "$status" -eq 0 ]
-  # The whole chain should be replaced by a clean gate-wrap of just the wrap-target segment.
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm test-coverage")'
-  # The format:write/lint:check prefix should NOT appear in the rewritten command.
-  ! echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("format:write")'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("^pnpm format:write && pnpm lint:check && bash .*gate-run.sh basic pnpm test-coverage$")'
 }
 
-@test "compound chain: cd <dir> && pnpm all-check rewraps to all-check (0.12.4)" {
+@test "compound chain: a heredoc in front of the gate still writes its file (0.30.0)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[wrap]
+pnpm test-unit | unit
+EOF
+  local chain
+  chain=$(printf "cat > a.spec.ts <<'EOF'\nit('pnpm test-unit stays text');\nEOF\npnpm test-unit a.spec.ts 2>&1 | tail -5")
+  run _run_guard Bash "$chain"
+  [ "$status" -eq 0 ]
+  local emitted
+  emitted=$(echo "$output" | jq -r '.hookSpecificOutput.updatedInput.command')
+  [[ "$emitted" == "cat > a.spec.ts <<'EOF'"$'\n'"it('pnpm test-unit stays text');"$'\n'"EOF"$'\n'"bash "*"gate-run.sh unit pnpm test-unit a.spec.ts" ]]
+}
+
+@test "compound chain: a setup script around the gate keeps every step (0.30.0)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[wrap]
+pnpm test-unit | unit
+EOF
+  run _run_guard Bash "sed -i '' 's/a/b/' list.ts; pnpm test-unit list; git checkout -- list.ts"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("^sed -i .* ; bash .*gate-run.sh unit pnpm test-unit list ; git checkout -- list.ts$")'
+}
+
+@test "compound chain: every gated command is wrapped, each under its label (0.30.0)" {
+  setup_wrap_policy
+  run _run_guard Bash "pnpm basic-check && pnpm all-check"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm basic-check && bash .*gate-run.sh final pnpm all-check$")'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.timeout == 600000'
+}
+
+@test "compound chain: [protect] still judges a first command [wrap] routes (0.30.0)" {
+  cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
+[wrap]
+pnpm test-unit | unit
+
+[protect]
+pnpm test-unit
+EOF
+  run _run_guard Bash "pnpm test-unit > /tmp/out.log"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+}
+
+@test "compound chain: cd <dir> && pnpm all-check wraps all-check in place (0.30.0)" {
   cat > "$MOCK_WORKSPACE/.ralph/command-policy" <<'EOF'
 [wrap]
 pnpm all-check | final
 EOF
   run _run_guard Bash "cd /tmp/somewhere && pnpm all-check 2>&1 | tail -20"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm all-check")'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("^cd /tmp/somewhere && bash .*gate-run.sh final pnpm all-check$")'
 }
 
 @test "compound chain: semicolon-separated chain still detects wrap target (0.12.4)" {
@@ -883,7 +945,7 @@ pnpm test-unit | basic
 EOF
   run _run_guard Bash "pnpm format:write ; pnpm test-unit"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh basic pnpm test-unit")'
+  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("^pnpm format:write ; bash .*gate-run.sh basic pnpm test-unit$")'
 }
 
 @test "compound chain: chain without any wrap target falls through (0.12.4)" {
@@ -1148,14 +1210,13 @@ EOF
   echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh final pnpm verify:final")'
 }
 
-@test "[gates] auto-wrap survives env prefix on agent's invocation (0.14.0)" {
+@test "[gates] an env prefix on a tier gate is denied, not dropped (0.30.0)" {
   setup_v14_gates_policy
-  # Canonicalization strips the env prefix, matching is on the canonical
-  # form. The wrap rewrite drops the env (a documented limitation: use a
-  # shell script if you need the env preserved at execution time).
+  # The env would change what the verdict means while the breadcrumbs name
+  # the pinned command, so it cannot ride along: it belongs in a script.
   run _run_guard Bash "CI=1 pnpm all-check"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.hookSpecificOutput.updatedInput.command | test("gate-run.sh full pnpm all-check")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
 }
 
 # --- Blanket git-add denial (0.15.4) ---
@@ -1884,11 +1945,18 @@ EOF
 @test "gate-run: the gated command meets [rewrite] (0.29.0)" {
   _nx_policy
   echo "$(date +%s)" >"$STATE_DIR/last-write-ts"
-  run _run_guard Bash "NX_TUI=false bash $SCRIPTS_DIR/gate-run.sh e2e pnpm nx run webapp:test-e2e-ai --skip-nx-cache 2>&1 | tail -40"
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh e2e pnpm nx run webapp:test-e2e-ai --skip-nx-cache 2>&1 | tail -40"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e --arg c "bash $SCRIPTS_DIR/gate-run.sh e2e pnpm test-e2e-ai:full --skip-nx-cache" \
     '.hookSpecificOutput.updatedInput.command == $c'
   echo "$output" | jq -e '.hookSpecificOutput.updatedInput.timeout == 600000'
+}
+
+@test "gate-run: a rewrite that would lose an env prefix is denied (0.30.0)" {
+  _nx_policy
+  run _run_guard Bash "NX_TUI=false bash $SCRIPTS_DIR/gate-run.sh e2e pnpm nx run webapp:test-e2e-ai --skip-nx-cache"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("NX_TUI=false")'
 }
 
 @test "gate-run: the gated command meets [deny] (0.29.0)" {

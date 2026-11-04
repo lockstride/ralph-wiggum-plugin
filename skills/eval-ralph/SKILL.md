@@ -93,11 +93,13 @@ retried; 0.28.0), ⚡ LOOP N caught SIG… (the loop was torn down by a signal;
 0.29.0), 💀 DRIVER GONE (the driver died mid-loop, so no LOOP END follows;
 0.29.0), 🧹 STRAY AGENT SWEEP (an agent outlived its reap — since 0.29.0 the
 line says whether it was a prior loop's or this loop's, with its parent pid;
-ppid 1 means it had been orphaned), ✅ COMPLETE, 🛑 COMPLETE BLOCKED, 🟢 normal
+ppid 1 means it had been orphaned; since 0.30.0 it finds the agent by
+`.ralph/.agent.pid`, not by argv), ✅ COMPLETE, 🛑 COMPLETE BLOCKED, 🟢 normal
 shell/tool. A loop with a START but no END and a long silence after its last
 line is a wedged CLI on a plugin older than 0.28.0; one with no END and no
 silence, on a plugin older than 0.29.0, is a driver that died. `bail #N` and
-the Max-loops `bails:` count graceful yields too before 0.29.0.
+the Max-loops `bails:` count graceful yields too before 0.29.0, and an eval
+loop's natural ends that made progress too before 0.30.0.
 `WRITE`/`EDIT` sizes are the text written since 0.26.1; before that they were
 the tool's one-line result, so every write read `1 lines, 0KB`.
 
@@ -168,6 +170,11 @@ version** the run used — the activity log shows the path, e.g.
   every command in a chain (`cd x && …`, `a; b`, one per line) meets `[rewrite]`,
   `[deny]` and the direct-runner check, and `pnpm -s` / `--silent` is normalized
   away — so a guard-evasion finding against an older run may no longer reproduce.
+  Since 0.30.0 every command a `[wrap]` row matches is wrapped in place and the
+  rest of the chain runs; before that the first match replaced the whole chain,
+  so the other commands silently never ran (`REWRITE-CHAIN dropped prefix` logged
+  those in front, and those behind went unlogged). An env prefix on a rewritten
+  or wrapped command is denied since 0.30.0; before that it was silently dropped.
   Since 0.29.0 the command a direct `gate-run.sh <label> <command>` call gates
   meets `[rewrite]` and `[deny]` too, and runs and is cached in its rewritten
   form: before that, respelling a cache-denied command as one the policy routes

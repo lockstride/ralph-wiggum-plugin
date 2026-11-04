@@ -6,7 +6,8 @@
 # pipes/redirects stripped, `./node_modules/.bin/X` → the lockfile's exec form,
 # `pnpm run X` / `pnpm exec X` / `pnpm -s X` → `pnpm X`), then matched on its
 # own. [rewrite] and [wrap] transparently correct the agent's invocation via
-# updatedInput; only [deny] hard-blocks.
+# updatedInput, leaving the rest of its chain as written; [deny] hard-blocks,
+# and so does an env prefix on a command they correct, since it cannot carry one.
 
 # ─────────────────────────────────────────────────────────────────────
 # [gates] — REQUIRED. The three tier-gate commands.

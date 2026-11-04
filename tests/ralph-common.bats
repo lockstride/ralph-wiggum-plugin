@@ -930,6 +930,117 @@ REPORT
 }
 
 # =============================================================================
+# agent_build_cmd — the prompt stays off the command line (OHI-22)
+# =============================================================================
+
+# Stands in for CLI $1: records its pid, command line and stdin under $FAKE_OUT,
+# then holds until killed. The path of its own script names no repo path.
+_fake_cli() {
+  export FAKE_OUT="$BATS_TEST_TMPDIR/fake"
+  mkdir -p "$FAKE_OUT" "$BATS_TEST_TMPDIR/bin"
+  cat >"$BATS_TEST_TMPDIR/bin/$1" <<'EOF'
+#!/usr/bin/env bash
+ps -o command= -p $$ >"$FAKE_OUT/command"
+cat >"$FAKE_OUT/stdin"
+echo $$ >"$FAKE_OUT/pid"
+while :; do sleep 1; done
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/$1"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+}
+
+# Launches CLI $1 the way run_loop does, from $MOCK_WORKSPACE, and waits for it.
+_launch_agent() {
+  mkdir -p "$MOCK_WORKSPACE/.ralph"
+  printf '%s' "Stop $MOCK_WORKSPACE/apps/api first." >"$MOCK_WORKSPACE/.ralph/.loop-prompt.md"
+  local cmd
+  cmd=$(RALPH_PLUGIN_ROOT="" agent_build_cmd "$1" "sonnet" ".ralph/.loop-prompt.md" "" ".ralph/.agent.pid")
+  (cd "$MOCK_WORKSPACE" && eval "$cmd" >/dev/null 2>&1) 3>&- &
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [[ -s "$FAKE_OUT/pid" ]] && break
+    sleep 0.1
+  done
+  [[ -s "$FAKE_OUT/pid" ]]
+}
+
+@test "agent_build_cmd: claude gets the prompt on stdin, none of it in argv (OHI-22)" {
+  _fake_cli claude
+  _launch_agent claude
+  local pid
+  pid=$(cat "$FAKE_OUT/pid")
+  local recorded
+  recorded=$(cat "$MOCK_WORKSPACE/.ralph/.agent.pid")
+  kill -9 "$pid" 2>/dev/null || true
+  [ "$(cat "$FAKE_OUT/stdin")" = "Stop $MOCK_WORKSPACE/apps/api first." ]
+  ! grep -q "apps/api" "$FAKE_OUT/command"
+  ! grep -qF "$MOCK_WORKSPACE" "$FAKE_OUT/command"
+  grep -q -- "--output-format stream-json" "$FAKE_OUT/command"
+  [ "$recorded" = "$pid" ]
+}
+
+@test "agent_build_cmd: cursor-agent gets a pointer to the prompt file (OHI-22)" {
+  _fake_cli cursor-agent
+  _launch_agent cursor-agent
+  local pid
+  pid=$(cat "$FAKE_OUT/pid")
+  local recorded
+  recorded=$(cat "$MOCK_WORKSPACE/.ralph/.agent.pid")
+  kill -9 "$pid" 2>/dev/null || true
+  grep -q "Read the file .ralph/.loop-prompt.md" "$FAKE_OUT/command"
+  ! grep -q "apps/api" "$FAKE_OUT/command"
+  ! grep -qF "$MOCK_WORKSPACE" "$FAKE_OUT/command"
+  grep -q -- "--output-format stream-json" "$FAKE_OUT/command"
+  [ "$recorded" = "$pid" ]
+}
+
+@test "agent_build_cmd: a cleanup matching repo paths in argv misses the agent (OHI-22)" {
+  _fake_cli claude
+  _launch_agent claude
+  local pid hits
+  pid=$(cat "$FAKE_OUT/pid")
+  # What a dev-server stop script collects before signalling.
+  hits=$(ps -A -o pid= -o command= | grep -F "$MOCK_WORKSPACE" | grep -F "apps/api" | grep -v grep | awk '{print $1}' || true)
+  kill -9 "$pid" 2>/dev/null || true
+  [[ " $(echo $hits) " != *" $pid "* ]]
+}
+
+@test "agent_build_cmd: a loop killed outright leaves its agent reapable (OHI-22)" {
+  _fake_cli claude
+  _launch_agent claude
+  local pid
+  pid=$(cat "$FAKE_OUT/pid")
+  _reap_stray_agents "$MOCK_WORKSPACE"
+  sleep 0.3
+  local alive=0
+  kill -0 "$pid" 2>/dev/null && alive=1
+  kill -9 "$pid" 2>/dev/null || true
+  [ "$alive" -eq 0 ]
+}
+
+@test "agent_build_cmd: --resume still reaches each CLI (OHI-22)" {
+  local cmd
+  cmd=$(agent_build_cmd claude "sonnet" ".ralph/p" "session-abc")
+  [[ "$cmd" == *"--resume 'session-abc' <'.ralph/p'" ]]
+  cmd=$(agent_build_cmd cursor-agent "composer-2" ".ralph/p" "session-abc")
+  [[ "$cmd" == *"--resume='session-abc' 'Read the file .ralph/p"* ]]
+}
+
+@test "run_loop leaves the prompt in the file it hands the agent (OHI-22)" {
+  export RALPH_AGENT_CLI=claude MODEL=test WS="$MOCK_WORKSPACE"
+  bash -c '
+    source "$1/agent-adapter.sh"
+    source "$1/ralph-common.sh"
+    agent_build_cmd() { printf "%s\n" "$3" "$5" >"$WS/build-args"; echo "true"; }
+    build_prompt() { echo "the prompt for loop $2"; }
+    run_loop "$WS" 4 "" "$1"
+  ' _ "$SCRIPTS_DIR" >/dev/null 2>&1 3>&- || true
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/.loop-prompt.md")" = "the prompt for loop 4" ]
+  [ "$(sed -n 1p "$MOCK_WORKSPACE/build-args")" = ".ralph/.loop-prompt.md" ]
+  [ "$(sed -n 2p "$MOCK_WORKSPACE/build-args")" = ".ralph/.agent.pid" ]
+}
+
+# =============================================================================
 # agent_build_cmd — plugin-dir self-registration (0.12.4)
 # =============================================================================
 # Critical bug fix: prior to 0.12.4, agent_build_cmd launched `claude -p`
@@ -1391,30 +1502,47 @@ TASKS
   [ "$status" -eq 0 ]
 }
 
-@test "_reap_stray_agents kills a prior-loop agent scoped to THIS workspace (0.18.0)" {
-  # A stray whose argv carries both the "Ralph Loop" banner and this
-  # workspace path must be reaped; one for a DIFFERENT workspace must not.
-  # The trailing `; :` keeps bash from exec-replacing itself with sleep, which
-  # would drop the marker argv the sweep matches on.
-  bash -c 'sleep 300; :' "Ralph Loop 7 marker $MOCK_WORKSPACE/x" &
-  local mine=$!
-  bash -c 'sleep 300; :' "Ralph Loop 7 marker /some/other/worktree" &
-  local other=$!
-  sleep 0.5
+# A process that looks like an agent, with its pid recorded in $1's breadcrumb.
+# The trailing `; :` keeps bash from exec-replacing itself with sleep, which
+# would drop the flags the sweep confirms. Prints the pid.
+_stray_agent() {
+  bash -c 'sleep 300; :' claude --output-format stream-json >/dev/null 2>&1 3>&- &
+  echo "$!" >"$1/.ralph/.agent.pid"
+  echo "$!"
+}
+
+@test "_reap_stray_agents kills an agent orphaned from THIS workspace only (OHI-22)" {
+  local other_ws="$BATS_TEST_TMPDIR/other-worktree" mine other
+  mkdir -p "$other_ws/.ralph"
+  mine=$(_stray_agent "$MOCK_WORKSPACE")
+  other=$(_stray_agent "$other_ws")
   _reap_stray_agents "$MOCK_WORKSPACE"
   sleep 0.3
-  # Mine reaped; the other worktree's loop untouched.
-  if kill -0 "$mine" 2>/dev/null; then
-    kill -9 "$mine" "$other" 2>/dev/null || true
-    pkill -f 'sleep 300' 2>/dev/null || true
-    fail "in-workspace stray survived"
-  fi
-  if ! kill -0 "$other" 2>/dev/null; then
-    pkill -f 'sleep 300' 2>/dev/null || true
-    fail "a different worktree's agent was wrongly killed"
-  fi
-  kill -9 "$other" 2>/dev/null || true
-  pkill -f 'sleep 300' 2>/dev/null || true
+  local mine_alive=0 other_alive=0
+  kill -0 "$mine" 2>/dev/null && mine_alive=1
+  kill -0 "$other" 2>/dev/null && other_alive=1
+  kill -9 "$mine" "$other" 2>/dev/null || true
+  [ "$mine_alive" -eq 0 ]
+  [ "$other_alive" -eq 1 ]
+  [ ! -e "$MOCK_WORKSPACE/.ralph/.agent.pid" ]
+}
+
+@test "_reap_stray_agents leaves a recycled pid alone (OHI-22)" {
+  sleep 300 >/dev/null 2>&1 3>&- &
+  local pid=$!
+  echo "$pid" >"$MOCK_WORKSPACE/.ralph/.agent.pid"
+  _reap_stray_agents "$MOCK_WORKSPACE"
+  local alive=0
+  kill -0 "$pid" 2>/dev/null && alive=1
+  kill -9 "$pid" 2>/dev/null || true
+  [ "$alive" -eq 1 ]
+  [ ! -e "$MOCK_WORKSPACE/.ralph/.agent.pid" ]
+}
+
+@test "_reap_stray_agents is a no-op with no breadcrumb (OHI-22)" {
+  run _reap_stray_agents "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+  ! grep -q "STRAY AGENT SWEEP" "$MOCK_WORKSPACE/.ralph/activity.log" 2>/dev/null
 }
 
 @test "_write_postmortem folds the structured gutter reason into the bundle (0.18.0)" {
@@ -1776,6 +1904,22 @@ _drive_natural_ends() {
   grep -q "RALPH STOP — ⚠️ Max loops (3) reached (Tasks: 1/3 complete; bails: 1)" "$log"
 }
 
+@test "an eval loop's natural end that made progress is not a bail (0.30.0)" {
+  export RALPH_EVAL_LOOP=1
+  _drive_natural_ends progress bail bail
+  local log="$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -q "LOOP 1 END — 🛌 NATURAL END (agent ended turn; 2 remaining)" "$log"
+  grep -q "RALPH STOP — ⚠️ Max loops (2) reached (Tasks: 1/3 complete; bails: 0)" "$log"
+  ! grep -q "bail #" "$log"
+}
+
+@test "an eval loop's natural end that moved nothing is still a bail (0.30.0)" {
+  export RALPH_EVAL_LOOP=1
+  _drive_natural_ends bail bail
+  local log="$MOCK_WORKSPACE/.ralph/activity.log"
+  grep -q "LOOP 2 END — 🛌 NATURAL END (agent ended turn; 2 remaining; bail #2 this run)" "$log"
+}
+
 @test "a STALL stop follows the stalled loop's END line (0.29.0)" {
   _drive_natural_ends yield bail bail
   [ "$status" -eq 1 ]
@@ -1789,9 +1933,8 @@ _drive_natural_ends() {
 }
 
 @test "_reap_stray_agents says what it reaped and its parent pid (0.29.0)" {
-  bash -c 'sleep 300; :' "Ralph Loop 7 marker $MOCK_WORKSPACE/x" &
-  local mine=$!
-  sleep 0.5
+  local mine
+  mine=$(_stray_agent "$MOCK_WORKSPACE")
   _reap_stray_agents "$MOCK_WORKSPACE" "this loop's agent outlived its pipeline (signal=none, exit=eof)"
   kill -9 "$mine" 2>/dev/null || true
   pkill -f 'sleep 300' 2>/dev/null || true

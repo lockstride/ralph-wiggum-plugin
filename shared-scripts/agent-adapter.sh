@@ -5,7 +5,7 @@
 # (`cursor-agent`) headless modes so the rest of the loop can stay
 # CLI-agnostic. Responsibilities:
 #
-#   1. agent_build_cmd   — assemble the correct argv for the selected CLI
+#   1. agent_build_cmd   — assemble the correct command for the selected CLI
 #   2. agent_normalize   — a jq filter that maps both CLIs' stream-json
 #                          events onto a canonical schema the parser reads
 #   3. agent_check       — verify the selected CLI is installed and
@@ -88,26 +88,38 @@ EOF
 
 # Build the invocation command for a given CLI.
 #
-# Args: <cli> <model> <prompt_text> [session_id]
+# Args: <cli> <model> <prompt_file> [session_id] [pid_file]
 # Prints: a bash -c-safe command string on stdout.
+#
+# The prompt stays off the command line: it names repo paths, and an agent whose
+# argv carries them is a match for any `ps`/`pkill -f` cleanup looking for those
+# paths. prompt_file is read from the agent's working directory, so a relative
+# path keeps even the workspace out of argv. claude reads it on stdin;
+# cursor-agent reads no prompt from stdin, so it gets a pointer to the file.
+#
+# With nothing in argv to find an agent by, it records its own pid in pid_file
+# as it starts: a shell writes its pid there, then becomes the agent.
 #
 # The unattended/skip-approval flag is always included — Ralph cannot
 # pause for permission prompts. The sandbox comes from running in a
 # clean worktree, not from per-tool approval.
 agent_build_cmd() {
-  local cli model prompt_text session_id
+  local cli model prompt_file session_id pid_file
   cli="$(agent_normalize_cli_name "$1")"
   model="$2"
-  prompt_text="$3"
+  prompt_file="$3"
   session_id="${4:-}"
+  pid_file="${5:-/dev/null}"
 
   # Escape all interpolated values for single-quote embedding to
   # prevent shell injection via RALPH_MODEL or session ids.
   local sq_esc="s/'/'\\\\''/g"
-  local esc_prompt esc_model esc_session
-  esc_prompt=$(printf '%s' "$prompt_text" | sed "$sq_esc")
+  local esc_prompt_file esc_model esc_session esc_pid_file
+  esc_prompt_file=$(printf '%s' "$prompt_file" | sed "$sq_esc")
   esc_model=$(printf '%s' "$model" | sed "$sq_esc")
   esc_session=$(printf '%s' "$session_id" | sed "$sq_esc")
+  esc_pid_file=$(printf '%s' "$pid_file" | sed "$sq_esc")
+  local launch="sh -c 'echo \$\$ >\"\$0\"; exec \"\$@\"' '$esc_pid_file'"
 
   # Reasoning effort (claude only). Defaults to the per-CLI default
   # (xhigh for claude — the best setting for coding / agentic work).
@@ -124,7 +136,7 @@ agent_build_cmd() {
       # child processes. An empty ANTHROPIC_API_KEY triggers API-key auth mode
       # with an invalid credential, causing 401. Unset both so the CLI falls
       # back to the logged-in OAuth session.
-      local cmd="unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL; RALPH_AGENT_GUARD=1 claude -p --output-format stream-json --verbose --dangerously-skip-permissions"
+      local cmd="unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL; RALPH_AGENT_GUARD=1 $launch claude -p --output-format stream-json --verbose --dangerously-skip-permissions"
       if [[ -n "$effort" ]]; then
         cmd="$cmd --effort '$esc_effort'"
       fi
@@ -159,15 +171,15 @@ agent_build_cmd() {
       if [[ -n "$session_id" ]]; then
         cmd="$cmd --resume '$esc_session'"
       fi
-      cmd="$cmd '$esc_prompt'"
+      cmd="$cmd <'$esc_prompt_file'"
       echo "$cmd"
       ;;
     cursor-agent)
-      local cmd="RALPH_AGENT_GUARD=1 cursor-agent -p --force --output-format stream-json --model '$esc_model'"
+      local cmd="RALPH_AGENT_GUARD=1 $launch cursor-agent -p --force --output-format stream-json --model '$esc_model'"
       if [[ -n "$session_id" ]]; then
         cmd="$cmd --resume='$esc_session'"
       fi
-      cmd="$cmd '$esc_prompt'"
+      cmd="$cmd 'Read the file $esc_prompt_file in full and follow it exactly: it holds your instructions for this loop.'"
       echo "$cmd"
       ;;
     *)
@@ -427,7 +439,7 @@ JQ
 # Pipe native stream-json on stdin → canonical schema on stdout.
 #
 # Usage:
-#   eval "$(agent_build_cmd claude "$MODEL" "$PROMPT")" 2>&1 \
+#   eval "$(agent_build_cmd claude "$MODEL" "$PROMPT_FILE")" 2>&1 \
 #     | agent_normalize claude \
 #     | stream-parser.sh "$workspace"
 agent_normalize() {
