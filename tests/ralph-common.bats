@@ -241,6 +241,14 @@ HOFF
   echo "$output" | grep -q '\.ralph/gates/full-latest\.exit'
 }
 
+@test "build_prompt's Gate Selection sends a failing lane back alone, then the gate" {
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+  echo "$output" | grep -q "rerun only that$"
+  echo "$output" | grep -q "then run the gate once more"
+  echo "$output" | grep -q "A green lane$"
+}
+
 @test "build_prompt's Gate Selection names the eval loop's final completion gate" {
   export RALPH_EVAL_LOOP=1
   local output

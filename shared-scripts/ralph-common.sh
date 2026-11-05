@@ -508,6 +508,11 @@ the handoff block above. Read it before editing. To rerun just the failing
 file, prefer the per-app targeted wrapper your project documents (e.g.
 \`pnpm <app>:test-unit -- --testFile=<path>\`) rather than re-running the
 full gate.
+
+When a gate that runs several lanes fails in one, fix it and rerun only that
+lane's own command until it passes, then run the gate once more. Rerunning the
+whole gate to test a fix repeats every lane that already passed. A green lane
+doesn't replace the gate: it still has to pass.
 GSEL_EOF
   )
 
