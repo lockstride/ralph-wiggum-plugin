@@ -33,7 +33,7 @@ The rule: an actionable gap (a `[ ]` line in **Gaps** that is NOT suffixed `(blo
 - **For REWORK mode**:
   > Invoke the `addressing-acceptance-gaps` skill. Ground truth is at `<GROUND_TRUTH_PATH>`. Acceptance report is at `<REPORT_PATH>`. Work the report's Gaps section per the skill's procedure, then return a 2–3 sentence summary.
 
-Substitute the actual paths from your framing prompt. **Do not perform verification or code changes yourself.** Wait for the sub-agent to return.
+Substitute the actual paths from your framing prompt, and add any missing results `mode` named to the VERIFIER prompt. **Do not perform verification or code changes yourself.** Wait for the sub-agent to return.
 
 **Step 4. Append to History.** After the sub-agent returns, append one line to the report's **History** section:
 

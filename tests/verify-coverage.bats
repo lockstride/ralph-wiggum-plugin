@@ -137,3 +137,22 @@ _all_results() {
   after=$(ls "${TMPDIR:-/tmp}" | grep -c '^verify-coverage\.' || true)
   [ "$before" -eq "$after" ]
 }
+
+@test "a line with no pass or fail is not a result" {
+  _name_surfaces
+  _report "ABC-1/AC1 | ui | not run" "ABC-1/AC1 | api |" "ABC-1/AC2 | - | skipped" \
+    "ABC-2/AC1 | - | pass" "ABC-3/AC1 | - | fail"
+  run bash "$COVER" "$MOCK_PLAN" "$REPORT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ABC-1/AC1 | ui"* ]]
+  [[ "$output" == *"ABC-1/AC1 | api"* ]]
+  [[ "$output" == *"ABC-1/AC2 | -"* ]]
+  [[ "$output" != *"ABC-2/AC1"* && "$output" != *"ABC-3/AC1"* ]]
+}
+
+@test "a result is read in any case, and may carry a note after it" {
+  _report "ABC-1/AC1 | - | PASS | seen on the board" "ABC-1/AC2 | - | Fail" \
+    "ABC-2/AC1 | - | pass" "ABC-3/AC1 | - | pass"
+  run bash "$COVER" "$MOCK_PLAN" "$REPORT"
+  [ "$status" -eq 0 ]
+}

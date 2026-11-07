@@ -8,6 +8,8 @@
 #
 #   - <criterion> | <surface> | pass|fail
 #
+# Only pass or fail is a result: a line saying `not run` probed nothing.
+#
 # The ground truth names what must be covered:
 #   - a run plan's `## Tickets`: each `### <ID>` block's `- AC<n>:` bullets,
 #     keyed `<ID>/AC<n>`
@@ -83,7 +85,8 @@ awk '
   /^## / { in_r = ($0 ~ /^## Results/); next }
   in_r && /^[ \t]*[-*][ \t]+/ {
     l = $0; sub(/^[ \t]*[-*][ \t]+/, "", l)
-    if (split(l, f, "|") >= 3) print tolower(trim(f[1])) "|" tolower(trim(f[2]))
+    if (split(l, f, "|") >= 3 && tolower(trim(f[3])) ~ /^(pass|fail)$/)
+      print tolower(trim(f[1])) "|" tolower(trim(f[2]))
   }
 ' "$report" >"$work/results" 2>/dev/null || exit 0
 
