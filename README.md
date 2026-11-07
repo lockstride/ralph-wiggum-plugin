@@ -63,6 +63,7 @@ the inventory when reviewing the loop's reliability end-to-end.
 - `--evaluate` chains an acceptance-evaluation loop after the main loop emits `ALL_TASKS_DONE`.
 - `ralph-evaluate.sh` orchestrates two roles in alternation: `running-acceptance-evaluation` skill (orchestrator), which delegates to `verifying-acceptance-criteria` (VERIFIER role) or `addressing-acceptance-gaps` (REWORK role) via the `Task` tool.
 - Drives `.ralph/acceptance-report.md` — checkbox state advances the loop. Verifier runs the project's `[gates].final` command under label `final` independently; rework loops fix logged gaps.
+- The verifier records a `## Results` bullet per criterion and surface (`- <criterion> | <surface> | pass|fail`; surfaces come from `| surface:` on a criterion). The orchestrator picks its mode with `ralph-evaluate.sh mode`, which starts a rework only once every criterion and named surface has a result (`verify-coverage.sh`); it refuses the same gap set twice, then reworks anyway. A ground truth with no readable criteria is not judged.
 - Starts on an empty gates dir, so no implementation-phase verdict can satisfy its guard. The implementation phase's gates are kept in `.ralph/gates.impl/`; a relaunched eval keeps its prior run's as `.ralph/gates.eval-<UTC stamp>/`. Nothing is deleted.
 
 ### Proper dynamic prompt generation

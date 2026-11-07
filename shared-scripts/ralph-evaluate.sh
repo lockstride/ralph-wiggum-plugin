@@ -14,6 +14,7 @@
 #   ./ralph-evaluate.sh --spec [name]            # ground truth = specs/<name>/tasks.md
 #   ./ralph-evaluate.sh --prompt --fresh         # wipe existing report first
 #   ./ralph-evaluate.sh --prompt -n 8 --cli claude -m opus
+#   ./ralph-evaluate.sh mode                     # the orchestrator's mode for this pass
 #
 # Flags:
 #   --cli <claude|cursor-agent>   Agent CLI (default: claude)
@@ -239,6 +240,66 @@ record_gate_runner() {
   printf '%s\n' "$scripts_dir/gate-run.sh" >"$workspace/.ralph/gate-runner"
 }
 
+# The script path the orchestrator runs `mode` from; the plugin install is not
+# in the repo, so the skill cannot assume where it is.
+record_eval_runner() {
+  local workspace="$1" scripts_dir="$2"
+  mkdir -p "$workspace/.ralph"
+  printf '%s\n' "$scripts_dir/ralph-evaluate.sh" >"$workspace/.ralph/eval-runner"
+}
+
+# The eval loop's mode for this pass, from the report on disk: REWORK when a
+# gap is actionable (a `[ ]` line that is neither `(blocked: …)` nor the
+# top-level checkbox) AND the verify pass covered every criterion and surface
+# the ground truth names (verify-coverage.sh); otherwise VERIFIER, which
+# fills the missing results. Prints MODE=<mode>, then what a refused rework
+# still lacks.
+#
+# Bounded: the same uncovered set refuses a rework RALPH_COVERAGE_REFUSALS
+# times (default 2), then rework runs anyway — a verifier that cannot produce a
+# result must not wedge the loop. Fails open: an unreadable ground truth or a
+# coverage check that errors counts as covered.
+pick_mode() {
+  local workspace="$1"
+  local report="$workspace/.ralph/acceptance-report.md" state="$workspace/.ralph/coverage-refusals"
+  local gaps
+  gaps=$(grep -E '^- \[ \]' "$report" 2>/dev/null | grep -vF '(blocked:' | grep -vF 'All acceptance criteria met' || true)
+  if [[ -z "$gaps" ]]; then
+    echo "MODE=VERIFIER"
+    return 0
+  fi
+
+  local truth missing="" rc=0
+  truth=$(cat "$workspace/.ralph/eval-ground-truth" 2>/dev/null) || truth=""
+  [[ -z "$truth" || "$truth" == /* ]] || truth="$workspace/$truth"
+  if [[ -n "$truth" ]]; then
+    missing=$(bash "$SCRIPT_DIR/verify-coverage.sh" "$truth" "$report" 2>/dev/null) || rc=$?
+  fi
+  if [[ $rc -ne 1 ]]; then
+    rm -f "$state"
+    echo "MODE=REWORK"
+    return 0
+  fi
+
+  local sig prev_sig="" prev_n=0 n=0
+  sig=$(printf '%s' "$missing" | cksum | awk '{print $1}')
+  if [[ -f "$state" ]]; then
+    read -r prev_sig prev_n <"$state" || true
+  fi
+  [[ "$prev_n" =~ ^[0-9]+$ ]] || prev_n=0
+  [[ "$prev_sig" == "$sig" ]] && n=$prev_n
+  if [[ $n -ge ${RALPH_COVERAGE_REFUSALS:-2} ]]; then
+    echo "MODE=REWORK"
+    echo "Verify results still missing after $n refusals; reworking anyway:"
+    printf '%s\n' "$missing"
+    return 0
+  fi
+  printf '%s %s\n' "$sig" "$((n + 1))" >"$state" 2>/dev/null || true
+  echo "MODE=VERIFIER"
+  echo "Rework refused: the verify pass has no result for:"
+  printf '%s\n' "$missing"
+}
+
 # Give the eval loop an empty gates dir, so a gate left behind by the
 # implementation loop cannot satisfy its completion guard. The eval loop's
 # verifier/rework sub-agents run their gates under label `final` and write
@@ -386,6 +447,8 @@ main() {
   archive_impl_gates "$WORKSPACE"
 
   record_gate_runner "$WORKSPACE" "$SCRIPT_DIR"
+  record_eval_runner "$WORKSPACE" "$SCRIPT_DIR"
+  rm -f "$WORKSPACE/.ralph/coverage-refusals"
 
   if ! render_orchestrator_prompt "$WORKSPACE" "$ground_truth" "$report" >/dev/null; then
     exit 1
@@ -427,6 +490,10 @@ main() {
 # can source this script to exercise resolve_ground_truth / seed_report /
 # render_orchestrator_prompt in isolation.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  if [[ "${1:-}" == "mode" ]]; then
+    pick_mode "${RALPH_WORKSPACE:-$(pwd)}"
+    exit $?
+  fi
   parse_args "$@"
   main
 fi

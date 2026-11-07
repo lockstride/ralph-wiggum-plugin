@@ -435,3 +435,150 @@ TPL
   [ -d "$MOCK_WORKSPACE/.ralph/gates" ]
   [ ! -d "$MOCK_WORKSPACE/.ralph/gates.impl" ]
 }
+
+# -----------------------------------------------------------------------------
+# pick_mode / mode: rework only once the verify pass covers every criterion
+# -----------------------------------------------------------------------------
+
+_mode_fixture() {
+  create_mock_plan
+  printf '%s\n' "$MOCK_PLAN" >"$MOCK_WORKSPACE/.ralph/eval-ground-truth"
+  REPORT="$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+}
+
+# $1 = gap lines (or empty), the rest = result bullets
+_mode_report() {
+  local gap="$1" l
+  shift
+  {
+    printf '# Acceptance Report\n\n- [ ] All acceptance criteria met and verified\n\n## Gaps\n\n'
+    [[ -z "$gap" ]] || printf '%s\n' "$gap"
+    printf '\n## Results\n\n'
+    for l in "$@"; do printf -- '- %s\n' "$l"; done
+    printf '\n## History\n'
+  } >"$REPORT"
+}
+
+_all_ac_results=("ABC-1/AC1 | - | pass" "ABC-1/AC2 | - | fail" "ABC-2/AC1 | - | pass" "ABC-3/AC1 | - | pass")
+
+@test "pick_mode: no actionable gap is VERIFIER" {
+  _mode_fixture
+  _mode_report ""
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "MODE=VERIFIER" ]
+}
+
+@test "pick_mode: a blocked gap is not actionable" {
+  _mode_fixture
+  _mode_report "- [ ] ui card still offers it (blocked: no browser)" "${_all_ac_results[@]}"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$output" = "MODE=VERIFIER" ]
+}
+
+@test "pick_mode: a gap with every criterion covered is REWORK" {
+  _mode_fixture
+  _mode_report "- [ ] ABC-1 AC2 fails — tests/two.bats:3" "${_all_ac_results[@]}"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "MODE=REWORK" ]
+}
+
+@test "pick_mode: a gap with a criterion unchecked stays VERIFIER and names it" {
+  _mode_fixture
+  _mode_report "- [ ] ABC-1 AC2 fails — tests/two.bats:3" "ABC-1/AC1 | - | pass" "ABC-1/AC2 | - | fail"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | head -1)" = "MODE=VERIFIER" ]
+  echo "$output" | grep -qx "ABC-2/AC1 | -"
+  echo "$output" | grep -qx "ABC-3/AC1 | -"
+}
+
+@test "pick_mode: a named surface left unchecked stays VERIFIER" {
+  _mode_fixture
+  sed -i.bak 's#^- AC1: works | proof: tests/one.bats::works#& | surface: ui, api#' "$MOCK_PLAN"
+  _mode_report "- [ ] ABC-1 AC1 fails" "ABC-1/AC1 | ui | fail" "ABC-1/AC2 | - | pass" "ABC-2/AC1 | - | pass" "ABC-3/AC1 | - | pass"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$(echo "$output" | head -1)" = "MODE=VERIFIER" ]
+  echo "$output" | grep -qx "ABC-1/AC1 | api"
+}
+
+@test "pick_mode: the same missing results refuse rework twice, then rework runs" {
+  _mode_fixture
+  _mode_report "- [ ] ABC-1 AC2 fails" "ABC-1/AC1 | - | pass"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$(echo "$output" | head -1)" = "MODE=VERIFIER" ]
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$(echo "$output" | head -1)" = "MODE=VERIFIER" ]
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$(echo "$output" | head -1)" = "MODE=REWORK" ]
+  echo "$output" | grep -q "reworking anyway"
+}
+
+@test "pick_mode: a different missing set starts the count again" {
+  _mode_fixture
+  _mode_report "- [ ] gap" "ABC-1/AC1 | - | pass"
+  pick_mode "$MOCK_WORKSPACE" >/dev/null
+  pick_mode "$MOCK_WORKSPACE" >/dev/null
+  _mode_report "- [ ] gap" "ABC-1/AC1 | - | pass" "ABC-1/AC2 | - | pass"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$(echo "$output" | head -1)" = "MODE=VERIFIER" ]
+}
+
+@test "pick_mode: full coverage clears the refusal count" {
+  _mode_fixture
+  _mode_report "- [ ] gap" "ABC-1/AC1 | - | pass"
+  pick_mode "$MOCK_WORKSPACE" >/dev/null
+  [ -f "$MOCK_WORKSPACE/.ralph/coverage-refusals" ]
+  _mode_report "- [ ] gap" "${_all_ac_results[@]}"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$output" = "MODE=REWORK" ]
+  [ ! -f "$MOCK_WORKSPACE/.ralph/coverage-refusals" ]
+}
+
+@test "pick_mode: RALPH_COVERAGE_REFUSALS=0 never refuses" {
+  _mode_fixture
+  _mode_report "- [ ] gap" "ABC-1/AC1 | - | pass"
+  RALPH_COVERAGE_REFUSALS=0 run pick_mode "$MOCK_WORKSPACE"
+  [ "$(echo "$output" | head -1)" = "MODE=REWORK" ]
+}
+
+@test "pick_mode: an unreadable ground truth does not refuse rework" {
+  _mode_fixture
+  _mode_report "- [ ] gap"
+  rm -f "$MOCK_WORKSPACE/.ralph/eval-ground-truth"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$output" = "MODE=REWORK" ]
+  printf '%s\n' "$MOCK_WORKSPACE/absent.md" >"$MOCK_WORKSPACE/.ralph/eval-ground-truth"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$output" = "MODE=REWORK" ]
+}
+
+@test "pick_mode: a workspace-relative ground-truth breadcrumb is resolved" {
+  _mode_fixture
+  printf 'plan.md\n' >"$MOCK_WORKSPACE/.ralph/eval-ground-truth"
+  _mode_report "- [ ] gap" "ABC-1/AC1 | - | pass"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$(echo "$output" | head -1)" = "MODE=VERIFIER" ]
+}
+
+@test "the mode subcommand runs from the script, as the orchestrator calls it" {
+  _mode_fixture
+  _mode_report "- [ ] gap" "ABC-1/AC1 | - | pass"
+  run env RALPH_WORKSPACE="$MOCK_WORKSPACE" bash "$SCRIPTS_DIR/ralph-evaluate.sh" mode
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | head -1)" = "MODE=VERIFIER" ]
+}
+
+@test "record_eval_runner: writes the ralph-evaluate.sh path to .ralph/eval-runner" {
+  record_eval_runner "$MOCK_WORKSPACE" "/some/plugin/shared-scripts"
+  [ "$(cat "$MOCK_WORKSPACE/.ralph/eval-runner")" = "/some/plugin/shared-scripts/ralph-evaluate.sh" ]
+}
+
+@test "the seeded report has a Results section with no checkbox in it" {
+  seed_report "$MOCK_WORKSPACE" "$MOCK_WORKSPACE/PROMPT.md"
+  local results
+  results=$(sed -n '/^## Results/,/^## History/p' "$MOCK_WORKSPACE/.ralph/acceptance-report.md")
+  [ -n "$results" ]
+  ! echo "$results" | grep -qE '^[[:space:]]*[-*][[:space:]]+\[[ xX]\]'
+}

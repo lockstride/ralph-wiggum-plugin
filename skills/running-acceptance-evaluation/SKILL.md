@@ -20,22 +20,9 @@ The report opens with a single top-level checkbox: `- [ ] All acceptance criteri
 
 **Step 1. Read both files.** Read the ground-truth file and the acceptance report (Read tool, not Bash). Do not read anything else yourself.
 
-**Step 2. Decide the mode deterministically.** Run this command and use its output:
+**Step 2. Decide the mode deterministically.** Run `bash "$(cat .ralph/eval-runner)" mode` and use its first line, `MODE=REWORK` or `MODE=VERIFIER`; any lines after it name the results a refused rework still lacks.
 
-```bash
-if grep -E '^- \[ \]' .ralph/acceptance-report.md \
-   | grep -v '(blocked:' \
-   | grep -v 'All acceptance criteria met' \
-   | head -1 > /dev/null; then
-  echo "MODE=REWORK"
-else
-  echo "MODE=VERIFIER"
-fi
-```
-
-The rule is: an actionable gap is a `[ ]` line in the **Gaps** section that is NOT suffixed with `(blocked: …)` and is NOT the top-level "All acceptance criteria met" checkbox. If any actionable gap exists → REWORK. Otherwise → VERIFIER.
-
-**Do not pick the mode by alternation** ("last loop was VERIFIER so this one should be REWORK"). The state of the report determines the mode, not the prior loop. If every gap is blocked or the gaps section is empty, VERIFIER runs again — that's correct, because the verifier is the only role that can flip the top-level checkbox.
+The rule: an actionable gap (a `[ ]` line in **Gaps** that is NOT suffixed `(blocked: …)` and is NOT the top-level "All acceptance criteria met" checkbox) means REWORK, but only once the report's **Results** cover every criterion and each surface it names. Otherwise → VERIFIER, which fills the missing results. Never pick the mode by alternating with the prior loop: the state of the report decides.
 
 **Early exit:** If the report's top-level checkbox is `[x]` AND the **Status** line reads `CLEAN`, emit `<ralph>COMPLETE</ralph>` and stop. Do not invoke a sub-agent.
 
