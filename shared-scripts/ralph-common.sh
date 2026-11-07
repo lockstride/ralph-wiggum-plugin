@@ -1876,11 +1876,27 @@ _validate_gates_section() {
   return 1
 }
 
+# Print the rows still open in the `open-items.md` beside the launch task file
+# and return 1 when there are any (see open-items-check.sh). Returns 0 and
+# prints nothing when the run keeps no such file: no task-file breadcrumb, a
+# task file elsewhere, or a checker that cannot read it all fail open.
+_open_items_open() {
+  local workspace="$1" task_file items checker
+  task_file=$(cat "$workspace/.ralph/task-file-path" 2>/dev/null) || return 0
+  [[ -n "$task_file" ]] || return 0
+  [[ "$task_file" == /* ]] || task_file="$workspace/$task_file"
+  items="$(dirname "$task_file")/open-items.md"
+  checker="$_RALPH_SCRIPT_DIR/open-items-check.sh"
+  [[ -f "$items" && -f "$checker" ]] || return 0
+  bash "$checker" "$items" 2>/dev/null
+}
+
 # Return 0 if the main loop is allowed to honour a tasks-complete /
 # COMPLETE signal, non-zero if it should be blocked. Completion requires
 # the loop's tier-gate to have run, its recorded command to match the
-# pinned `[gates]` entry from .ralph/command-policy verbatim, and its exit
-# code to be 0. Anything less blocks ALL_TASKS_DONE.
+# pinned `[gates]` entry from .ralph/command-policy verbatim, its exit
+# code to be 0, and no row of the run's open-items.md left without a
+# disposition. Anything less blocks ALL_TASKS_DONE.
 #
 # The tier depends on which loop is running: the impl loop gates on `full`,
 # the eval loop on `final`. ralph-evaluate.sh exports RALPH_EVAL_LOOP=1
@@ -1964,6 +1980,13 @@ _complete_allowed() {
   [[ -f "$exit_file" ]] && gate_exit=$(cat "$exit_file" 2>/dev/null)
   if [[ "$gate_exit" != "0" ]]; then
     _COMPLETE_BLOCK_REASON="${label} gate \"$pinned_cmd\" exited ${gate_exit:-?}"
+    _COMPLETE_BLOCK_CLASS="transient"
+    return 1
+  fi
+
+  local _open
+  if ! _open=$(_open_items_open "$workspace"); then
+    _COMPLETE_BLOCK_REASON="open items without a disposition (fixed, ticketed <link>, accepted <operator>): $(printf '%s' "$_open" | paste -sd ';' -)"
     _COMPLETE_BLOCK_CLASS="transient"
     return 1
   fi

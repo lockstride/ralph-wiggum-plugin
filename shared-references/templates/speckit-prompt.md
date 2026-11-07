@@ -30,8 +30,18 @@ context rotation; you handle the work.
    - `git add <exact paths> && git commit -m "<type>(<scope>): <desc> (T###)"`. No agent footers. No `--amend`. {{PUSH_GUIDANCE}}
    - (The framing's `## After every commit` block governs what happens
      next — yield-if-breadcrumb OR read the next task.)
-3. When all tasks are `[x]` AND the full gate exits 0,
-   emit `<promise>ALL_TASKS_DONE</promise>`.
+3. When all tasks are `[x]`, no open item lacks a disposition, AND the
+   full gate exits 0, emit `<promise>ALL_TASKS_DONE</promise>`.
+
+## Open items
+Record anything you defer, find out of scope, or cannot decide as a row in
+`open-items.md`, in the same folder as `{{TASK_FILE}}` (start from
+`.specify/templates/open-items-template.md`) — never only in a commit
+message, handoff, or comment. Give it an id, the source task, and a class.
+Before finishing, give every row one disposition: `fixed`,
+`ticketed <link>`, or `accepted <operator>`. Only the operator accepts —
+never write `accepted` yourself. The completion guard refuses
+`ALL_TASKS_DONE` while a row has none.
 
 If a gate fails, read `.ralph/gates/<label>-latest.log` for the
 output. Screenshots at `cypress/screenshots/` and direct `curl` against

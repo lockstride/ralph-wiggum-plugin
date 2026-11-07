@@ -498,6 +498,52 @@ STALE
   _complete_allowed "$MOCK_WORKSPACE"
 }
 
+# open-items.md beside the launch task file: a green gate is not enough while
+# a row has no disposition.
+_green_full_with_items() {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates" "$MOCK_WORKSPACE/specs/f"
+  printf 'mock all-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '0'              >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  printf '%s' "$MOCK_WORKSPACE/specs/f/tasks.md" >"$MOCK_WORKSPACE/.ralph/task-file-path"
+  {
+    printf '| ID | Source task | Class | Summary | Disposition |\n| --- | --- | --- | --- | --- |\n'
+    printf '%s\n' "$@"
+  } >"$MOCK_WORKSPACE/specs/f/open-items.md"
+}
+
+@test "_complete_allowed: green gate but an open item has no disposition → block, transient, names the row" {
+  _green_full_with_items '| OI-07 | T002 | decision | x |  |'
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [[ "$_COMPLETE_BLOCK_REASON" == *"OI-07"* ]]
+  [ "$_COMPLETE_BLOCK_CLASS" = "transient" ]
+}
+
+@test "_complete_allowed: green gate and every item dispositioned → allow" {
+  _green_full_with_items '| OI-07 | T002 | decision | x | fixed |'
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: green gate and no open-items.md → allow as before" {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates" "$MOCK_WORKSPACE/specs/f"
+  printf 'mock all-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '0'              >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  printf '%s' "$MOCK_WORKSPACE/specs/f/tasks.md" >"$MOCK_WORKSPACE/.ralph/task-file-path"
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: green gate and no task-file breadcrumb → allow as before" {
+  _green_full_with_items '| OI-07 | T002 | decision | x |  |'
+  rm "$MOCK_WORKSPACE/.ralph/task-file-path"
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: a red gate is still reported ahead of open items" {
+  _green_full_with_items '| OI-07 | T002 | decision | x |  |'
+  printf '1' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [[ "$_COMPLETE_BLOCK_REASON" == *"exited 1"* ]]
+}
+
 @test "_complete_allowed: in-flight detached full gate → block despite stale green (0.16.0)" {
   # A detached gate is still running; the green breadcrumb on disk is from
   # the PREVIOUS run and must not satisfy completion.
