@@ -2272,3 +2272,126 @@ _assert_gate_allowed() {
   run _run_guard Bash "pnpm all-check"
   _assert_lane_refused
 }
+
+# =============================================================================
+# 0.33.0: tranche close — ticking a close task is refused while a criterion in
+# the run plan has no test, or names a test file that does not exist
+# =============================================================================
+
+_run_guard_edit() {
+  local json
+  json=$(jq -n --arg fp "$MOCK_WORKSPACE/plan.md" --arg o "$1" --arg n "$2" \
+    '{tool_name: "Edit", tool_input: {file_path: $fp, old_string: $o, new_string: $n}}')
+  run bash -c 'printf "%s" "$1" | bash "$2"' _ "$json" "$GUARD"
+}
+
+_close_line_open="- [ ] T002 [risky] Close tranche A: full gate green; move ABC-1,"
+_close_line_done="- [x] T002 [risky] Close tranche A: full gate green; move ABC-1,"
+
+_assert_close_refused() {
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("T002")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("ABC-1 AC1")'
+}
+
+@test "tranche-close: ticking a close task is refused while a criterion's test file is missing" {
+  create_mock_plan
+  _run_guard_edit "$_close_line_open" "$_close_line_done"
+  _assert_close_refused
+}
+
+@test "tranche-close: the refusal names the ticket and the criterion" {
+  create_mock_plan
+  touch "$MOCK_WORKSPACE/tests/one.bats"
+  _run_guard_edit "$_close_line_open" "$_close_line_done"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("ABC-1 AC2")'
+  ! echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("ABC-1 AC1")'
+}
+
+@test "tranche-close: ticking is allowed once every criterion has its test" {
+  create_mock_plan
+  touch "$MOCK_WORKSPACE/tests/one.bats" "$MOCK_WORKSPACE/tests/two.bats"
+  _run_guard_edit "$_close_line_open" "$_close_line_done"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "tranche-close: a Write that ticks the close task is refused" {
+  create_mock_plan
+  local content json
+  content=$(sed 's/^- \[ \] T002/- [x] T002/' "$MOCK_PLAN")
+  json=$(jq -n --arg fp "$MOCK_PLAN" --arg c "$content" \
+    '{tool_name: "Write", tool_input: {file_path: $fp, content: $c}}')
+  run bash -c 'printf "%s" "$1" | bash "$2"' _ "$json" "$GUARD"
+  _assert_close_refused
+}
+
+@test "tranche-close: a MultiEdit that ticks the close task is refused" {
+  create_mock_plan
+  local json
+  json=$(jq -n --arg fp "$MOCK_PLAN" --arg o "$_close_line_open" --arg n "$_close_line_done" \
+    '{tool_name: "MultiEdit", tool_input: {file_path: $fp, edits: [{old_string: "T001 [ABC-1, ABC-2] Claim", new_string: "T001 [ABC-1, ABC-2] Claim"}, {old_string: $o, new_string: $n}]}}')
+  run bash -c 'printf "%s" "$1" | bash "$2"' _ "$json" "$GUARD"
+  _assert_close_refused
+}
+
+@test "tranche-close: ticking an ordinary task is allowed" {
+  create_mock_plan
+  _run_guard_edit "- [ ] T001 [ABC-1, ABC-2] Claim tranche A" "- [x] T001 [ABC-1, ABC-2] Claim tranche A"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "tranche-close: a close task already ticked is not judged again" {
+  create_mock_plan
+  _run_guard_edit "$_close_line_done" "$_close_line_done (note)"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "tranche-close: a plan with no proof map runs as before" {
+  create_mock_plan
+  sed -i.bak 's/ | proof:.*//' "$MOCK_PLAN"
+  cp "$MOCK_PLAN" "$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  _run_guard_edit "$_close_line_open" "$_close_line_done"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "tranche-close: a run with no task-file breadcrumb is not judged" {
+  create_mock_plan
+  rm -f "$MOCK_WORKSPACE/.ralph/task-file-path"
+  _run_guard_edit "$_close_line_open" "$_close_line_done"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "tranche-close: an edit to a file other than the task file is not judged" {
+  create_mock_plan
+  printf 'x' >"$MOCK_WORKSPACE/notes.md"
+  local json
+  json=$(jq -n --arg fp "$MOCK_WORKSPACE/notes.md" --arg o "$_close_line_open" --arg n "$_close_line_done" \
+    '{tool_name: "Edit", tool_input: {file_path: $fp, old_string: $o, new_string: $n}}')
+  run bash -c 'printf "%s" "$1" | bash "$2"' _ "$json" "$GUARD"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "tranche-close: the map is read from the launch snapshot, not the editable plan" {
+  create_mock_plan
+  touch "$MOCK_WORKSPACE/tests/one.bats" "$MOCK_WORKSPACE/tests/two.bats"
+  # The agent strips the missing-test criterion from the plan it can write.
+  sed -i.bak 's#tests/two.bats#tests/one.bats#' "$MOCK_PLAN"
+  rm -f "$MOCK_WORKSPACE/tests/two.bats"
+  _run_guard_edit "$_close_line_open" "$_close_line_done"
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("ABC-1 AC2")'
+}
+
+@test "tranche-close: an absolute task-file breadcrumb is found" {
+  create_mock_plan
+  printf '%s' "$MOCK_PLAN" >"$MOCK_WORKSPACE/.ralph/task-file-path"
+  _run_guard_edit "$_close_line_open" "$_close_line_done"
+  _assert_close_refused
+}

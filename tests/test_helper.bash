@@ -96,6 +96,51 @@ SPEC
   export MOCK_SPEC_DIR
 }
 
+# Create a mock linear-plan run plan in the workspace and register it as the
+# loop's task file, with its launch snapshot. Sets MOCK_PLAN.
+#   ABC-1: AC1 proof tests/one.bats::works, AC2 proof tests/two.bats
+#   ABC-2: AC1 proof "pnpm test-thing" (a command, names no file)
+#   T002 closes tranche A (ABC-1, ABC-2, the second id on a continuation line)
+#   T004 closes tranche B, naming no ticket on its line (ABC-3, in the heading)
+#   ABC-3: AC1 proof tests/three.bats
+create_mock_plan() {
+  MOCK_PLAN="$MOCK_WORKSPACE/plan.md"
+  cat >"$MOCK_PLAN" <<'PLAN'
+# Run plan
+
+## Tasks
+
+### Tranche A - core (ABC-1, ABC-2)
+- [ ] T001 [ABC-1, ABC-2] Claim tranche A
+- [ ] T002 [risky] Close tranche A: full gate green; move ABC-1,
+      ABC-2 to In Review
+
+### Tranche B - extras (ABC-3)
+- [ ] T003 [ABC-3] Build the extra
+- [ ] T004 [risky] Close tranche B: full gate green
+
+## Tickets
+
+### ABC-1 - first
+https://example.test/ABC-1 - Priority: High
+Acceptance criteria (from the ticket - plain bullets, NOT checkboxes):
+
+- AC1: works | proof: tests/one.bats::works
+- AC2: also works | proof: tests/two.bats
+  Steps to reproduce (bugs): none
+
+### ABC-2 - second
+- AC1: a command proves it | proof: pnpm test-thing
+
+### ABC-3 - third
+- AC1: extra works | proof: tests/three.bats
+PLAN
+  mkdir -p "$MOCK_WORKSPACE/.ralph" "$MOCK_WORKSPACE/tests"
+  printf '%s' "plan.md" >"$MOCK_WORKSPACE/.ralph/task-file-path"
+  cp "$MOCK_PLAN" "$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  export MOCK_PLAN
+}
+
 # Create a mock speckit.implement.md command file
 create_mock_speckit_implement() {
   mkdir -p "$MOCK_WORKSPACE/.claude/commands"

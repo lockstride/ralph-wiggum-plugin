@@ -12,6 +12,8 @@
 #     gates/rewrite/deny/wrap/protect)
 #   - State-tampering denial (Bash: rm -rf .ralph/, edits to state paths)
 #   - Forbidden-path denial (Write/Edit/MultiEdit: .ralph/gates/*, state dir)
+#   - Tranche-close refusal (Write/Edit/MultiEdit: ticking a close task while a
+#     criterion in the run plan has no test, or a missing test file)
 #   - Write-event recording (Write/Edit/MultiEdit: updates last-write-ts)
 #
 # State lives outside the workspace at:
@@ -1451,6 +1453,66 @@ _tree_changed_since_verdict() {
 # Write/Edit/MultiEdit dispatch
 # ---------------------------------------------------------------------------
 
+# A tranche-close task is `- [ ] T### [risky] Close tranche …`. Ticking it
+# while a ticket it closes has a criterion with no named test, or a test file
+# that does not exist, is refused (proof-check.sh reads the plan's `| proof:`
+# map). Fails open: no task file, no map, no ticked close line in the edit,
+# an unreadable input all allow the write.
+#
+# The map is read from .ralph/effective-prompt.md — the launch snapshot, which
+# the agent cannot write — when it holds the task, else from the task file.
+#
+#   $1 = the path being written
+_guard_tranche_close() {
+  local path="$1" task_file
+  task_file=$(cat "$WORKSPACE/.ralph/task-file-path" 2>/dev/null) || return 0
+  [[ -n "$task_file" ]] || return 0
+  [[ "$task_file" == /* ]] || task_file="$WORKSPACE/$task_file"
+  [[ -f "$task_file" && "$path" -ef "$task_file" ]] || return 0
+
+  local before after
+  case "$TOOL_NAME" in
+    Write)
+      before=$(cat "$task_file" 2>/dev/null) || return 0
+      after=$(echo "$INPUT" | jq -r '.tool_input.content // empty' 2>/dev/null) || return 0
+      ;;
+    Edit)
+      before=$(echo "$INPUT" | jq -r '.tool_input.old_string // empty' 2>/dev/null) || return 0
+      after=$(echo "$INPUT" | jq -r '.tool_input.new_string // empty' 2>/dev/null) || return 0
+      ;;
+    MultiEdit)
+      before=$(echo "$INPUT" | jq -r '[.tool_input.edits[]?.old_string // empty] | join("\n")' 2>/dev/null) || return 0
+      after=$(echo "$INPUT" | jq -r '[.tool_input.edits[]?.new_string // empty] | join("\n")' 2>/dev/null) || return 0
+      ;;
+    *) return 0 ;;
+  esac
+
+  local closed_before closed_after tid
+  closed_before=$(_ticked_close_tasks "$before")
+  closed_after=$(_ticked_close_tasks "$after")
+  [[ -n "$closed_after" ]] || return 0
+
+  local plan="$WORKSPACE/.ralph/effective-prompt.md" report=""
+  local checker="$PLUGIN_ROOT/shared-scripts/proof-check.sh"
+  [[ -f "$checker" ]] || return 0
+  for tid in $closed_after; do
+    case " $closed_before " in *" $tid "*) continue ;; esac
+    if [[ ! -f "$plan" ]] || ! grep -Eq "^[[:space:]]*[-*][[:space:]]+\[.\][[:space:]]+${tid}([^0-9A-Za-z]|$)" "$plan" 2>/dev/null; then
+      plan="$task_file"
+    fi
+    report=$(bash "$checker" "$plan" "$tid" "$WORKSPACE" 2>/dev/null) && continue
+    [[ -n "$report" ]] || continue
+    _block "Closing $tid is refused: every criterion of the tickets it closes needs a test that proves it. ${report//$'\n'/; }. Write the missing test (or correct the path in the plan's '| proof:' entry), then close the tranche."
+  done
+}
+
+# The ids of the ticked close tasks in $1, space-separated.
+_ticked_close_tasks() {
+  printf '%s\n' "$1" |
+    sed -nE 's/^[[:space:]]*[-*][[:space:]]+\[[xX]\][[:space:]]+(T[0-9]+)[[:space:]].*[Cc]lose tranche.*$/\1/p' |
+    tr '\n' ' '
+}
+
 _guard_write() {
   local path="$TOOL_INPUT_PATH"
   [[ -z "$path" ]] && return 0
@@ -1493,6 +1555,8 @@ _guard_write() {
   if [[ "$path" == "$STATE_DIR"* ]]; then
     _block "Write to ralph state directory denied. State files are managed by the hook."
   fi
+
+  _guard_tranche_close "$path"
 
   # --- Record WRITE event ---
   # last-write-ts invalidates the per-label gate cache: a gate stays cached
