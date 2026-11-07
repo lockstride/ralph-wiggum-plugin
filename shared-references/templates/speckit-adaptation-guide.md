@@ -86,7 +86,15 @@ and unattended execution. Stable across versions of speckit-implement.
     at the top, then refer to them symbolically in the per-task flow
     ("the basic gate", "the tasks file"). Repeating absolute paths in
     every step is noise.
-17. **Total output should stay under 40 lines.** With Stop / Handoff /
+17. **Add the open-items rule.** The body must tell the agent to record
+    anything it defers, finds out of scope or cannot decide as a row in
+    `open-items.md` beside `{{TASK_FILE}}` (seed:
+    `.specify/templates/open-items-template.md`), to give every row a
+    disposition — `fixed`, `ticketed <link>` or `accepted <operator>` —
+    before finishing, and never to write `accepted` itself. The
+    completion signal (rule 11) also waits for every row to have one;
+    the completion guard refuses it otherwise.
+18. **Total output should stay under 40 lines.** With Stop / Handoff /
     After-commit moved to the framing and paths defined once, the body
     is purely task-execution flow and should shrink.
 
@@ -139,13 +147,20 @@ context rotation and rate limits; you handle the work.
      `.ralph/errors.log`, and continue with the remaining tasks.
    - Commit: `git add <exact paths> && git commit -m "<type>(<scope>): <description> (T###)"`.
    - (Framing's `## After every commit` block governs what's next.)
-3. When all `[x]` AND the full gate exits 0, emit
-   `<promise>ALL_TASKS_DONE</promise>`.
+3. When all `[x]`, no open item lacks a disposition, AND the full gate
+   exits 0, emit `<promise>ALL_TASKS_DONE</promise>`.
 
 If a gate fails, read `.ralph/gates/<label>-latest.log` for the output.
 Screenshots and direct `curl` are cheaper evidence than re-running.
 After a genuine fix, if the gate still fails for the same reason,
 emit `<ralph>GUTTER</ralph>`.
+
+## Open items
+Record anything you defer, find out of scope, or cannot decide as a row
+in `open-items.md` beside the tasks file (template:
+`.specify/templates/open-items-template.md`). Before finishing, give each
+row `fixed`, `ticketed <link>` or `accepted <operator>`; only the operator
+accepts. Completion is refused while a row has none.
 
 ## Constitution
 Ground every decision in the constitution. If a task would violate

@@ -91,6 +91,29 @@ _items() {
   [ "$status" -eq 0 ]
 }
 
+@test "a CRLF file is read like an LF one" {
+  _items '| OI-01 | T003 | defect | a | fixed |' '| OI-02 | T004 | defect | b |  |'
+  sed 's/$/\r/' "$ITEMS" >"$ITEMS.crlf"
+  run bash "$CHECK" "$ITEMS.crlf"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"OI-02"* ]]
+  [[ "$output" != *"OI-01"* ]]
+}
+
+@test "a word that merely starts with fixed or ticketed does not close a row" {
+  _items '| OI-01 | T003 | defect | a | fixed-by-T9 |' '| OI-02 | T004 | defect | b | ticketedx https://x.test/1 |'
+  run bash "$CHECK" "$ITEMS"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"OI-01"* ]]
+  [[ "$output" == *"OI-02"* ]]
+}
+
+@test "fixed may carry a note after it" {
+  _items '| OI-01 | T003 | defect | a | Fixed (commit abc123) |' '| OI-02 | T004 | defect | b | fixed: in T009 |'
+  run bash "$CHECK" "$ITEMS"
+  [ "$status" -eq 0 ]
+}
+
 @test "same input gives the same output" {
   _items '| OI-01 | T003 | defect | a |  |' '| OI-02 | T004 | defect | b |  |'
   run bash "$CHECK" "$ITEMS"

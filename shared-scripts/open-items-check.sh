@@ -28,6 +28,7 @@ file="${1:-}"
 open=$(
   awk '
     function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    { sub(/\r$/, "") }
     /^[ \t]*\|/ {
       line = $0
       sub(/^[ \t]*\|/, "", line)
@@ -41,8 +42,8 @@ open=$(
       id = trim(c[1])
       d = (n >= 2) ? trim(c[n]) : ""
       ld = tolower(d)
-      if (ld ~ /^fixed([^a-z]|$)/) next
-      if (ld ~ /^ticketed/ && d ~ /https?:\/\/[^ \t]+/) next
+      if (ld ~ /^fixed([ \t:.,;(]|$)/) next
+      if (ld ~ /^ticketed([ \t:]|$)/ && d ~ /https?:\/\/[^ \t]+/) next
       if (ld ~ /^accepted[ \t:]+[^ \t]/) next
       if (d == "") print id ": no disposition"
       else print id ": \"" d "\" is not fixed, ticketed <link>, or accepted <operator>"

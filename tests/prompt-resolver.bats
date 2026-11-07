@@ -81,6 +81,18 @@ teardown() {
   grep -q "A checked box claims you" "$guide"
 }
 
+@test "both prompt sources carry the open-items recording rule" {
+  # A run built from the adaptation guide (the normal path) and one built from
+  # the fallback template must both be told to record open items; the guide
+  # needs the rule AND the example section, or regenerated prompts lose it.
+  local guide="$TEMPLATES_DIR/speckit-adaptation-guide.md"
+  grep -q "Add the open-items rule" "$guide"
+  grep -q "^## Open items" "$guide"
+  grep -q "^## Open items" "$TEMPLATES_DIR/speckit-prompt.md"
+  grep -q "open-items-template.md" "$guide"
+  grep -q "open-items-template.md" "$TEMPLATES_DIR/speckit-prompt.md"
+}
+
 @test "uses cached prompt when hash matches" {
   create_mock_speckit_implement
 
