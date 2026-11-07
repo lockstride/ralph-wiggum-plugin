@@ -1465,12 +1465,15 @@ _tree_changed_since_verdict() {
 
 # A tranche-close task is `- [ ] T### [risky] Close tranche …`. Ticking it
 # while a ticket it closes has a criterion with no named test, or a test file
-# that does not exist, is refused (proof-check.sh reads the plan's `| proof:`
-# map). Fails open: no task file, no map, no ticked close line in the edit,
-# an unreadable input all allow the write.
+# that does not exist, is refused. proof-check.sh reads the plan's `| proof:`
+# map and judges only close tasks. Fails open: no task file, no map, or an
+# unreadable input all allow the write.
 #
-# The map is read from .ralph/effective-prompt.md — the launch snapshot, which
-# the agent cannot write — when it holds the task, else from the task file.
+# What an edit ticks comes from the whole file as the edit would leave it: the
+# snippet can be as short as `[ ]`. The task and its map come from
+# .ralph/effective-prompt.md — the launch snapshot, which the agent cannot
+# write — when it holds the task, else from the task file as it stands before
+# the edit, so rewording a task does not change what ticking it means.
 #
 #   $1 = the path being written
 _guard_tranche_close() {
@@ -1480,46 +1483,46 @@ _guard_tranche_close() {
   [[ "$task_file" == /* ]] || task_file="$WORKSPACE/$task_file"
   [[ -f "$task_file" && "$path" -ef "$task_file" ]] || return 0
 
-  local before after
-  case "$TOOL_NAME" in
-    Write)
-      before=$(cat "$task_file" 2>/dev/null) || return 0
-      after=$(echo "$INPUT" | jq -r '.tool_input.content // empty' 2>/dev/null) || return 0
-      ;;
-    Edit)
-      before=$(echo "$INPUT" | jq -r '.tool_input.old_string // empty' 2>/dev/null) || return 0
-      after=$(echo "$INPUT" | jq -r '.tool_input.new_string // empty' 2>/dev/null) || return 0
-      ;;
-    MultiEdit)
-      before=$(echo "$INPUT" | jq -r '[.tool_input.edits[]?.old_string // empty] | join("\n")' 2>/dev/null) || return 0
-      after=$(echo "$INPUT" | jq -r '[.tool_input.edits[]?.new_string // empty] | join("\n")' 2>/dev/null) || return 0
-      ;;
-    *) return 0 ;;
-  esac
-
-  local closed_before closed_after tid
-  closed_before=$(_ticked_close_tasks "$before")
-  closed_after=$(_ticked_close_tasks "$after")
-  [[ -n "$closed_after" ]] || return 0
-
-  local plan="$WORKSPACE/.ralph/effective-prompt.md" report=""
   local checker="$PLUGIN_ROOT/shared-scripts/proof-check.sh"
   [[ -f "$checker" ]] || return 0
-  for tid in $closed_after; do
-    case " $closed_before " in *" $tid "*) continue ;; esac
+
+  local after ticked_before ticked_after
+  after=$(_task_file_after_write "$task_file") || return 0
+  ticked_before=$(_ticked_tasks <"$task_file") || return 0
+  ticked_after=$(printf '%s\n' "$after" | _ticked_tasks) || return 0
+
+  local tid plan report
+  for tid in $ticked_after; do
+    case " $ticked_before " in *" $tid "*) continue ;; esac
+    plan="$WORKSPACE/.ralph/effective-prompt.md"
     if [[ ! -f "$plan" ]] || ! grep -Eq "^[[:space:]]*[-*][[:space:]]+\[.\][[:space:]]+${tid}([^0-9A-Za-z]|$)" "$plan" 2>/dev/null; then
       plan="$task_file"
     fi
     report=$(bash "$checker" "$plan" "$tid" "$WORKSPACE" 2>/dev/null) && continue
     [[ -n "$report" ]] || continue
-    _block "Closing $tid is refused: every criterion of the tickets it closes needs a test that proves it. ${report//$'\n'/; }. Write the missing test (or correct the path in the plan's '| proof:' entry), then close the tranche."
+    _block "Closing $tid is refused: every criterion of the tickets it closes needs a test that proves it. ${report//$'\n'/; }. Write the missing test where the plan names it, then close the tranche. The check reads the plan as it was launched, so editing its '| proof:' entry changes nothing."
   done
 }
 
-# The ids of the ticked close tasks in $1, space-separated.
-_ticked_close_tasks() {
-  printf '%s\n' "$1" |
-    sed -nE 's/^[[:space:]]*[-*][[:space:]]+\[[xX]\][[:space:]]+(T[0-9]+)[[:space:]].*[Cc]lose tranche.*$/\1/p' |
+# The task file $1 as this Write, Edit or MultiEdit would leave it. An edit's
+# old_string is unique unless replace_all is set, so replacing every match is
+# what the tool does either way.
+_task_file_after_write() {
+  printf '%s' "$INPUT" | jq -er --rawfile plan "$1" '
+    def swap($e):
+      if ($e.old_string // "") == "" then .
+      else split($e.old_string) | join($e.new_string // "") end;
+    .tool_input as $in
+    | if .tool_name == "Write" then $in.content
+      elif .tool_name == "Edit" then $plan | swap($in)
+      elif .tool_name == "MultiEdit" then reduce ($in.edits // [])[] as $e ($plan; swap($e))
+      else null end
+  ' 2>/dev/null
+}
+
+# The ids of the ticked tasks on stdin, space-separated.
+_ticked_tasks() {
+  sed -nE 's/^[[:space:]]*[-*][[:space:]]+\[[xX]\][[:space:]]+(T[0-9]+)([^0-9A-Za-z].*)?$/\1/p' |
     tr '\n' ' '
 }
 

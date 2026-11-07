@@ -18,6 +18,10 @@ _proofs_exist() {
   touch "$MOCK_WORKSPACE/tests/one.bats" "$MOCK_WORKSPACE/tests/two.bats" "$MOCK_WORKSPACE/tests/three.bats"
 }
 
+_now_ms() {
+  perl -MTime::HiRes=time -e 'printf "%d\n", time() * 1000'
+}
+
 @test "allows a close when every criterion names a test that exists" {
   _proofs_exist
   run bash "$CHECK" "$MOCK_PLAN" T002 "$MOCK_WORKSPACE"
@@ -104,9 +108,36 @@ _proofs_exist() {
   done
   _proofs_exist
   local start end
-  start=$(date +%s)
+  start=$(_now_ms)
   run bash "$CHECK" "$MOCK_PLAN" T002 "$MOCK_WORKSPACE"
-  end=$(date +%s)
+  end=$(_now_ms)
   [ "$status" -eq 0 ]
-  [ $((end - start)) -lt 1 ]
+  [ $((end - start)) -lt 1000 ]
+}
+
+@test "a task that closes no tranche is not judged" {
+  run bash "$CHECK" "$MOCK_PLAN" T001 "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "a close task is recognised in any case" {
+  sed -i.bak 's/Close tranche A/CLOSE TRANCHE A/' "$MOCK_PLAN"
+  run bash "$CHECK" "$MOCK_PLAN" T002 "$MOCK_WORKSPACE"
+  [ "$status" -eq 1 ]
+}
+
+@test "a bare file name in a proof is a path" {
+  _proofs_exist
+  sed -i.bak 's/proof: pnpm test-thing/proof: thing.bats/' "$MOCK_PLAN"
+  run bash "$CHECK" "$MOCK_PLAN" T002 "$MOCK_WORKSPACE"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ABC-2 AC1: the test file 'thing.bats' does not exist"* ]]
+}
+
+@test "a one-word command in a proof names no file" {
+  _proofs_exist
+  sed -i.bak 's/proof: pnpm test-thing/proof: make/' "$MOCK_PLAN"
+  run bash "$CHECK" "$MOCK_PLAN" T002 "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
 }

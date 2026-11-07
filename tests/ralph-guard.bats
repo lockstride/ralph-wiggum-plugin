@@ -2417,6 +2417,90 @@ _assert_close_refused() {
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("ABC-1 AC2")'
 }
 
+@test "tranche-close: a minimal checkbox edit is refused" {
+  create_mock_plan
+  _run_guard_edit "- [ ] T002" "- [x] T002"
+  _assert_close_refused
+}
+
+@test "tranche-close: a checkbox edit with no bullet is refused" {
+  create_mock_plan
+  _run_guard_edit "[ ] T002" "[X] T002"
+  _assert_close_refused
+}
+
+@test "tranche-close: an edit that stops short of the task id is refused" {
+  create_mock_plan
+  _run_guard_edit $'Claim tranche A\n- [ ]' $'Claim tranche A\n- [x]'
+  _assert_close_refused
+}
+
+@test "tranche-close: a replace_all that ticks every box is refused" {
+  create_mock_plan
+  local json
+  json=$(jq -n --arg fp "$MOCK_PLAN" \
+    '{tool_name: "Edit", tool_input: {file_path: $fp, old_string: "- [ ]", new_string: "- [x]", replace_all: true}}')
+  run bash -c 'printf "%s" "$1" | bash "$2"' _ "$json" "$GUARD"
+  _assert_close_refused
+}
+
+@test "tranche-close: a MultiEdit of minimal edits is refused" {
+  create_mock_plan
+  local json
+  json=$(jq -n --arg fp "$MOCK_PLAN" \
+    '{tool_name: "MultiEdit", tool_input: {file_path: $fp, edits: [{old_string: "- [ ] T001", new_string: "- [x] T001"}, {old_string: "- [ ] T002", new_string: "- [x] T002"}]}}')
+  run bash -c 'printf "%s" "$1" | bash "$2"' _ "$json" "$GUARD"
+  _assert_close_refused
+}
+
+@test "tranche-close: rewording the task while ticking it is refused" {
+  create_mock_plan
+  _run_guard_edit "$_close_line_open" "- [x] T002 finished"
+  _assert_close_refused
+}
+
+@test "tranche-close: rewording the task before ticking it is refused" {
+  create_mock_plan
+  sed -i.bak 's/Close tranche A: full gate green; move ABC-1,/finished/' "$MOCK_PLAN"
+  _run_guard_edit "- [ ] T002" "- [x] T002"
+  _assert_close_refused
+}
+
+@test "tranche-close: a minimal tick is allowed once every criterion has its test" {
+  create_mock_plan
+  touch "$MOCK_WORKSPACE/tests/one.bats" "$MOCK_WORKSPACE/tests/two.bats"
+  _run_guard_edit "- [ ] T002" "- [x] T002"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "tranche-close: a minimal tick of an ordinary task is allowed" {
+  create_mock_plan
+  _run_guard_edit "- [ ] T001" "- [x] T001"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "tranche-close: an edit whose old text is not in the plan is not judged" {
+  create_mock_plan
+  _run_guard_edit "- [ ] T999" "- [x] T002"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "tranche-close: a task added after launch does not move a close task off the snapshot" {
+  create_mock_plan
+  touch "$MOCK_WORKSPACE/tests/one.bats"
+  # T000 is only in the editable plan, which also lost the missing-test criterion.
+  sed -i.bak -e 's#tests/two.bats#tests/one.bats#' \
+    -e 's/^- \[ \] T001/- [ ] T000 added later\n&/' "$MOCK_PLAN"
+  local json
+  json=$(jq -n --arg fp "$MOCK_PLAN" \
+    '{tool_name: "MultiEdit", tool_input: {file_path: $fp, edits: [{old_string: "- [ ] T000", new_string: "- [x] T000"}, {old_string: "- [ ] T002", new_string: "- [x] T002"}]}}')
+  run bash -c 'printf "%s" "$1" | bash "$2"' _ "$json" "$GUARD"
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("ABC-1 AC2")'
+}
+
 @test "tranche-close: an absolute task-file breadcrumb is found" {
   create_mock_plan
   printf '%s' "$MOCK_PLAN" >"$MOCK_WORKSPACE/.ralph/task-file-path"

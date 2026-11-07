@@ -7,18 +7,19 @@
 #   ### ABC-24 — <title>
 #   - AC1: <criterion> | proof: <test file::name, or command>
 #
-# A task closes a tranche for the tickets named on its line (or, failing that,
-# in the `###` heading it sits under). This check refuses the close while one
-# of those tickets has a criterion with no proof, or a proof naming a file that
-# does not exist.
+# A task whose text says `Close tranche` closes it for the tickets named on its
+# line (or, failing that, in the `###` heading it sits under). This check
+# refuses the close while one of those tickets has a criterion with no proof,
+# or a proof naming a file that does not exist.
 #
 # Usage: proof-check.sh <plan> <task-id> [root]
 #   <plan>     the run plan (or its launch snapshot)
-#   <task-id>  the closing task, e.g. T004
+#   <task-id>  the task being ticked, e.g. T004
 #   [root]     directory proof paths are relative to (default: cwd)
 #
-# Exit 0: the close may proceed — including a plan with no `| proof:` map, a
-#         task the plan does not hold, or a plan that cannot be read.
+# Exit 0: the tick may proceed — including a task that closes no tranche, a
+#         plan with no `| proof:` map, a task the plan does not hold, or a plan
+#         that cannot be read.
 # Exit 1: the close is refused; stdout names each ticket and criterion.
 #
 # Deterministic: awk and shell only, one pass over the plan.
@@ -87,7 +88,7 @@ records=$(
     }
     END {
       flush_crit()
-      if (!has_map || task_txt == "") exit 0
+      if (!has_map || tolower(task_txt) !~ /close tranche/) exit 0
       ids = first_ids(task_txt)
       if (ids == "") ids = first_ids(task_h)
       n = split(ids, want, " ")
@@ -122,7 +123,7 @@ while IFS=$'\t' read -r ticket criterion proof; do
   path="${proof%%::*}"
   # A proof that is a command (it has spaces) names no file to look for.
   [[ "$path" != *" "* ]] || continue
-  if [[ "$path" == */* || "$proof" == *::* ]]; then
+  if [[ "$path" == */* || "$path" == *.* || "$proof" == *::* ]]; then
     [[ "$path" == /* ]] || path="$root/$path"
     if [[ ! -e "$path" ]]; then
       echo "$ticket $criterion: the test file '${proof%%::*}' does not exist"
