@@ -14,6 +14,8 @@
 #   - Forbidden-path denial (Write/Edit/MultiEdit: .ralph/gates/*, state dir)
 #   - Tranche-close refusal (Write/Edit/MultiEdit: ticking a close task while a
 #     criterion in the run plan has no test, or a missing test file)
+#   - Lane-first refusal (Bash: a tier gate that failed in a lane the project
+#     declares, until that lane's own command passes alone)
 #   - Write-event recording (Write/Edit/MultiEdit: updates last-write-ts)
 #
 # State lives outside the workspace at:
@@ -1282,14 +1284,17 @@ _guard_gate_invocation() {
 #
 # Fails open on any doubt: no [lanes], a failure that is not a plain test
 # failure (timeout, interrupt, in-flight, usage), an unreadable log, a marker
-# that matches no lane or two, or state it cannot read. Bounded: a failure is
-# refused RALPH_LANE_REFUSALS times (default 2, below GUTTER's repeat
-# threshold), then the gate runs and the bypass is logged — so the completion
-# tier is always reachable. A lane that passed alone and still fails inside the
-# gate clears the block for the rest of the run, so the gate shows the failure.
+# that matches no lane or two, or state it cannot read or write. Bounded: a
+# failure is refused RALPH_LANE_REFUSALS times (default 2, below GUTTER's
+# repeat threshold), then the gate runs and the bypass is logged — so the
+# completion tier is always reachable. A lane that passed alone and still fails
+# inside the gate clears the block for the rest of the run, so the gate shows
+# the failure.
 #
 # State: $STATE_DIR/lane-block.<label> — verdict mtime, refusals, lane, cleared.
-# A passing gate removes it; a new loop clears it (ralph-common.sh).
+# A passing gate removes it. A new loop, a restart included, starts clean: it
+# clears the state (ralph-common.sh), and a verdict older than the loop's
+# baseline is no block.
 #
 #   $1 = gate label, $2 = the gated command as the label would run it
 _guard_lane_first() {
@@ -1332,22 +1337,22 @@ _guard_lane_first() {
   local failed_at
   failed_at=$(_mtime "$gates/${label}-latest.exit")
   [[ "$failed_at" =~ ^[0-9]+$ && "$failed_at" -gt 0 ]] || return 0
+  [[ "$failed_at" -gt "$(_mtime "$WORKSPACE/.ralph/loop-baseline-head")" ]] || return 0
 
-  local s_at="" s_n="" s_lane="" s_cleared=""
+  local s_at="" s_n=0 s_lane="" s_cleared=0
   if [[ -f "$state" ]]; then
     {
       IFS= read -r s_at
       IFS= read -r s_n
       IFS= read -r s_lane
       IFS= read -r s_cleared
-    } <"$state" 2>/dev/null || true
+    } 2>/dev/null <"$state" || true
+    [[ "$s_at" =~ ^[0-9]+$ && "$s_n" =~ ^[0-9]+$ && "$s_cleared" =~ ^[01]$ ]] || return 0
   fi
-  [[ "$s_n" =~ ^[0-9]+$ ]] || s_n=0
-  [[ "$s_cleared" == "1" ]] || s_cleared=0
 
   if [[ "$s_at" != "$failed_at" ]]; then
     if [[ "$s_cleared" -eq 1 && "$(_command_key "$s_lane")" == "$lane_key" ]]; then
-      _lane_state_write "$state" "$failed_at" 0 "$lane" 1
+      _lane_state_write "$state" "$failed_at" 0 "$lane" 1 || true
       return 0
     fi
     s_n=0
@@ -1356,7 +1361,7 @@ _guard_lane_first() {
   [[ "$s_cleared" -eq 1 ]] && return 0
 
   if _lane_passed_since "$lane_key" "$failed_at"; then
-    _lane_state_write "$state" "$failed_at" "$s_n" "$lane" 1
+    _lane_state_write "$state" "$failed_at" "$s_n" "$lane" 1 || true
     return 0
   fi
 
@@ -1364,14 +1369,17 @@ _guard_lane_first() {
     _log_intercept "⚠️" "BYPASS" "lane-first for '${lane}' refused ${s_n}x; gate '${label}' allowed"
     return 0
   fi
-  _lane_state_write "$state" "$failed_at" "$((s_n + 1))" "$lane" 0
+  # A refusal that cannot be counted could repeat for ever, so it is not made.
+  _lane_state_write "$state" "$failed_at" "$((s_n + 1))" "$lane" 0 || return 0
   _block "Lane-first: gate '${label}' failed in the lane run by '${lane}'. Fix it and run that command alone until it passes (it must run through the harness so the guard sees the verdict), then run '${gated_cmd}' again. A green lane does not replace the gate."
 }
 
 _lane_state_write() {
   local f="$1" tmp="$1.tmp.$$"
-  printf '%s\n%s\n%s\n%s\n' "$2" "$3" "$4" "$5" >"$tmp" 2>/dev/null &&
-    mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+  printf '%s\n%s\n%s\n%s\n' "$2" "$3" "$4" "$5" 2>/dev/null >"$tmp" &&
+    mv -f "$tmp" "$f" 2>/dev/null && return 0
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
 }
 
 # Whether the lane's own command ran under some gate label and passed after the
@@ -1389,8 +1397,10 @@ _lane_passed_since() {
   return 1
 }
 
+# GNU's form goes first: BSD stat rejects it outright, but GNU `stat -f` prints
+# file-system details before failing, and those would land in the result.
 _mtime() {
-  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || echo 0
+  stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null || echo 0
 }
 
 # Whether the gated command is the one the label's last verdict ran.

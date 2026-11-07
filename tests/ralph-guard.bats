@@ -2242,10 +2242,38 @@ _assert_gate_allowed() {
   [ ! -f "$STATE_DIR/lane-block.full" ]
 }
 
-@test "lane-first: unreadable block state is replaced, not trusted" {
+@test "lane-first: block state it cannot read allows the gate" {
   _lane_policy
   _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
   printf 'garbage\nx\n' >"$STATE_DIR/lane-block.full"
+  _run_full_gate
+  _assert_gate_allowed
+}
+
+@test "lane-first: a refusal it cannot record is not made" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  chmod 555 "$STATE_DIR"
+  _run_full_gate
+  chmod 755 "$STATE_DIR"
+  [[ "$output" != *'"deny"'* ]]
+}
+
+@test "lane-first: a verdict from before this loop began is no block" {
+  _lane_policy
+  git -C "$MOCK_WORKSPACE" init -q
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  _run_full_gate
+  _assert_lane_refused
+  bash -c 'source "$1/ralph-common.sh" >/dev/null 2>&1; _capture_loop_baseline "$2"' _ "$SCRIPTS_DIR" "$MOCK_WORKSPACE"
+  _run_full_gate
+  _assert_gate_allowed
+}
+
+@test "lane-first: a failure inside this loop is still refused" {
+  _lane_policy
+  touch -t 202512010000 "$MOCK_WORKSPACE/.ralph/loop-baseline-head"
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
   _run_full_gate
   _assert_lane_refused
 }
