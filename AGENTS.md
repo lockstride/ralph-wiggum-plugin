@@ -76,7 +76,7 @@ The prompt sent to the agent has two layers:
    - `## Handoff before yielding` — what to write to `## Working set`.
    - `## Git hygiene` — never-amend, never-`git add .ralph/`.
    - `## Gate Runner` (conditional on `gate-run.sh` being present) — compact pointer; the hook does the wrapping.
-   - `## Gate Selection` — basic-check default; all-check only for `[risky]` tasks; a failing lane reruns alone, then the gate runs once more.
+   - `## Gate Selection` — basic-check default; all-check only for `[risky]` tasks.
    - `## Handoff from previous loop` (conditional on `handoff.md` existing) — inlined verbatim.
 
 2. **Body** (`.ralph/effective-prompt.md`) — purely task-execution mechanics (Paths, Recent activity, Per-task flow, Constitution). In Spec Kit mode, generated from the project's `speckit-implement` skill via the adaptation guide. **Must NOT restate Stop conditions, After-every-commit, or Handoff** — those live in the framing (see adaptation guide rules 7, 12, 13).

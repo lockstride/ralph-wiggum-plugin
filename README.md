@@ -31,12 +31,13 @@ the inventory when reviewing the loop's reliability end-to-end.
 
 ### Script call filters & transparent rewrites
 - `PreToolUse` hook (`ralph-guard.sh`) registered via `hooks/hooks.json` (record-keyed-by-event-name schema; the wrong-schema 0.12.4 bug is fixed in 0.12.5).
-- `.ralph/command-policy` has five sections, evaluated in order: `[gates] → [rewrite] → [deny] → [wrap] → [protect]`.
+- `.ralph/command-policy` has five sections, evaluated in order: `[gates] → [rewrite] → [deny] → [wrap] → [protect]`, plus an optional `[lanes]`.
   - `[gates]` — **required.** Declares the three tier-gate commands (`basic | <cmd>`, `full | <cmd>`, `final | <cmd>`). Loop refuses to start if any are missing.
   - `[rewrite]` — project-specific regex transforms (e.g. `pnpm nx X → pnpm X`). Transparent via `updatedInput`. Fields are split on a `|` with whitespace on both sides, so a regex may use `(a|b)` alternation.
   - `[deny]` — hard block with `permissionDecision: deny` (e.g. containerized E2E).
   - `[wrap]` — auto-routes other commands through `gate-run.sh <label> <cmd>` transparently. Labels: `basic | full | final | unit | integration | e2e | lint | format`.
   - `[protect]` — bare invocation OK; pipe/redirect denied.
+  - `[lanes]` — `marker-regex | lane command`: a tier gate that failed in that lane is refused until the lane's command passes alone (bounded; fails open).
 - Canonicalization (`_canonicalize` in `ralph-guard.sh`): env-prefix stripped, pipes/redirects stripped, a package-local binary path (`./node_modules/.bin/X`) mapped to the lockfile's exec form (`pnpm X`, `yarn X` or `npx X`), `pnpm run X` / `pnpm exec X` / `pnpm -s X` / `pnpm --silent X` normalized to `pnpm X`. Compound chains (`cd dir && pnpm A; pnpm B`, and commands on separate lines) split the way the shell reads them — quoted strings, substitutions and heredoc bodies never split — and every command in the chain meets `[rewrite]`, `[deny]`, `[wrap]` and the direct-runner check. A rewrite or wrap replaces only the command it matched, so the rest of the chain runs as written, and a gate still in flight exits 75, so a `&&` behind it waits for the verdict. A rewritten or wrapped command runs without its pipes and redirects, and an env prefix on one is denied, naming the variable: it could not reach the command, and a setting the gate never saw must not pass as one it did. A command that runs the gate harness (`bash …/gate-run.sh <label> <cmd>`, or the `.ralph/gate-runner` form) puts `<cmd>` to `[rewrite]` and `[deny]`, and a rewritten one runs and is cached in its rewritten form.
 - A `[rewrite]` that produces `pnpm <name>` where `<name>` is no root `package.json` script, pnpm subcommand or package-local binary is denied instead of emitted — the denial names the root scripts that do exist.
 - Activity-log emoji: 🔀 `GUARD REWRITE` on transparent rewrites, ⛔ `GUARD DENY` on hard blocks.

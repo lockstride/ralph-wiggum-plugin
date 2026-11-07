@@ -241,14 +241,6 @@ HOFF
   echo "$output" | grep -q '\.ralph/gates/full-latest\.exit'
 }
 
-@test "build_prompt's Gate Selection sends a failing lane back alone, then the gate" {
-  local output
-  output=$(build_prompt "$MOCK_WORKSPACE" 1)
-  echo "$output" | grep -q "rerun only that$"
-  echo "$output" | grep -q "then run the gate once more"
-  echo "$output" | grep -q "A green lane$"
-}
-
 @test "build_prompt's Gate Selection names the eval loop's final completion gate" {
   export RALPH_EVAL_LOOP=1
   local output
@@ -271,6 +263,29 @@ EOF
   echo "$output" | grep -q "npm run check:fast"
   echo "$output" | grep -q "npm run check:full"
   ! echo "$output" | grep -q "mock basic-check"
+}
+
+@test "_capture_loop_baseline clears the guard's lane-block state" {
+  local ws
+  ws=$(mktemp -d "$BATS_TMPDIR/lane-reset.XXXXXX")
+  git -C "$ws" init -q
+  git -C "$ws" config user.email "test@test.com"
+  git -C "$ws" config user.name "Test"
+  echo "init" >"$ws/init.txt"
+  git -C "$ws" add init.txt
+  git -C "$ws" commit -q -m "init"
+  mkdir -p "$ws/.ralph"
+
+  local hash state
+  hash=$(echo -n "$(cd "$ws" && pwd -P)" | shasum -a 256 | cut -d' ' -f1)
+  state="${XDG_STATE_HOME:-$HOME/.local/state}/ralph/$hash"
+  mkdir -p "$state"
+  printf '1\n1\nlane\n0\n' >"$state/lane-block.full"
+
+  _capture_loop_baseline "$ws"
+
+  [ ! -f "$state/lane-block.full" ]
+  rm -rf "$ws" "$state"
 }
 
 @test "init_ralph_dir seeds handoff.md skeleton on first init (0.12.0)" {

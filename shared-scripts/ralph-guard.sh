@@ -555,6 +555,11 @@ _guard_load_gates() {
 #
 #   [protect]
 #   command-prefix                   # bare OK; pipe/redirect denied
+#
+#   [lanes]
+#   failure-marker-regex | command   # a tier gate that failed with this marker
+#                                    # in its log is refused until `command`
+#                                    # passes alone (see _guard_lane_first)
 
 # The policy's rows, parsed once per call by _load_command_policy.
 _RW_PAT=()    # [rewrite] regex
@@ -564,6 +569,8 @@ _DN_REASON=() # [deny] reason
 _WR_PREFIX=() # [wrap] command prefix, then the [gates] commands
 _WR_LABEL=()  # [wrap] label
 _PT_PREFIX=() # [protect] command prefix
+_LN_MARK=()   # [lanes] failure-marker regex
+_LN_CMD=()    # [lanes] the lane's own command
 
 # The [gates] section is recognized so its rows don't fall through to other
 # buckets; its tier commands are auto-wrapped under their tier labels. The
@@ -577,6 +584,8 @@ _load_command_policy() {
   _WR_PREFIX=()
   _WR_LABEL=()
   _PT_PREFIX=()
+  _LN_MARK=()
+  _LN_CMD=()
   [[ -f "$policy" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     # Strip CR if present, trim trailing whitespace.
@@ -589,6 +598,7 @@ _load_command_policy() {
       "[deny]") section="deny" ;;
       "[wrap]") section="wrap" ;;
       "[protect]") section="protect" ;;
+      "[lanes]") section="lanes" ;;
       "["*"]") section="" ;;
       *)
         case "$section" in
@@ -596,6 +606,7 @@ _load_command_policy() {
           deny) _add_deny_row "$line" ;;
           wrap) _add_wrap_row "$line" ;;
           protect) _add_protect_row "$line" ;;
+          lanes) _add_lane_row "$line" ;;
         esac
         ;;
     esac
@@ -692,6 +703,19 @@ _add_wrap_row() {
       _WR_LABEL+=("$label")
       ;;
   esac
+}
+
+# A lane row needs a marker and a command; the marker is an extended regex, so
+# it is split on a `|` with whitespace on both sides, like [rewrite].
+_add_lane_row() {
+  local marker
+  _split_rewrite_field "$1"
+  marker="$_FIELD"
+  [[ -n "$marker" && -n "$_HAD_SEP" ]] || return 0
+  _trim "$_REST"
+  [[ -n "$_TRIMMED" ]] || return 0
+  _LN_MARK+=("$marker")
+  _LN_CMD+=("$_TRIMMED")
 }
 
 _add_protect_row() {
@@ -1244,8 +1268,127 @@ _guard_gate_invocation() {
     _block "Gate '${label}' already ran '${gated_cmd}' and nothing has changed since — no Write/Edit, and no tracked or untracked file differs from the tree it ran against. Output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: change code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose. (The cache is per label and per command: a different command still runs.)"
   fi
 
+  _guard_lane_first "$label" "$gated_cmd"
+
   # Record the per-label gate invocation timestamp
   _write_ts "$last_gate_ts_file"
+}
+
+# Lane-first: a tier gate that failed in a lane the project declares ([lanes])
+# is refused until that lane's own command passes alone, so a fix is tested
+# against the one lane that broke rather than every lane that passed.
+#
+# Fails open on any doubt: no [lanes], a failure that is not a plain test
+# failure (timeout, interrupt, in-flight, usage), an unreadable log, a marker
+# that matches no lane or two, or state it cannot read. Bounded: a failure is
+# refused RALPH_LANE_REFUSALS times (default 2, below GUTTER's repeat
+# threshold), then the gate runs and the bypass is logged — so the completion
+# tier is always reachable. A lane that passed alone and still fails inside the
+# gate clears the block for the rest of the run, so the gate shows the failure.
+#
+# State: $STATE_DIR/lane-block.<label> — verdict mtime, refusals, lane, cleared.
+# A passing gate removes it; a new loop clears it (ralph-common.sh).
+#
+#   $1 = gate label, $2 = the gated command as the label would run it
+_guard_lane_first() {
+  local label="$1" gated_cmd="$2"
+  case "$label" in
+    basic | full | final) ;;
+    *) return 0 ;;
+  esac
+  [[ ${#_LN_CMD[@]} -gt 0 ]] || return 0
+
+  local gates="$WORKSPACE/.ralph/gates" state="$STATE_DIR/lane-block.$label"
+  local code
+  code=$(cat "$gates/${label}-latest.exit" 2>/dev/null) || code=""
+  if [[ "$code" == "0" ]]; then
+    rm -f "$state"
+    return 0
+  fi
+  [[ "$code" =~ ^[0-9]+$ ]] || return 0
+  case "$code" in
+    64 | 70 | 75 | 124 | 130 | 137 | 143) return 0 ;;
+  esac
+
+  local log="$gates/${label}-latest.log"
+  [[ -f "$log" && -s "$gates/${label}-latest.cmd" ]] || return 0
+  _same_command_as_verdict "$label" "$gated_cmd" || return 0
+
+  local lane="" lane_key="" i key
+  for ((i = 0; i < ${#_LN_CMD[@]}; i++)); do
+    grep -Eq -- "${_LN_MARK[i]}" "$log" 2>/dev/null || continue
+    key=$(_command_key "${_LN_CMD[i]}")
+    if [[ -z "$lane" ]]; then
+      lane="${_LN_CMD[i]}"
+      lane_key="$key"
+    elif [[ "$key" != "$lane_key" ]]; then
+      return 0
+    fi
+  done
+  [[ -n "$lane" ]] || return 0
+
+  local failed_at
+  failed_at=$(_mtime "$gates/${label}-latest.exit")
+  [[ "$failed_at" =~ ^[0-9]+$ && "$failed_at" -gt 0 ]] || return 0
+
+  local s_at="" s_n="" s_lane="" s_cleared=""
+  if [[ -f "$state" ]]; then
+    {
+      IFS= read -r s_at
+      IFS= read -r s_n
+      IFS= read -r s_lane
+      IFS= read -r s_cleared
+    } <"$state" 2>/dev/null || true
+  fi
+  [[ "$s_n" =~ ^[0-9]+$ ]] || s_n=0
+  [[ "$s_cleared" == "1" ]] || s_cleared=0
+
+  if [[ "$s_at" != "$failed_at" ]]; then
+    if [[ "$s_cleared" -eq 1 && "$(_command_key "$s_lane")" == "$lane_key" ]]; then
+      _lane_state_write "$state" "$failed_at" 0 "$lane" 1
+      return 0
+    fi
+    s_n=0
+    s_cleared=0
+  fi
+  [[ "$s_cleared" -eq 1 ]] && return 0
+
+  if _lane_passed_since "$lane_key" "$failed_at"; then
+    _lane_state_write "$state" "$failed_at" "$s_n" "$lane" 1
+    return 0
+  fi
+
+  if [[ "$s_n" -ge "${RALPH_LANE_REFUSALS:-2}" ]]; then
+    _log_intercept "⚠️" "BYPASS" "lane-first for '${lane}' refused ${s_n}x; gate '${label}' allowed"
+    return 0
+  fi
+  _lane_state_write "$state" "$failed_at" "$((s_n + 1))" "$lane" 0
+  _block "Lane-first: gate '${label}' failed in the lane run by '${lane}'. Fix it and run that command alone until it passes (it must run through the harness so the guard sees the verdict), then run '${gated_cmd}' again. A green lane does not replace the gate."
+}
+
+_lane_state_write() {
+  local f="$1" tmp="$1.tmp.$$"
+  printf '%s\n%s\n%s\n%s\n' "$2" "$3" "$4" "$5" >"$tmp" 2>/dev/null &&
+    mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+}
+
+# Whether the lane's own command ran under some gate label and passed after the
+# gate failed, per that label's breadcrumbs.
+_lane_passed_since() {
+  local lane_key="$1" failed_at="$2" cmd_f exit_f at
+  for cmd_f in "$WORKSPACE/.ralph/gates"/*-latest.cmd; do
+    [[ -f "$cmd_f" ]] || continue
+    [[ "$(_command_key "$(cat "$cmd_f" 2>/dev/null)")" == "$lane_key" ]] || continue
+    exit_f="${cmd_f%.cmd}.exit"
+    [[ "$(cat "$exit_f" 2>/dev/null)" == "0" ]] || continue
+    at=$(_mtime "$exit_f")
+    [[ "$at" =~ ^[0-9]+$ && "$at" -ge "$failed_at" ]] && return 0
+  done
+  return 1
+}
+
+_mtime() {
+  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || echo 0
 }
 
 # Whether the gated command is the one the label's last verdict ran.

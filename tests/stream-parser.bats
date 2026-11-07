@@ -1781,3 +1781,15 @@ deny_json() { # $1=tool name $2=command (Shell) or path $3=reason
   run_parser '{"kind":"adapter_error","message":"Cannot index number with string \"type\""}' >/dev/null
   grep -q 'ADAPTER: skipped an event it could not read — Cannot index number' "$MOCK_WORKSPACE/.ralph/errors.log"
 }
+
+@test "a lane-first refusal never counts toward GUTTER" {
+  local events i
+  events=""
+  for i in 1 2 3; do
+    events+="$(deny_json Shell 'pnpm all-check' 'Lane-first: gate full failed in the lane run by pnpm test-e2e:local.')"$'\n'
+  done
+  local output
+  output=$(run_parser "$events")
+  ! echo "$output" | grep -q "^GUTTER$"
+  grep -q "GUARD DENY: pnpm all-check → Lane-first:" "$MOCK_WORKSPACE/.ralph/errors.log"
+}

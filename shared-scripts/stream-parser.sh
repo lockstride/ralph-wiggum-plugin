@@ -832,6 +832,12 @@ _count_repeat() {
 track_guard_deny() {
   local subject="$1" reason="$2"
   local count
+  # A lane-first refusal is bounded by the guard and routes the agent to a
+  # different command; it never counts toward GUTTER.
+  if [[ "$reason" == "Lane-first:"* ]]; then
+    log_error "GUARD DENY: $subject → $reason"
+    return 0
+  fi
   count=$(_count_repeat "$subject")
   log_error "GUARD DENY: $subject → $reason (attempt $count)"
   if [[ $count -ge $SHELL_FAIL_THRESHOLD ]]; then

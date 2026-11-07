@@ -1,6 +1,6 @@
 # .ralph/command-policy — Ralph command policy
 #
-# Five sections, scanned in order: [gates] → [rewrite] → [deny] → [wrap] → [protect].
+# Six sections: [gates] → [rewrite] → [deny] → [wrap] → [protect] scanned in order, then [lanes].
 # Every command a Bash call chains (`a && b`, `a; b`, one per line — quoted
 # text and heredoc bodies never split) is canonicalized first (env-prefix +
 # pipes/redirects stripped, `./node_modules/.bin/X` → the lockfile's exec form,
@@ -91,3 +91,20 @@ final | pnpm all-check
 
 [protect]
 # pnpm format:write
+
+# ─────────────────────────────────────────────────────────────────────
+# [lanes] — optional. A tier gate that runs several lanes and failed in one is
+# refused until that lane's own command passes alone; then the gate runs.
+#
+#   failure-marker-regex | lane command
+#
+# The marker is an extended regex matched against the failed gate's
+# .ralph/gates/<label>-latest.log; make it match the lane's own failure output
+# and nothing else. The lane command must run through the harness so its
+# verdict is recorded: list it under [wrap] (or [gates]). A failure whose log
+# matches no marker, or markers of two lanes, is not refused. Each failure is
+# refused at most RALPH_LANE_REFUSALS times (default 2), then the gate runs and
+# the bypass is logged. Timeouts and interrupted runs are never refused.
+
+[lanes]
+# FAIL .*e2e/ | pnpm test-e2e:local

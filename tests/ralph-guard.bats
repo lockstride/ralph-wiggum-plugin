@@ -2039,3 +2039,236 @@ EOF
     echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
   done
 }
+
+# =============================================================================
+# 0.32.0: lane-first — a gate that failed in a declared lane is refused until
+# that lane passes alone
+# =============================================================================
+
+_lane_policy() {
+  cat >"$MOCK_WORKSPACE/.ralph/command-policy" <<EOF
+[gates]
+basic | pnpm basic-check
+full  | pnpm all-check
+final | pnpm verify:final
+[wrap]
+pnpm test-e2e:local | e2e
+[lanes]
+FAIL .*e2e/ | pnpm test-e2e:local
+FAIL .*api/ | pnpm test-api
+EOF
+}
+
+# A failed full gate whose log is $1, with exit code ${2:-1}. Backdated so a
+# lane that passes now lands after it.
+_lane_gate_failed() {
+  local g="$MOCK_WORKSPACE/.ralph/gates"
+  printf '%s\n' "$1" >"$g/full-latest.log"
+  printf '%s' "pnpm all-check" >"$g/full-latest.cmd"
+  printf '%s' "${2:-1}" >"$g/full-latest.exit"
+  touch -t 202601010000 "$g/full-latest.exit"
+}
+
+_lane_passed_alone() {
+  local g="$MOCK_WORKSPACE/.ralph/gates"
+  printf '%s' "pnpm test-e2e:local" >"$g/e2e-latest.cmd"
+  printf '0' >"$g/e2e-latest.exit"
+}
+
+_run_full_gate() {
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh full pnpm all-check"
+}
+
+_assert_lane_refused() {
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | startswith("[ralph-guard] Lane-first:")'
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("pnpm test-e2e:local")'
+}
+
+_assert_gate_allowed() {
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "lane-first: refuses the whole gate after a lane failure and names the lane's command" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  _run_full_gate
+  _assert_lane_refused
+}
+
+@test "lane-first: a refusal is not a gate invocation" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  _run_full_gate
+  _assert_lane_refused
+  [ ! -f "$STATE_DIR/last-gate-ts.full" ]
+}
+
+@test "lane-first: allows the gate once the lane has passed alone" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  _run_full_gate
+  _assert_lane_refused
+  _lane_passed_alone
+  _run_full_gate
+  _assert_gate_allowed
+}
+
+@test "lane-first: a lane that passed before the gate failed does not count" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  _lane_passed_alone
+  touch -t 202601010000 "$MOCK_WORKSPACE/.ralph/gates/e2e-latest.exit"
+  touch -t 202601020000 "$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  _run_full_gate
+  _assert_lane_refused
+}
+
+@test "lane-first: a project with no [lanes] runs the gate as before" {
+  setup_v14_gates_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  _run_full_gate
+  _assert_gate_allowed
+}
+
+@test "lane-first: a failure whose log matches no lane runs the gate" {
+  _lane_policy
+  _lane_gate_failed "lint: 3 errors"
+  _run_full_gate
+  _assert_gate_allowed
+}
+
+@test "lane-first: a failure that matches two lanes runs the gate" {
+  _lane_policy
+  _lane_gate_failed "$(printf 'FAIL apps/web/e2e/a.ts\nFAIL apps/api/b.ts')"
+  _run_full_gate
+  _assert_gate_allowed
+}
+
+@test "lane-first: a log that cannot be read runs the gate" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  rm -f "$MOCK_WORKSPACE/.ralph/gates/full-latest.log"
+  _run_full_gate
+  _assert_gate_allowed
+}
+
+@test "lane-first: a marker that is not a valid regex runs the gate" {
+  printf '[gates]\nfull | pnpm all-check\n[lanes]\n( | pnpm test-e2e:local\n' \
+    >"$MOCK_WORKSPACE/.ralph/command-policy"
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  _run_full_gate
+  _assert_gate_allowed
+}
+
+@test "lane-first: interrupted gates are never refused" {
+  _lane_policy
+  local code
+  for code in 130 124 143 137 75 70 64; do
+    _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts" "$code"
+    _run_full_gate
+    _assert_gate_allowed
+  done
+}
+
+@test "lane-first: a different command under the label is not judged" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  printf '%s' "pnpm something-else" >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  _run_full_gate
+  _assert_gate_allowed
+}
+
+@test "lane-first: each failure is refused twice, then the gate runs and the bypass is logged" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  _run_full_gate
+  _assert_lane_refused
+  _run_full_gate
+  _assert_lane_refused
+  _run_full_gate
+  _assert_gate_allowed
+  grep -q "BYPASS" "$MOCK_WORKSPACE/.ralph/activity.log"
+  _run_full_gate
+  _assert_gate_allowed
+}
+
+@test "lane-first: the refusal bound is RALPH_LANE_REFUSALS" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  RALPH_LANE_REFUSALS=0 _run_full_gate
+  _assert_gate_allowed
+}
+
+@test "lane-first: a new failure is refused afresh after a bypass" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  _run_full_gate
+  _run_full_gate
+  _run_full_gate
+  _assert_gate_allowed
+  _lane_gate_failed "FAIL apps/web/e2e/other.spec.ts"
+  touch -t 202601030000 "$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  _run_full_gate
+  _assert_lane_refused
+}
+
+@test "lane-first: a lane that passes alone but keeps failing in the gate clears the block" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  _run_full_gate
+  _assert_lane_refused
+  _lane_passed_alone
+  _run_full_gate
+  _assert_gate_allowed
+  # the gate ran and failed in the same lane again
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  touch -t 202601030000 "$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  _run_full_gate
+  _assert_gate_allowed
+}
+
+@test "lane-first: a passing gate clears the block state" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  _run_full_gate
+  _assert_lane_refused
+  [ -f "$STATE_DIR/lane-block.full" ]
+  printf '0' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  _run_full_gate
+  _assert_gate_allowed
+  [ ! -f "$STATE_DIR/lane-block.full" ]
+}
+
+@test "lane-first: unreadable block state is replaced, not trusted" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  printf 'garbage\nx\n' >"$STATE_DIR/lane-block.full"
+  _run_full_gate
+  _assert_lane_refused
+}
+
+@test "lane-first: the completion tier stays reachable" {
+  _lane_policy
+  local g="$MOCK_WORKSPACE/.ralph/gates"
+  printf '%s\n' "FAIL apps/web/e2e/login.spec.ts" >"$g/final-latest.log"
+  printf '%s' "pnpm verify:final" >"$g/final-latest.cmd"
+  printf '1' >"$g/final-latest.exit"
+  touch -t 202601010000 "$g/final-latest.exit"
+  local i
+  for i in 1 2; do
+    run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh final pnpm verify:final"
+    _assert_lane_refused
+  done
+  run _run_guard Bash "bash $SCRIPTS_DIR/gate-run.sh final pnpm verify:final"
+  _assert_gate_allowed
+}
+
+@test "lane-first: a bare gate command is judged in the form it is rewritten to" {
+  _lane_policy
+  _lane_gate_failed "FAIL apps/web/e2e/login.spec.ts"
+  run _run_guard Bash "pnpm all-check"
+  _assert_lane_refused
+}
