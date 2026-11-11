@@ -60,9 +60,9 @@ and unattended execution. Stable across versions of speckit-implement.
     Completion claims must cover only work the loop verified: the
     per-task flow must say that a verification the agent cannot
     execute in its environment is never marked `[x]` — the task stays
-    unchecked, recorded as blocked in the handoff and
-    `.ralph/errors.log`, and the agent continues with the remaining
-    tasks.
+    unchecked with `(blocked: <reason>)` appended to its line and
+    recorded in `.ralph/errors.log`, and the agent continues with the
+    remaining tasks. A blocked task does not hold completion.
 12. **DO NOT enumerate the after-commit flow.** The framing prompt
     contains a `## After every commit` block with the three-bullet
     breadcrumb check (stop-requested → context-warning-active → next
@@ -90,8 +90,10 @@ and unattended execution. Stable across versions of speckit-implement.
     anything it defers, finds out of scope or cannot decide as a row in
     `open-items.md` beside `{{TASK_FILE}}` (seed:
     `.specify/templates/open-items-template.md`), to give every row a
-    disposition — `fixed`, `ticketed <link>` or `accepted <operator>` —
-    before finishing, and never to write `accepted` itself. The
+    disposition — `fixed`, `ticketed <link>`, `blocked: <reason>`
+    (only the operator or an outside party can settle it) or
+    `accepted <operator>` — before finishing, and never to write
+    `accepted` itself. The
     completion signal (rule 11) also waits for every row to have one;
     the completion guard refuses it otherwise.
 18. **Total output should stay under 40 lines.** With Stop / Handoff /
@@ -143,12 +145,13 @@ context rotation and rate limits; you handle the work.
    - Mark `[x]` only after the gate exits 0. A checked box claims you
      verified the work — if you cannot execute a task's verification in
      this environment (e.g. a visual review in an external design tool),
-     leave it unchecked, record it as blocked in the handoff and
-     `.ralph/errors.log`, and continue with the remaining tasks.
+     leave it unchecked, record it as blocked by appending
+     `(blocked: <reason>)` to the task line and in `.ralph/errors.log`,
+     and continue. A blocked task does not hold completion.
    - Commit: `git add <exact paths> && git commit -m "<type>(<scope>): <description> (T###)"`.
    - (Framing's `## After every commit` block governs what's next.)
-3. When all `[x]`, no open item lacks a disposition, AND the full gate
-   exits 0, emit `<promise>ALL_TASKS_DONE</promise>`.
+3. When every task is `[x]` or blocked, no open item lacks a
+   disposition, AND the full gate exits 0, emit `<promise>ALL_TASKS_DONE</promise>`.
 
 If a gate fails, read `.ralph/gates/<label>-latest.log` for the output.
 Screenshots and direct `curl` are cheaper evidence than re-running.
@@ -159,7 +162,8 @@ emit `<ralph>GUTTER</ralph>`.
 Record anything you defer, find out of scope, or cannot decide as a row
 in `open-items.md` beside the tasks file (template:
 `.specify/templates/open-items-template.md`). Before finishing, give each
-row `fixed`, `ticketed <link>` or `accepted <operator>`; only the operator
+row `fixed`, `ticketed <link>`, `blocked: <reason>` (only the operator or
+an outside party can settle it) or `accepted <operator>`; only the operator
 accepts. Completion is refused while a row has none.
 
 ## Constitution

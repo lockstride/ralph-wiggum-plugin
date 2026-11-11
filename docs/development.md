@@ -83,7 +83,7 @@ The acceptance evaluator is a separate Ralph loop that runs *after* the main loo
 - **VERIFIER** — independently checks every requirement (file reads, grep for conventions, Playwright MCP for UI behavior if available, gate runs under the `final` label). Records every unmet requirement as a `[ ]` line in the report's **Gaps** section. Only the verifier may flip the report's top-level `- [ ] All acceptance criteria met and verified` checkbox to `[x]`, and only after a clean independent pass.
 - **REWORK** — works the verifier's Gaps list, resolving as many as possible and checking them off. Unresolvable ones get a `(blocked: reason)` suffix.
 
-**Exit conditions.** Cleanly when the verifier flips the top-level checkbox. Otherwise at the loop cap (default 10; override with `--eval-loops N` or `RALPH_EVAL_MAX_LOOPS` env var — the older `--eval-iterations` flag is kept as a deprecated alias).
+**Exit conditions.** Cleanly when the verifier flips the top-level checkbox. Blocked gaps and `## Follow-ups` never hold it; the loop lists them for the operator when it ends. Otherwise at the loop cap (default 10; override with `--eval-loops N` or `RALPH_EVAL_MAX_LOOPS` env var — the older `--eval-iterations` flag is kept as a deprecated alias).
 
 **Artifacts.**
 - `.ralph/acceptance-report.md` — the report the orchestrator maintains. Git-ignored. Copy out after the loop exits if you want a persistent audit trail.

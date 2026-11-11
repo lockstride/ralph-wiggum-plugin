@@ -223,3 +223,18 @@ _all_skills() {
   grep -qiE "infra/orchestration failure surfaced by the gate" "$skill_md" \
     || { echo "rework skill missing the infra/orchestration block-reason (0.15.4)" >&2; return 1; }
 }
+
+@test "verifier logs an external-only remainder as a follow-up, and a failing or untracked one as a gap" {
+  local skill_md="$SKILLS_DIR/verifying-acceptance-criteria/SKILL.md"
+  grep -qF '**Follow-ups**' "$skill_md"
+  grep -qiF 'post-merge' "$skill_md"
+  grep -qiF 'a ticket link tracks the remainder' "$skill_md"
+  grep -qiF 'still a gap when the local part fails, or when nothing tracks the remainder' "$skill_md"
+  grep -qiF 'never keep the top-level box unchecked' "$skill_md"
+}
+
+@test "eval skills say a blocked gap does not hold completion" {
+  grep -qiF 'never hold completion' "$SKILLS_DIR/running-acceptance-evaluation/SKILL.md"
+  grep -qiF 'does not hold the run' "$SKILLS_DIR/addressing-acceptance-gaps/SKILL.md"
+  grep -qF '## Follow-ups' "$TEMPLATES_DIR/acceptance-report-template.md"
+}

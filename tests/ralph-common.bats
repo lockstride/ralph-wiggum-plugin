@@ -224,14 +224,14 @@ HOFF
 @test "build_prompt's ALL_TASKS_DONE stop condition names the impl loop's full gate" {
   local output
   output=$(build_prompt "$MOCK_WORKSPACE" 1)
-  echo "$output" | grep -q 'ALL_TASKS_DONE</promise>` — every task `\[x\]` AND `mock all-check` exits 0'
+  echo "$output" | grep -q 'ALL_TASKS_DONE</promise>` — every task `\[x\]` or parked `(blocked: <reason>)` AND `mock all-check` exits 0'
 }
 
 @test "build_prompt's ALL_TASKS_DONE stop condition names the eval loop's final gate" {
   export RALPH_EVAL_LOOP=1
   local output
   output=$(build_prompt "$MOCK_WORKSPACE" 1)
-  echo "$output" | grep -q 'ALL_TASKS_DONE</promise>` — every task `\[x\]` AND `mock verify:final` exits 0'
+  echo "$output" | grep -q 'ALL_TASKS_DONE</promise>` — every task `\[x\]` or parked `(blocked: <reason>)` AND `mock verify:final` exits 0'
 }
 
 @test "build_prompt's Gate Selection names the impl loop's full completion gate" {
@@ -2015,16 +2015,21 @@ _drive_natural_ends() {
   # The shape of an eval loop that vanished mid-run: the driver died without
   # a trap for its signal, and the loop it was waiting on logged no END.
   local log="$MOCK_WORKSPACE/.ralph/activity.log"
+  # A duration no other test uses: the suite runs files in parallel, and
+  # gate-run.bats has its own `sleep 30`s that a bare pattern would match.
+  local nap="30.$$" pat
+  pat="^sleep 30\\.$$\$"
   bash -c '
     source "$1/agent-adapter.sh"
     source "$1/ralph-common.sh"
-    agent_build_cmd() { echo "sleep 30"; }
+    nap=$3
+    agent_build_cmd() { echo "sleep $nap"; }
     signal=$(run_loop "$2" 1)
-  ' _ "$SCRIPTS_DIR" "$MOCK_WORKSPACE" >/dev/null 2>&1 3>&- &
+  ' _ "$SCRIPTS_DIR" "$MOCK_WORKSPACE" "$nap" >/dev/null 2>&1 3>&- &
   local driver=$! loop="" i
   for ((i = 0; i < 100; i++)); do
     loop=$(pgrep -P "$driver" 2>/dev/null | head -1) || loop=""
-    if [[ -n "$loop" ]] && pgrep -f "^sleep 30$" >/dev/null 2>&1; then
+    if [[ -n "$loop" ]] && pgrep -f "$pat" >/dev/null 2>&1; then
       break
     fi
     sleep 0.1
@@ -2039,8 +2044,8 @@ _drive_natural_ends() {
   # The trap's reap ran while `IFS= read` held IFS empty, and once left the
   # agent running until it exited on its own.
   local survived=0
-  pgrep -f "^sleep 30$" >/dev/null 2>&1 && survived=1
-  pkill -f "^sleep 30$" 2>/dev/null || true
+  pgrep -f "$pat" >/dev/null 2>&1 && survived=1
+  pkill -f "$pat" 2>/dev/null || true
   [ "$survived" -eq 0 ]
   grep -q "⚡ LOOP 1 caught SIGTERM — reaping the agent pipeline" "$log"
   grep -q "💀 DRIVER GONE — the loop driver (pid $driver) died during loop 1; no LOOP END follows" "$log"
@@ -2078,4 +2083,95 @@ _drive_natural_ends() {
 
   [ "$rc" -eq 1 ]
   grep -q "ORPHAN LEAK: loop committed files that were untracked at start: scratch.txt$" "$ws/.ralph/activity.log"
+}
+
+# =============================================================================
+# Nothing external holds completion: parked lines, follow-ups, blocked items
+# =============================================================================
+
+@test "check_task_complete: a [ ] line parked (blocked: …) or (post-merge…) does not hold completion" {
+  cat >"$MOCK_WORKSPACE/tasks.md" <<'TASKS'
+- [x] T001 Build it
+- [ ] T002 Confirm CI wall time on main (blocked: needs the operator's first CI dispatch on main)
+- [ ] T003 Measure cache replay (post-merge: DMA-269)
+TASKS
+  RALPH_TASK_FILE="$MOCK_WORKSPACE/tasks.md"
+  [ "$(check_task_complete "$MOCK_WORKSPACE")" = "COMPLETE" ]
+}
+
+@test "check_task_complete: an unparked [ ] line still holds completion, even if it mentions blocking" {
+  cat >"$MOCK_WORKSPACE/tasks.md" <<'TASKS'
+- [ ] T002 Fix the blocked-request handler (blocked: needs CI)
+- [ ] T003 Fix the blocked-request handler
+TASKS
+  RALPH_TASK_FILE="$MOCK_WORKSPACE/tasks.md"
+  [ "$(check_task_complete "$MOCK_WORKSPACE")" = "INCOMPLETE:1" ]
+}
+
+@test "check_task_complete: an eval report whose only open gaps are blocked completes once the verifier checks the top box" {
+  local report="$MOCK_WORKSPACE/.ralph/acceptance-report.md"
+  cat >"$report" <<'REPORT'
+# Acceptance Report
+
+- [x] All acceptance criteria met and verified
+
+**Status:** CLEAN
+
+## Gaps
+
+- [x] FR-001 wired
+- [ ] FR-030 CI outcome unproven (blocked: needs the operator's first CI dispatch on main)
+
+## Follow-ups
+
+- FR-033 | CI timing on main | https://linear.app/x/issue/DMA-269
+REPORT
+  RALPH_TASK_FILE="$report"
+  [ "$(check_task_complete "$MOCK_WORKSPACE")" = "COMPLETE" ]
+  sed -i.bak 's/^- \[x\] All acceptance/- [ ] All acceptance/' "$report"
+  [ "$(check_task_complete "$MOCK_WORKSPACE")" = "INCOMPLETE:1" ]
+}
+
+@test "_complete_allowed: green gate and an item only the operator can settle (blocked:) → allow" {
+  _green_full_with_items '| OI-07 | T002 | decision | x | blocked: needs the operator to pick a vendor |'
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_report_operator_items lists parked lines, follow-ups and blocked open items" {
+  mkdir -p "$MOCK_WORKSPACE/specs/f"
+  cat >"$MOCK_WORKSPACE/specs/f/tasks.md" <<'TASKS'
+- [x] T001 Build it
+- [ ] T002 Confirm CI on main (blocked: needs a CI dispatch)
+
+## Follow-ups
+
+_placeholder prose is not listed_
+- SC-005 | cache replay | post-merge
+TASKS
+  printf '%s' "$MOCK_WORKSPACE/specs/f/tasks.md" >"$MOCK_WORKSPACE/.ralph/task-file-path"
+  printf '| ID | Source task | Class | Summary | Disposition |\n| --- | --- | --- | --- | --- |\n| OI-01 | T004 | decision | x | blocked: needs a person |\n| OI-02 | T005 | defect | y | fixed |\n' \
+    >"$MOCK_WORKSPACE/specs/f/open-items.md"
+  local out
+  out=$(_report_operator_items "$MOCK_WORKSPACE")
+  [[ "$out" == *"T002 Confirm CI on main (blocked: needs a CI dispatch)"* ]]
+  [[ "$out" == *"SC-005 | cache replay | post-merge"* ]]
+  [[ "$out" == *"open item OI-01: blocked: needs a person"* ]]
+  [[ "$out" != *"T001"* && "$out" != *"OI-02"* && "$out" != *"placeholder"* ]]
+  grep -q "Left for the operator" "$MOCK_WORKSPACE/.ralph/progress.md"
+}
+
+@test "_report_operator_items prints nothing when nothing is left for the operator" {
+  printf -- '- [x] T001 Build it\n' >"$MOCK_WORKSPACE/tasks.md"
+  RALPH_TASK_FILE="$MOCK_WORKSPACE/tasks.md"
+  run _report_operator_items "$MOCK_WORKSPACE"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  ! grep -q "Left for the operator" "$MOCK_WORKSPACE/.ralph/progress.md" 2>/dev/null
+}
+
+@test "build_prompt: framing tells the agent to park only what needs something outside the worktree" {
+  local output
+  output=$(build_prompt "$MOCK_WORKSPACE" 1)
+  [[ "$output" == *'(blocked: <reason>)'* ]]
+  [[ "$output" == *"Never park work you can do here."* ]]
 }

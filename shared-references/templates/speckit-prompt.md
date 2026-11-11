@@ -25,13 +25,14 @@ context rotation; you handle the work.
    - Mark `[x]` only after the gate exits 0. A checked box claims you
      verified the work — if you cannot execute a task's verification in
      this environment (e.g. a visual review in an external design tool),
-     leave it unchecked, record it as blocked in the handoff and
-     `.ralph/errors.log`, and continue with the remaining tasks.
+     leave it unchecked, record it as blocked by appending
+     `(blocked: <reason>)` to the task line and in `.ralph/errors.log`,
+     and continue. A blocked task does not hold completion.
    - `git add <exact paths> && git commit -m "<type>(<scope>): <desc> (T###)"`. No agent footers. No `--amend`. {{PUSH_GUIDANCE}}
    - (The framing's `## After every commit` block governs what happens
      next — yield-if-breadcrumb OR read the next task.)
-3. When all tasks are `[x]`, no open item lacks a disposition, AND the
-   full gate exits 0, emit `<promise>ALL_TASKS_DONE</promise>`.
+3. When every task is `[x]` or blocked, no open item lacks a disposition,
+   AND the full gate exits 0, emit `<promise>ALL_TASKS_DONE</promise>`.
 
 ## Open items
 Record anything you defer, find out of scope, or cannot decide as a row in
@@ -39,9 +40,10 @@ Record anything you defer, find out of scope, or cannot decide as a row in
 `.specify/templates/open-items-template.md`) — never only in a commit
 message, handoff, or comment. Give it an id, the source task, and a class.
 Before finishing, give every row one disposition: `fixed`,
-`ticketed <link>`, or `accepted <operator>`. Only the operator accepts —
-never write `accepted` yourself. The completion guard refuses
-`ALL_TASKS_DONE` while a row has none.
+`ticketed <link>`, `blocked: <reason>` (only the operator or an outside
+party can settle it; the run lists it for them), or `accepted <operator>`.
+Only the operator accepts — never write `accepted` yourself. The
+completion guard refuses `ALL_TASKS_DONE` while a row has none.
 
 If a gate fails, read `.ralph/gates/<label>-latest.log` for the
 output. Screenshots at `cypress/screenshots/` and direct `curl` against

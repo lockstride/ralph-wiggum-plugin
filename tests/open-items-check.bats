@@ -121,3 +121,28 @@ _items() {
   run bash "$CHECK" "$ITEMS"
   [ "$output" = "$first" ]
 }
+
+@test "blocked with a reason closes a row" {
+  _items '| OI-01 | T003 | decision | a | blocked: needs the operator to rotate the key |'
+  run bash "$CHECK" "$ITEMS"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "refuses blocked without a reason" {
+  _items '| OI-01 | T003 | decision | a | blocked: |' '| OI-02 | T004 | decision | b | blocked |'
+  run bash "$CHECK" "$ITEMS"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"OI-01"* ]]
+  [[ "$output" == *"OI-02"* ]]
+}
+
+@test "--blocked lists only the blocked rows and exits 0" {
+  _items \
+    '| OI-01 | T003 | defect | a | fixed |' \
+    '| OI-02 | T004 | decision | b | blocked: needs CI on main |' \
+    '| OI-03 | T005 | decision | c |  |'
+  run bash "$CHECK" --blocked "$ITEMS"
+  [ "$status" -eq 0 ]
+  [ "$output" = "OI-02: blocked: needs CI on main" ]
+}

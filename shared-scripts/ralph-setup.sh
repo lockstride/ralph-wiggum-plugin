@@ -503,6 +503,12 @@ main() {
   local task_status
   task_status=$(check_task_complete "$WORKSPACE")
   if [[ "$task_status" == "COMPLETE" ]]; then
+    if [[ "$CHAIN_EVALUATE" == "true" ]]; then
+      echo "🎉 Task already complete."
+      set +e
+      chain_evaluate
+      exit $?
+    fi
     echo "🎉 Task already complete. Nothing to do."
     exit 0
   fi
@@ -551,24 +557,32 @@ main() {
     exit "$main_rc"
   fi
   if [[ "$main_rc" -eq 0 ]] && [[ "$CHAIN_EVALUATE" == "true" ]]; then
-    echo ""
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo "🔍 Main loop complete — chaining acceptance evaluation loop"
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo ""
-    local -a eval_args=()
-    eval_args+=(--cli "$RALPH_AGENT_CLI" -m "$MODEL")
-    case "$PROMPT_MODE" in
-      prompt) eval_args+=(--prompt) ;;
-      file) eval_args+=(--prompt-file "$PROMPT_VALUE") ;;
-      spec) [[ -n "$PROMPT_VALUE" ]] && eval_args+=(--spec "$PROMPT_VALUE") || eval_args+=(--spec) ;;
-    esac
-    [[ -n "$EVAL_LOOP_FROM_FLAG" ]] && eval_args+=(-n "$EVAL_LOOP_FROM_FLAG")
-    "$SCRIPT_DIR/ralph-evaluate.sh" "${eval_args[@]}" "$WORKSPACE"
+    set +e
+    chain_evaluate
     main_rc=$?
+    set -e
   fi
 
   exit "$main_rc"
+}
+
+# Run the acceptance evaluation loop against the same ground truth the work
+# loop used. Returns its exit status.
+chain_evaluate() {
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════"
+  echo "🔍 Main loop complete — chaining acceptance evaluation loop"
+  echo "═══════════════════════════════════════════════════════════════════"
+  echo ""
+  local -a eval_args=()
+  eval_args+=(--cli "$RALPH_AGENT_CLI" -m "$MODEL")
+  case "$PROMPT_MODE" in
+    prompt) eval_args+=(--prompt) ;;
+    file) eval_args+=(--prompt-file "$PROMPT_VALUE") ;;
+    spec) [[ -n "$PROMPT_VALUE" ]] && eval_args+=(--spec "$PROMPT_VALUE") || eval_args+=(--spec) ;;
+  esac
+  [[ -n "$EVAL_LOOP_FROM_FLAG" ]] && eval_args+=(-n "$EVAL_LOOP_FROM_FLAG")
+  "$SCRIPT_DIR/ralph-evaluate.sh" "${eval_args[@]}" "$WORKSPACE"
 }
 
 main

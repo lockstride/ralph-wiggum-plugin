@@ -325,6 +325,12 @@ check_task_complete() {
   _check_task_complete_direct "$task_file"
 }
 
+# A `[ ]` line marked `(blocked: <reason>)` or `(post-merge…)` is parked: it
+# waits on something only the operator, CI or a merge can supply, so it never
+# holds completion. The run lists it for the operator instead
+# (_report_operator_items).
+_RALPH_PARKED_RE='\((blocked|post-merge)[:) ]'
+
 _check_task_complete_direct() {
   local task_file="$1"
   local total
@@ -334,7 +340,8 @@ _check_task_complete_direct() {
     return
   fi
   local unchecked
-  unchecked=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null) || unchecked=0
+  unchecked=$(grep -E '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null |
+    grep -cvE "$_RALPH_PARKED_RE") || unchecked=0
   if [[ "$unchecked" -eq 0 ]]; then
     echo "COMPLETE"
   else
@@ -523,6 +530,7 @@ read the next one, keep going.
 - A task is NOT complete until its verification gate exits 0.
 - You own every failure you see — regardless of what caused it. Fix it. If you truly cannot, emit \`<ralph>GUTTER</ralph>\` with root cause.
 - Never mark \`[x]\` around a failing gate.
+- A task that needs something outside this worktree (CI on \`main\`, a merge, a credential, a person) stays \`[ ]\` with \`(blocked: <reason>)\` appended. It never holds completion; the run lists it for the operator. Never park work you can do here.
 
 ## State Files (read on startup)
 
@@ -536,7 +544,7 @@ The handoff block above is already inlined — do NOT re-read \`.ralph/handoff.m
 
 End your turn ONLY when one of these is true. A successful commit is NOT a stop condition.
 
-1. \`<promise>ALL_TASKS_DONE</promise>\` — every task \`[x]\` AND \`$_complete_cmd\` exits 0.
+1. \`<promise>ALL_TASKS_DONE</promise>\` — every task \`[x]\` or parked \`(blocked: <reason>)\` AND \`$_complete_cmd\` exits 0.
 2. \`.ralph/stop-requested\` exists — operator asked the loop to wind down.
 3. \`.ralph/context-warning-active\` exists — token budget is in the warning band; if you start another task you will be killed mid-work and lose progress.
 4. \`<ralph>GUTTER</ralph>\` — genuinely stuck after honest investigation.
@@ -1891,6 +1899,40 @@ _open_items_open() {
   bash "$checker" "$items" 2>/dev/null
 }
 
+# Print what the run leaves for the operator, one `- ` line each: parked `[ ]`
+# lines in the task file, the bullets of its `## Follow-ups` section, and
+# open-items.md rows dispositioned `blocked`. Prints nothing when there are
+# none.
+_operator_items() {
+  local workspace="$1" task_file items
+  task_file=$(_resolve_task_file "$workspace")
+  if [[ -n "$task_file" && -f "$task_file" ]]; then
+    grep -E '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \]' "$task_file" 2>/dev/null |
+      grep -E "$_RALPH_PARKED_RE" | sed -E 's/^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[ \][[:space:]]*/- /' || true
+    awk '
+      /^## / { in_f = ($0 ~ /^## Follow-ups[[:space:]]*$/); next }
+      in_f && /^- / { print }
+    ' "$task_file" 2>/dev/null || true
+  fi
+  task_file=$(cat "$workspace/.ralph/task-file-path" 2>/dev/null) || return 0
+  [[ -n "$task_file" ]] || return 0
+  [[ "$task_file" == /* ]] || task_file="$workspace/$task_file"
+  items="$(dirname "$task_file")/open-items.md"
+  [[ -f "$items" && -f "$_RALPH_SCRIPT_DIR/open-items-check.sh" ]] || return 0
+  bash "$_RALPH_SCRIPT_DIR/open-items-check.sh" --blocked "$items" 2>/dev/null | sed 's/^/- open item /' || true
+}
+
+# On completion, show and record what the run leaves for the operator.
+_report_operator_items() {
+  local workspace="$1" list
+  list=$(_operator_items "$workspace")
+  [[ -n "$list" ]] || return 0
+  log_progress "$workspace" "**Left for the operator** — $(printf '%s' "$list" | sed 's/^- //' | paste -sd ';' -)"
+  echo ""
+  echo "📋 Left for the operator (these do not hold completion):"
+  printf '%s\n' "$list" | sed 's/^/   /'
+}
+
 # Return 0 if the main loop is allowed to honour a tasks-complete /
 # COMPLETE signal, non-zero if it should be blocked. Completion requires
 # the loop's tier-gate to have run, its recorded command to match the
@@ -1986,7 +2028,7 @@ _complete_allowed() {
 
   local _open
   if ! _open=$(_open_items_open "$workspace"); then
-    _COMPLETE_BLOCK_REASON="open items without a disposition (fixed, ticketed <link>, accepted <operator>): $(printf '%s' "$_open" | paste -sd ';' -)"
+    _COMPLETE_BLOCK_REASON="open items without a disposition (fixed, ticketed <link>, blocked: <reason>, accepted <operator>): $(printf '%s' "$_open" | paste -sd ';' -)"
     _COMPLETE_BLOCK_CLASS="transient"
     return 1
   fi
@@ -2231,6 +2273,7 @@ run_ralph_loop() {
       echo "═══════════════════════════════════════════════════════════════════"
       echo ""
       echo "Completed in $loop_n loop(s)."
+      _report_operator_items "$workspace"
 
       if [[ "$OPEN_PR" == "true" ]] && [[ -n "$USE_BRANCH" ]]; then
         echo ""
@@ -2269,6 +2312,7 @@ run_ralph_loop() {
           _write_task_summary "$workspace"
           log_activity "$workspace" "LOOP $loop_label END — ✅ COMPLETE$task_suffix"
           log_progress "$workspace" "**Loop $loop_label ended** — ✅ TASK COMPLETE (agent signaled)"
+          _report_operator_items "$workspace"
           return 0
         else
           log_activity "$workspace" "LOOP $loop_label END — ⚠️ AGENT SIGNALED COMPLETE (criteria remain)$task_suffix"

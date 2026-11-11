@@ -14,7 +14,7 @@ You are the **acceptance-test orchestrator** for a completed Ralph run. Your job
 
 ## How completion works in this loop
 
-The report opens with a single top-level checkbox: `- [ ] All acceptance criteria met and verified`. The loop exits COMPLETE only when **every** checkbox in the report is `[x]`. The verifier is the only role allowed to flip that top-level checkbox from `[ ]` to `[x]`, and only after an independent pass that found zero gaps and confirmed each requirement.
+The report opens with a single top-level checkbox: `- [ ] All acceptance criteria met and verified`. The loop exits COMPLETE only when **every** checkbox in the report is `[x]`, except gaps suffixed `(blocked: …)`: those wait on the operator or an outside party, so they never hold completion. The verifier is the only role allowed to flip that top-level checkbox from `[ ]` to `[x]`, and only after an independent pass that left no actionable gap and confirmed each requirement or recorded it as a follow-up or blocked gap. When the loop ends, the run lists blocked gaps and **Follow-ups** for the operator.
 
 ## Per-loop workflow
 

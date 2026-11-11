@@ -9,7 +9,11 @@
 
 ## Gaps
 
-_Verifier appends `[ ]` items here, citing file:line. Rework checks them off as `[x]` when resolved. Unresolvable gaps stay `[ ]` with a `(blocked: reason)` suffix._
+_Verifier appends `[ ]` items here, citing file:line. Rework checks them off as `[x]` when resolved. A gap only the operator or an outside party can close stays `[ ]` with a `(blocked: reason)` suffix; it does not hold completion._
+
+## Follow-ups
+
+_Verifier records one plain bullet per criterion the run cannot prove inside its worktree: `- <criterion> | <what remains> | <ticket link, or post-merge>`. No checkboxes. Follow-ups do not hold completion; the operator closes them after the run._
 
 ## Results
 

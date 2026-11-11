@@ -32,7 +32,7 @@ These three drive the post-completion `ralph-evaluate` loop. The orchestrator + 
 
 **File:** `skills/verifying-acceptance-criteria/SKILL.md`
 
-**What it does:** Independent re-check of the entire ground-truth requirements list against the current repo state. Skeptical by default — does not trust `progress.md`, `handoff.md`, or the main loop's self-assessment. Records every unmet requirement as a gap line in the acceptance report. The only role allowed to flip the top-level "All acceptance criteria met" checkbox to `[x]`. Records findings only; does not modify code.
+**What it does:** Independent re-check of the entire ground-truth requirements list against the current repo state. Skeptical by default — does not trust `progress.md`, `handoff.md`, or the main loop's self-assessment. Records every unmet requirement as a gap line in the acceptance report, and a criterion only CI, a merge, a credential or a person can finish as a follow-up once its local part passes and a ticket tracks the rest (or the ground truth marks it post-merge). The only role allowed to flip the top-level "All acceptance criteria met" checkbox to `[x]`. Records findings only; does not modify code.
 
 **When invoked:** By the orchestrator skill's VERIFIER mode, via Task-tool sub-agent. The sub-agent's prompt instructs it to invoke this skill. Sub-agent isolation matters here — fresh context window means the verifier reads requirements without bias from prior loop findings or rework commits.
 
@@ -42,7 +42,7 @@ These three drive the post-completion `ralph-evaluate` loop. The orchestrator + 
 
 **File:** `skills/addressing-acceptance-gaps/SKILL.md`
 
-**What it does:** Closes gaps that the verifier recorded. Reads the report's Gaps section as a work list, makes the code/test changes for each `[ ]` entry, runs targeted gates under the `final` label, checks resolved gaps off in place. Does not invent new gaps (verifier's job), does not flip the top-level checkbox (verifier's job), does not over-claim resolution without evidence. Marks unresolvable gaps as `(blocked: reason)`.
+**What it does:** Closes gaps that the verifier recorded. Reads the report's Gaps section as a work list, makes the code/test changes for each `[ ]` entry, runs targeted gates under the `final` label, checks resolved gaps off in place. Does not invent new gaps (verifier's job), does not flip the top-level checkbox (verifier's job), does not over-claim resolution without evidence. Marks unresolvable gaps as `(blocked: reason)`; a blocked gap does not hold the loop's completion.
 
 **When invoked:** By the orchestrator skill's REWORK mode, via Task-tool sub-agent. Triggered when the report's Gaps section contains any `[ ]` line not suffixed with `(blocked: …)`.
 
