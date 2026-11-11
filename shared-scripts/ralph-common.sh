@@ -325,11 +325,13 @@ check_task_complete() {
   _check_task_complete_direct "$task_file"
 }
 
-# A `[ ]` line marked `(blocked: <reason>)` or `(post-merge…)` is parked: it
-# waits on something only the operator, CI or a merge can supply, so it never
-# holds completion. The run lists it for the operator instead
-# (_report_operator_items).
-_RALPH_PARKED_RE='\((blocked|post-merge)[:) ]'
+# A `[ ]` line that ends in `(blocked: <reason>)` or `(post-merge: <ticket>)`
+# is parked: it waits on something only the operator, CI or a merge can
+# supply, so it never holds completion. The run lists it for the operator
+# instead (_report_operator_items). The reason is required and the marker must
+# end the line; anything looser is an ordinary open line. The eval loop's mode
+# pick (ralph-evaluate.sh) reads blocked gaps with this same pattern.
+_RALPH_PARKED_RE='\((blocked|post-merge):[[:space:]]*[^()[:space:]][^()]*\)[[:space:]]*$'
 
 _check_task_complete_direct() {
   local task_file="$1"
@@ -1922,11 +1924,22 @@ _operator_items() {
   bash "$_RALPH_SCRIPT_DIR/open-items-check.sh" --blocked "$items" 2>/dev/null | sed 's/^/- open item /' || true
 }
 
+# Most items _report_operator_items shows, and the most characters per item.
+# The items are agent-written text, so they are also stripped of control
+# characters before they reach the terminal or progress.md.
+_OPERATOR_ITEMS_MAX=20
+_OPERATOR_ITEM_WIDTH=200
+
 # On completion, show and record what the run leaves for the operator.
 _report_operator_items() {
-  local workspace="$1" list
-  list=$(_operator_items "$workspace")
-  [[ -n "$list" ]] || return 0
+  local workspace="$1" all list n
+  all=$(_operator_items "$workspace" | LC_ALL=C tr -d '\000-\010\011\013-\037\177' | cut -c1-"$_OPERATOR_ITEM_WIDTH")
+  [[ -n "$all" ]] || return 0
+  list=$(printf '%s\n' "$all" | head -n "$_OPERATOR_ITEMS_MAX")
+  n=$(printf '%s\n' "$all" | wc -l | tr -d ' ')
+  if [[ "$n" -gt "$_OPERATOR_ITEMS_MAX" ]]; then
+    list="$list"$'\n'"- … and $((n - _OPERATOR_ITEMS_MAX)) more"
+  fi
   log_progress "$workspace" "**Left for the operator** — $(printf '%s' "$list" | sed 's/^- //' | paste -sd ';' -)"
   echo ""
   echo "📋 Left for the operator (these do not hold completion):"

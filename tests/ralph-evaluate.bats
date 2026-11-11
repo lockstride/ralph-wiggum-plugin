@@ -476,6 +476,16 @@ _all_ac_results=("ABC-1/AC1 | - | pass" "ABC-1/AC2 | - | fail" "ABC-2/AC1 | - | 
   [ "$output" = "MODE=VERIFIER" ]
 }
 
+@test "pick_mode: a blocked marker with no reason, or text after it, is still actionable" {
+  _mode_fixture
+  _mode_report "- [ ] ui card still offers it (blocked: )" "${_all_ac_results[@]}"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$output" = "MODE=REWORK" ]
+  _mode_report "- [ ] ui card (blocked: no browser) still offers it" "${_all_ac_results[@]}"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$output" = "MODE=REWORK" ]
+}
+
 @test "pick_mode: a gap with every criterion covered is REWORK" {
   _mode_fixture
   _mode_report "- [ ] ABC-1 AC2 fails — tests/two.bats:3" "${_all_ac_results[@]}"

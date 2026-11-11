@@ -2132,6 +2132,18 @@ REPORT
   [ "$(check_task_complete "$MOCK_WORKSPACE")" = "INCOMPLETE:1" ]
 }
 
+@test "check_task_complete: a parked marker needs a reason and must end the line" {
+  cat >"$MOCK_WORKSPACE/tasks.md" <<'TASKS'
+- [ ] T001 Confirm CI on main (blocked:)
+- [ ] T002 Confirm CI on main (blocked: )
+- [ ] T003 Measure cache replay (post-merge)
+- [ ] T004 Confirm CI (blocked: needs CI) then rewrite the handler
+- [ ] T005 Confirm CI on main (blocked: needs CI)   
+TASKS
+  RALPH_TASK_FILE="$MOCK_WORKSPACE/tasks.md"
+  [ "$(check_task_complete "$MOCK_WORKSPACE")" = "INCOMPLETE:4" ]
+}
+
 @test "_complete_allowed: green gate and an item only the operator can settle (blocked:) → allow" {
   _green_full_with_items '| OI-07 | T002 | decision | x | blocked: needs the operator to pick a vendor |'
   _complete_allowed "$MOCK_WORKSPACE"
@@ -2158,6 +2170,25 @@ TASKS
   [[ "$out" == *"open item OI-01: blocked: needs a person"* ]]
   [[ "$out" != *"T001"* && "$out" != *"OI-02"* && "$out" != *"placeholder"* ]]
   grep -q "Left for the operator" "$MOCK_WORKSPACE/.ralph/progress.md"
+}
+
+@test "_report_operator_items strips control characters, cuts long items and caps the list" {
+  local long i
+  long=$(printf 'x%.0s' $(seq 1 300))
+  {
+    printf -- '- [ ] T000 \033[31mred\033[0m\tsplit\r (blocked: needs CI)\n'
+    printf -- '- [ ] T001 %s (blocked: needs CI)\n' "$long"
+    for i in $(seq 2 24); do printf -- '- [ ] T%03d item (blocked: needs CI)\n' "$i"; done
+  } >"$MOCK_WORKSPACE/tasks.md"
+  RALPH_TASK_FILE="$MOCK_WORKSPACE/tasks.md"
+  local out
+  out=$(_report_operator_items "$MOCK_WORKSPACE")
+  ! printf '%s' "$out" | LC_ALL=C grep -q $'[\x01-\x09\x0b-\x1f\x7f]'
+  [[ "$out" == *"T000 [31mred[0msplit (blocked: needs CI)"* ]]
+  ! printf '%s\n' "$out" | awk 'length($0) > 203 { found = 1 } END { exit !found }'
+  [[ "$out" == *"T019 item"* ]]
+  [[ "$out" != *"T020 item"* ]]
+  [[ "$out" == *"… and 5 more"* ]]
 }
 
 @test "_report_operator_items prints nothing when nothing is left for the operator" {

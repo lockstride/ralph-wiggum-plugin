@@ -249,8 +249,9 @@ record_eval_runner() {
 }
 
 # The eval loop's mode for this pass, from the report on disk: REWORK when a
-# gap is actionable (a `[ ]` line that is neither `(blocked: …)` nor the
-# top-level checkbox) AND the verify pass covered every criterion and surface
+# gap is actionable (a `[ ]` line that is neither parked `(blocked: <reason>)`
+# — _RALPH_PARKED_RE, the completion count's own test — nor the top-level
+# checkbox) AND the verify pass covered every criterion and surface
 # the ground truth names (verify-coverage.sh); otherwise VERIFIER, which
 # fills the missing results. Prints MODE=<mode>, then what a refused rework
 # still lacks.
@@ -263,7 +264,7 @@ pick_mode() {
   local workspace="$1"
   local report="$workspace/.ralph/acceptance-report.md" state="$workspace/.ralph/coverage-refusals"
   local gaps
-  gaps=$(grep -E '^- \[ \]' "$report" 2>/dev/null | grep -vF '(blocked:' | grep -vF 'All acceptance criteria met' || true)
+  gaps=$(grep -E '^- \[ \]' "$report" 2>/dev/null | grep -vE "$_RALPH_PARKED_RE" | grep -vF 'All acceptance criteria met' || true)
   if [[ -z "$gaps" ]]; then
     echo "MODE=VERIFIER"
     return 0
