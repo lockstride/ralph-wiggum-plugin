@@ -333,7 +333,7 @@ GENPROMPT
     local rel_prompt="${ralph_prompt#"$workspace/"}"
     local rel_hash="${ralph_hash_file#"$workspace/"}"
     git add "$rel_prompt" "$rel_hash" 2>/dev/null || true
-    git commit -q -m "ralph: generate loop prompt from speckit.implement ${current_hash:0:8}" 2>/dev/null || true
+    git commit -q -m "ralph: generate loop prompt from speckit-implement ${current_hash:0:8}" 2>/dev/null || true
   )
 
   echo "  ✓ Generated prompt ($line_count lines) → $ralph_prompt" >&2

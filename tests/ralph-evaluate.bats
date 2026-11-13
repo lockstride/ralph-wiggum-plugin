@@ -476,6 +476,13 @@ _all_ac_results=("ABC-1/AC1 | - | pass" "ABC-1/AC2 | - | fail" "ABC-2/AC1 | - | 
   [ "$output" = "MODE=VERIFIER" ]
 }
 
+@test "pick_mode: a blocked gap with balanced inner parentheses is not actionable" {
+  _mode_fixture
+  _mode_report "- [ ] waits on X (blocked: needs merge (OHI-35) first)" "${_all_ac_results[@]}"
+  run pick_mode "$MOCK_WORKSPACE"
+  [ "$output" = "MODE=VERIFIER" ]
+}
+
 @test "pick_mode: a blocked marker with no reason, or text after it, is still actionable" {
   _mode_fixture
   _mode_report "- [ ] ui card still offers it (blocked: )" "${_all_ac_results[@]}"

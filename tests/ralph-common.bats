@@ -2144,6 +2144,17 @@ TASKS
   [ "$(check_task_complete "$MOCK_WORKSPACE")" = "INCOMPLETE:4" ]
 }
 
+@test "check_task_complete: a parked reason with balanced inner parentheses counts as parked" {
+  cat >"$MOCK_WORKSPACE/tasks.md" <<'TASKS'
+- [x] T001 Build it
+- [ ] T002 Confirm CI wall time (blocked: waits on X (OHI-35); rest done)
+- [ ] T003 Post-merge check (post-merge: measure cache (v2.0) timing)
+- [ ] T004 Two nested (blocked: A (B) and (C) end)
+TASKS
+  RALPH_TASK_FILE="$MOCK_WORKSPACE/tasks.md"
+  [ "$(check_task_complete "$MOCK_WORKSPACE")" = "COMPLETE" ]
+}
+
 @test "_complete_allowed: green gate and an item only the operator can settle (blocked:) → allow" {
   _green_full_with_items '| OI-07 | T002 | decision | x | blocked: needs the operator to pick a vendor |'
   _complete_allowed "$MOCK_WORKSPACE"

@@ -331,7 +331,9 @@ check_task_complete() {
 # instead (_report_operator_items). The reason is required and the marker must
 # end the line; anything looser is an ordinary open line. The eval loop's mode
 # pick (ralph-evaluate.sh) reads blocked gaps with this same pattern.
-_RALPH_PARKED_RE='\((blocked|post-merge):[[:space:]]*[^()[:space:]][^()]*\)[[:space:]]*$'
+# The reason may contain one level of balanced parentheses, e.g.
+# `(blocked: waits on X (OHI-35))`.
+_RALPH_PARKED_RE='\((blocked|post-merge):[[:space:]]*[^()[:space:]]([^()]|\([^()]*\))*\)[[:space:]]*$'
 
 _check_task_complete_direct() {
   local task_file="$1"
