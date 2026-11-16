@@ -1,6 +1,6 @@
 ---
 name: eval-ralph
-description: Deeply evaluate the performance of a Ralph Wiggum autonomous loop run from its on-disk logs. Use when the user wants to analyze, review, grade, or post-mortem a Ralph loop / Ralph session / ralph-wiggum-plugin run — typically phrased as "evaluate loop <fragment>", "how did loop 152651 do", "analyze the ralph run in <worktree>", "did our plugin changes work", or any request to judge how a Ralph loop performed in light of recent plugin changes. The user usually supplies a loop fragment (a 6-digit-ish id like "152651") that names a worktree. Trigger even if they don't say the word "skill".
+description: Deeply evaluate the performance of a Ralph Wiggum autonomous loop run from its on-disk logs. Use when the user wants to analyze, review, grade, or post-mortem a Ralph loop / Ralph session / ralph-wiggum-plugin run — typically phrased as "evaluate loop [fragment]", "how did loop 152651 do", "analyze the ralph run in [worktree]", "did our plugin changes work", or any request to judge how a Ralph loop performed in light of recent plugin changes. The user usually supplies a loop fragment (a 6-digit-ish id like "152651") that names a worktree. Trigger even if they don't say the word "skill".
 argument-hint: "[loop-fragment] [specific question]"
 ---
 

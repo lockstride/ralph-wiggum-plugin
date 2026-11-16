@@ -113,6 +113,17 @@ _all_skills() {
   done < <(_all_skills)
 }
 
+@test "skill description contains no angle brackets" {
+  # claude.ai's marketplace sync rejects XML tags in a description and stores it
+  # with the brackets stripped, so placeholders use [square] brackets instead.
+  while IFS= read -r skill_md; do
+    [ -n "$skill_md" ] || continue
+    local desc
+    desc=$(_skill_field "$skill_md" "description")
+    [[ "$desc" != *[\<\>]* ]] || { echo "angle bracket in description of $skill_md" >&2; return 1; }
+  done < <(_all_skills)
+}
+
 @test "skill description includes a 'use when' / 'use for' trigger phrase" {
   # Per best-practices doc: descriptions should specify both WHAT the skill
   # does and WHEN to use it. Heuristic check for trigger language.
