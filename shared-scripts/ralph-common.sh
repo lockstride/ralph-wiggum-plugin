@@ -1903,6 +1903,37 @@ _open_items_open() {
   bash "$checker" "$items" 2>/dev/null
 }
 
+# Print `<task> <ticket> <criterion>: <why>` for each criterion a ticked
+# tranche-close task leaves without its test (see proof-check.sh) and return 1
+# when there is one. The guard refuses such a tick only when a Write, Edit or
+# MultiEdit makes it; this also judges a tick made through Bash (`sed -i`, a
+# script), which the hook cannot see, and a proof file removed after its
+# close. Each task and its map come from the launch snapshot
+# (.ralph/effective-prompt.md) when it holds the task, else from the task
+# file — the same choice the guard's _guard_tranche_close makes. No
+# task-file breadcrumb, no `| proof:` map, or no checker all fail open.
+_unproven_closes() {
+  local workspace="$1" task_file checker snapshot
+  task_file=$(cat "$workspace/.ralph/task-file-path" 2>/dev/null) || return 0
+  [[ -n "$task_file" ]] || return 0
+  [[ "$task_file" == /* ]] || task_file="$workspace/$task_file"
+  checker="$_RALPH_SCRIPT_DIR/proof-check.sh"
+  snapshot="$workspace/.ralph/effective-prompt.md"
+  [[ -f "$task_file" && -f "$checker" ]] || return 0
+  grep -qF '| proof:' "$task_file" "$snapshot" 2>/dev/null || return 0
+
+  local tid plan report refused=0
+  while read -r tid; do
+    plan="$snapshot"
+    grep -Eq "^[[:space:]]*[-*][[:space:]]+\[.\][[:space:]]+${tid}([^0-9A-Za-z]|$)" "$plan" 2>/dev/null || plan="$task_file"
+    report=$(bash "$checker" "$plan" "$tid" "$workspace" 2>/dev/null) && continue
+    [[ -n "$report" ]] || continue
+    printf '%s\n' "$report" | sed "s/^/$tid /"
+    refused=1
+  done < <(sed -nE 's/^[[:space:]]*[-*][[:space:]]+\[[xX]\][[:space:]]+(T[0-9]+)([^0-9A-Za-z].*)?$/\1/p' "$task_file")
+  return "$refused"
+}
+
 # Print what the run leaves for the operator, one `- ` line each: parked `[ ]`
 # lines in the task file, the bullets of its `## Follow-ups` section, and
 # open-items.md rows dispositioned `blocked`. Prints nothing when there are
@@ -2044,6 +2075,13 @@ _complete_allowed() {
   local _open
   if ! _open=$(_open_items_open "$workspace"); then
     _COMPLETE_BLOCK_REASON="open items without a disposition (fixed, ticketed <link>, blocked: <reason>, accepted <operator>): $(printf '%s' "$_open" | paste -sd ';' -)"
+    _COMPLETE_BLOCK_CLASS="transient"
+    return 1
+  fi
+
+  local _unproven
+  if ! _unproven=$(_unproven_closes "$workspace"); then
+    _COMPLETE_BLOCK_REASON="a ticked tranche close leaves a criterion without its test (write it where the plan's proof names it): $(printf '%s' "$_unproven" | paste -sd ';' -)"
     _COMPLETE_BLOCK_CLASS="transient"
     return 1
   fi

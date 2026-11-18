@@ -1524,6 +1524,9 @@ _tree_changed_since_verdict() {
 # write — when it holds the task, else from the task file as it stands before
 # the edit, so rewording a task does not change what ticking it means.
 #
+# A tick made through Bash never reaches this hook; the completion check
+# (_unproven_closes in ralph-common.sh) judges every ticked close again.
+#
 #   $1 = the path being written
 _guard_tranche_close() {
   local path="$1" task_file

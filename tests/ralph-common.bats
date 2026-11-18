@@ -537,6 +537,50 @@ _green_full_with_items() {
   _complete_allowed "$MOCK_WORKSPACE"
 }
 
+# A tranche close ticked where the guard cannot see it — the `sed -i` a Bash
+# call makes — is judged again at completion against the plan's proof map.
+_green_full_with_ticked_plan() {
+  mkdir -p "$MOCK_WORKSPACE/.ralph/gates"
+  printf 'mock all-check' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.cmd"
+  printf '0'              >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
+  create_mock_plan
+  sed -i.bak -E "s/^- \[ \] ($1) /- [x] \1 /" "$MOCK_PLAN"
+}
+
+@test "_complete_allowed: green gate but a ticked close leaves a criterion without its test → block, transient, names it" {
+  _green_full_with_ticked_plan 'T001|T002'
+  touch "$MOCK_WORKSPACE/tests/one.bats"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [[ "$_COMPLETE_BLOCK_REASON" == *"T002 ABC-1 AC2"* ]]
+  [[ "$_COMPLETE_BLOCK_REASON" != *"ABC-1 AC1"* ]]
+  [ "$_COMPLETE_BLOCK_CLASS" = "transient" ]
+}
+
+@test "_complete_allowed: green gate and every ticked close has its tests → allow" {
+  _green_full_with_ticked_plan 'T001|T002'
+  touch "$MOCK_WORKSPACE/tests/one.bats" "$MOCK_WORKSPACE/tests/two.bats"
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: an unticked close is not judged" {
+  _green_full_with_ticked_plan 'T001'
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
+@test "_complete_allowed: a close's proof map is read from the launch snapshot, not the editable plan" {
+  _green_full_with_ticked_plan 'T001|T002'
+  touch "$MOCK_WORKSPACE/tests/one.bats"
+  sed -i.bak 's#tests/two.bats#tests/one.bats#' "$MOCK_PLAN"
+  ! _complete_allowed "$MOCK_WORKSPACE"
+  [[ "$_COMPLETE_BLOCK_REASON" == *"T002 ABC-1 AC2"* ]]
+}
+
+@test "_complete_allowed: a plan with no proof map is not judged" {
+  _green_full_with_ticked_plan 'T001|T002'
+  sed -i.bak 's/ | proof:.*//' "$MOCK_PLAN" "$MOCK_WORKSPACE/.ralph/effective-prompt.md"
+  _complete_allowed "$MOCK_WORKSPACE"
+}
+
 @test "_complete_allowed: a red gate is still reported ahead of open items" {
   _green_full_with_items '| OI-07 | T002 | decision | x |  |'
   printf '1' >"$MOCK_WORKSPACE/.ralph/gates/full-latest.exit"
