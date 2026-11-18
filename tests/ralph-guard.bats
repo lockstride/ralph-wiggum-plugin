@@ -2002,6 +2002,78 @@ EOF
   _assert_cached
 }
 
+# --- 0.36.4: a respelling that asks for the same run meets the same verdict ---
+# After a cache denial, a verifier re-ran the fidelity lane with its boards in
+# another order, and again with `--outputStyle=static` appended: both got a
+# fresh key and ran unchanged code.
+
+_fidelity_policy() {
+  printf '%s\n' '[wrap]' 'pnpm webapp:test-fidelity | e2e' 'pnpm test-unit | unit' \
+    >"$MOCK_WORKSPACE/.ralph/command-policy"
+}
+
+@test "gate-cache: the same arguments in another order are the same command (0.36.4)" {
+  _fidelity_policy
+  _verdict e2e "pnpm webapp:test-fidelity AppsNew ClaudeReinstall ChatGPTDesktopWindows --skip-nx-cache"
+  run _run_guard Bash "pnpm webapp:test-fidelity ClaudeReinstall AppsNew ChatGPTDesktopWindows --skip-nx-cache 2>&1 | tail -30"
+  _assert_cached
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("order of its arguments")'
+}
+
+@test "gate-cache: Nx's --outputStyle does not make a different command (0.36.4)" {
+  _fidelity_policy
+  _verdict e2e "pnpm webapp:test-fidelity --skip-nx-cache"
+  run _run_guard Bash "pnpm webapp:test-fidelity --skip-nx-cache --outputStyle=static 2>&1 | tail -80"
+  _assert_cached
+  run _run_guard Bash "pnpm webapp:test-fidelity --output-style stream --skip-nx-cache"
+  _assert_cached
+}
+
+@test "gate-cache: a flag keeps its value, and arguments never cross a -- (0.36.4)" {
+  _fidelity_policy
+  _verdict e2e "pnpm webapp:test-fidelity --spec a --env b"
+  run _run_guard Bash "pnpm webapp:test-fidelity --spec b --env a"
+  _assert_runs_under_e2e "pnpm webapp:test-fidelity --spec b --env a"
+  _verdict e2e "pnpm webapp:test-fidelity a -- b"
+  run _run_guard Bash "pnpm webapp:test-fidelity b -- a"
+  _assert_runs_under_e2e "pnpm webapp:test-fidelity b -- a"
+  _verdict e2e "pnpm webapp:test-fidelity AppsNew"
+  run _run_guard Bash "pnpm webapp:test-fidelity AppsNew Main"
+  _assert_runs_under_e2e "pnpm webapp:test-fidelity AppsNew Main"
+}
+
+#   $1 = the gated command the rewrite must hand gate-run.sh under 'e2e'
+_assert_runs_under_e2e() {
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg c "$1" '.hookSpecificOutput.updatedInput.command | endswith("/gate-run.sh e2e " + $c)'
+}
+
+# --- 0.36.4: a denial names an edit chained in front of the gate -------------
+# The hook judges the whole command before any of it runs, so `python3 - <<EOF
+# … EOF` then the gate is refused with the edit unmade.
+
+@test "gate-cache: a denial says an edit chained before the gate has not run (0.36.4)" {
+  _fidelity_policy
+  _unit_verdict "pnpm test-unit canonical-prompt"
+  run _run_guard Bash "python3 - <<'EOF'
+open('a.ts', 'w').write('x')
+EOF
+pnpm test-unit canonical-prompt 2>&1 | tail -12"
+  _assert_cached
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Make the edit in its own call")'
+}
+
+@test "gate-cache: a bare re-run or one after a cd gets no edit hint (0.36.4)" {
+  _fidelity_policy
+  _unit_verdict "pnpm test-unit canonical-prompt"
+  run _run_guard Bash "pnpm test-unit canonical-prompt"
+  _assert_cached
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Make the edit") | not'
+  run _run_guard Bash "cd $MOCK_WORKSPACE && bash $SCRIPTS_DIR/gate-run.sh unit pnpm test-unit canonical-prompt"
+  _assert_cached
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Make the edit") | not'
+}
+
 @test "label-lock: a tier command passed as one quoted argument is still locked (0.29.0)" {
   setup_v14_gates_policy
   echo "$(date +%s)" >"$STATE_DIR/last-write-ts"

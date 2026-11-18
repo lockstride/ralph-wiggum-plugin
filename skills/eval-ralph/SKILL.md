@@ -142,7 +142,13 @@ version** the run used — the activity log shows the path, e.g.
   re-open the gate: a denial right after a `python3`/`sed -i` edit was a false one.
   Before 0.27.1 the cache was keyed on the label alone: a denial of a different
   command under the same label (another project's `pnpm test-unit <project>`, or
-  `pnpm test-coverage` after `pnpm test-unit`) was a false one.
+  `pnpm test-coverage` after `pnpm test-unit`) was a false one. Since 0.36.4 the
+  command is compared with its arguments as a set and Nx's `--outputStyle`
+  dropped; before that, reordering arguments or adding `--outputStyle` after a
+  denial ran unchanged code under a fresh key — flag it as evasion. A denial of a
+  Bash call that edits (`python3 - <<EOF`, `sed -i`) and then runs the gate is a
+  true one: nothing in the call ran, so the edit had not happened (since 0.36.4
+  the denial says so).
 - **Completion check** (`ralph-common.sh` `_complete_allowed`): the impl loop and
   the eval loop gate on **different tiers** (0.14.3+). The tier command comes from
   `.ralph/command-policy` `[gates]` (the single source of truth — no defaults, no

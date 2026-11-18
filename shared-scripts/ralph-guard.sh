@@ -1145,11 +1145,13 @@ _guard_bash() {
 
 # Judges every chained command that runs the harness, in the form it will run,
 # so a `cd "$ws" && bash gate-run.sh …` meets the cache and the tier lock with
-# its own label and command.
+# its own label and command. Each is told whether a command other than a `cd`
+# runs before it.
 _guard_chained_gates() {
-  local i
+  local i before=""
   for ((i = 0; i < ${#_SEG_FINAL[@]}; i++)); do
-    _guard_gate_invocation "${_SEG_FINAL[i]}"
+    _guard_gate_invocation "${_SEG_FINAL[i]}" "$before"
+    [[ "${_SEG_CANON[i]}" == cd || "${_SEG_CANON[i]}" == "cd "* ]] || before=1
   done
 }
 
@@ -1176,8 +1178,9 @@ _guard_chained_gates() {
 #
 #   $1 = one chained command in the form it will run. Judged only when it runs
 #        the harness.
+#   $2 = non-empty when a command other than a `cd` runs before it
 _guard_gate_invocation() {
-  local gate="$1"
+  local gate="$1" before="${2:-}"
   _is_gate_invocation "$gate" || return 0
 
   local label
@@ -1269,7 +1272,11 @@ _guard_gate_invocation() {
     [[ "$last_gate" -gt 0 ]] && [[ "$last_gate" -ge "$last_write" ]] &&
     _same_command_as_verdict "$label" "$gated_cmd" &&
     ! _tree_changed_since_verdict "$label"; then
-    _block "Gate '${label}' already ran '${gated_cmd}' and nothing has changed since — no Write/Edit, and no tracked or untracked file differs from the tree it ran against. Output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: change code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose. (The cache is per label and per command: a different command still runs.)"
+    # The hook judges the whole command before any of it runs, so an edit
+    # chained in front of the gate has not reached the tree yet.
+    local _chained=""
+    [[ -z "$before" ]] || _chained=" Nothing in this command ran, including the commands before the gate: an edit among them has not changed the tree yet. Make the edit in its own call, then run the gate."
+    _block "Gate '${label}' already ran '${gated_cmd}' and nothing has changed since — no Write/Edit, and no tracked or untracked file differs from the tree it ran against.${_chained} Output is cached at .ralph/gates/${label}-latest.{log,exit,summary}. Re-running produces identical output; there is no --force flag, and deleting the breadcrumb files won't bypass this. To run again: change code to address the failure first, then retry; otherwise read .ralph/gates/${label}-latest.log and diagnose. (The cache is per label and per command: a different command still runs, but the order of its arguments and Nx's --outputStyle don't make it different.)"
   fi
 
   _guard_lane_first "$label" "$gated_cmd"
@@ -1422,15 +1429,57 @@ _same_command_as_verdict() {
 
 # The form a gated command is compared in: without quotes, which the shell
 # removed before gate-run.sh recorded its command; whitespace collapsed, as
-# gate-run.sh records it; and spelled as the policy judged it — a
-# package-local binary path as its exec form, pnpm's spellings of one script
-# run normalized.
+# gate-run.sh records it; spelled as the policy judged it — a package-local
+# binary path as its exec form, pnpm's spellings of one script run
+# normalized; and read as the run it asks for, which neither the order of its
+# arguments nor how it prints changes (_ARG_SET_AWK).
 _command_key() {
   local key="${1//[\"\']/}"
   key=$(printf '%s' "$key" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
   key=$(_normalize_local_bin "$key")
-  _normalize_pnpm "$key"
+  key=$(_normalize_pnpm "$key")
+  printf '%s\n' "$key" | LC_ALL=C awk "$_ARG_SET_AWK"
 }
+
+# A command's arguments as a set, so a respelling that asks for the same run
+# meets the same verdict: `fidelity AppsNew Main` and `fidelity Main AppsNew`
+# run the same boards. The first two words — the runner and the script it
+# runs — stay in front. A flag keeps the word after it, which may be its
+# value, so `--spec a --env b` never matches `--spec b --env a`; a `--` stays
+# where it is, since what follows it goes to another program. Nx's
+# --outputStyle changes only how a run prints, so it is dropped. Errs toward
+# a fresh key: a flag paired with a word that is not its value only keeps
+# apart two spellings the set would have joined.
+read -r -d '' _ARG_SET_AWK <<'AWK' || true
+function flush(    a, b, t) {
+  for (a = 2; a <= nu; a++) {
+    t = u[a]
+    for (b = a - 1; b >= 1 && (u[b] "") > (t ""); b--) u[b + 1] = u[b]
+    u[b + 1] = t
+  }
+  for (a = 1; a <= nu; a++) out = out " " u[a]
+  nu = 0
+}
+{
+  n = split($0, w, " ")
+  out = w[1]
+  if (n >= 2) out = out " " w[2]
+  nu = 0
+  for (i = 3; i <= n; i++) {
+    t = w[i]
+    if (t ~ /^--(outputStyle|output-style)=/) continue
+    if (t ~ /^--(outputStyle|output-style)$/) {
+      if (i < n && w[i + 1] !~ /^-/) i++
+      continue
+    }
+    if (t == "--") { flush(); out = out " --"; continue }
+    if (t ~ /^-/ && i < n && w[i + 1] !~ /^-/) t = t " " w[++i]
+    u[++nu] = t
+  }
+  flush()
+  print out
+}
+AWK
 
 # 0.26.0: whether the working tree differs from the one the label's last
 # verdict ran against.
