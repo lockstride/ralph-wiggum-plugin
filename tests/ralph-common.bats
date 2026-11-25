@@ -304,6 +304,18 @@ EOF
   rm -rf "$fresh"
 }
 
+@test "the handoff header spells no section heading" {
+  # An agent that finds its section by searching for the heading text would
+  # land in the header instead, and leave the real section stale below.
+  local fresh
+  fresh=$(mktemp -d "$BATS_TMPDIR/rb-init.XXXXXX")
+  init_ralph_dir "$fresh"
+  grep -q '^>.*Working set' "$fresh/.ralph/handoff.md"
+  run grep '^>.*## ' "$fresh/.ralph/handoff.md"
+  rm -rf "$fresh"
+  [ "$status" -eq 1 ]
+}
+
 @test "init_ralph_dir does not overwrite existing handoff.md (0.12.0)" {
   local fresh
   fresh=$(mktemp -d "$BATS_TMPDIR/rb-init2.XXXXXX")

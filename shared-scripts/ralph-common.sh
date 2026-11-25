@@ -1589,7 +1589,7 @@ run_loop() {
         break
         ;;
       "RECOVER")
-        # 0.1.16: Emitted by stream-parser on a successful `git commit`
+        # 0.1.16: Emitted by stream-parser when a task is committed
         # (task boundary). Clears any latched GUTTER so a transient
         # mid-session stuck-pattern does not poison loop-end
         # reporting once the agent has recovered and committed. ROTATE,

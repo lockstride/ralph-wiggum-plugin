@@ -837,6 +837,217 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Task boundary from HEAD. The parser reads HEAD live, so these tests commit
+# for real between events and wait for each result to be read first.
+# ---------------------------------------------------------------------------
+
+# Helper: print one Shell result ($1 = exit code, $2 = command) and return once
+# the parser has read it — the Read after it is logged only then.
+feed_shell() {
+  FED=$((${FED:-0} + 1))
+  tool_result_json "Shell" 50 5 "$1" "" "$2"
+  tool_result_json "Read" 0 0 0 "/sync/$FED"
+  local tries=0
+  until grep -qF "READ /sync/$FED " "$MOCK_WORKSPACE/.ralph/activity.log" 2>/dev/null; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 600 ] || return 1
+    sleep 0.05
+  done
+}
+
+# Helper: a real commit in the mock workspace.
+real_commit() {
+  git -C "$MOCK_WORKSPACE" commit -q --allow-empty -m "$1"
+}
+
+# Helper: run the steps function $1 against a live parser.
+run_live() {
+  "$1" | bash "$SCRIPTS_DIR/stream-parser.sh" "$MOCK_WORKSPACE" 1
+}
+
+# Helper: assert $1 holds no GUTTER and exactly $2 RECOVER lines.
+assert_recovers() {
+  ! grep -q "^GUTTER$" <<<"$1" || return 1
+  [ "$(grep -c "^RECOVER$" <<<"$1")" -eq "$2" ]
+}
+
+@test "a commit made by a helper script resets the failure counter" {
+  export RALPH_SHELL_FAIL_THRESHOLD=5
+  steps() {
+    local n
+    for n in 1 2 3 4 5; do
+      feed_shell 1 "pnpm basic-check; /tmp/x/basic.sh"
+      feed_shell 0 "pnpm basic-check; /tmp/x/basic.sh"
+      real_commit "T00$n"
+      feed_shell 0 "/tmp/x/done.sh T00$n"
+    done
+  }
+
+  assert_recovers "$(run_live steps)" 5
+}
+
+@test "a commit followed by a failing trailing command resets the failure counter" {
+  export RALPH_SHELL_FAIL_THRESHOLD=5
+  steps() {
+    local n
+    for n in 1 2 3 4 5; do
+      feed_shell 1 "pnpm basic-check"
+      real_commit "T00$n"
+      feed_shell 1 "git commit -m 'T00$n'; ls .ralph/stop-requested"
+    done
+  }
+
+  assert_recovers "$(run_live steps)" 5
+  grep -q 'COMMIT "T005"' "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "a command that commits and then fails never reaches GUTTER on its own" {
+  export RALPH_SHELL_FAIL_THRESHOLD=2
+  steps() {
+    local n
+    feed_shell 0 "pwd"
+    for n in 1 2 3; do
+      real_commit "T00$n"
+      feed_shell 1 "/tmp/x/done.sh"
+    done
+  }
+
+  assert_recovers "$(run_live steps)" 3
+}
+
+@test "the same command failing five times since the last commit emits GUTTER" {
+  export RALPH_SHELL_FAIL_THRESHOLD=5
+  steps() {
+    feed_shell 1 "pnpm basic-check"
+    real_commit "T001"
+    feed_shell 0 "/tmp/x/done.sh T001"
+    for _ in 1 2 3 4 5; do
+      feed_shell 1 "pnpm basic-check"
+      feed_shell 0 "git status --short"
+    done
+  }
+
+  local output
+  output=$(run_live steps)
+  [ "$(grep -c "^GUTTER$" <<<"$output")" -eq 1 ]
+  [ "$(grep -c "^RECOVER$" <<<"$output")" -eq 1 ]
+  grep -q "same command failed 5x" "$MOCK_WORKSPACE/.ralph/errors.log"
+}
+
+@test "a literal git commit resets the failure counter once" {
+  steps() {
+    feed_shell 1 "pnpm basic-check"
+    real_commit "T001"
+    feed_shell 0 "git commit -m 'T001'"
+    feed_shell 0 "git log --oneline -1"
+  }
+
+  assert_recovers "$(run_live steps)" 1
+  grep -q 'COMMIT "T001"' "$MOCK_WORKSPACE/.ralph/activity.log"
+}
+
+@test "a commit HEAD shows before its own result is read resets once" {
+  # Parallel tool calls: both results are read after both commands finished.
+  steps() {
+    feed_shell 1 "pnpm basic-check"
+    real_commit "T001"
+    feed_shell 0 "pnpm typecheck"
+    feed_shell 0 "git commit -m 'T001'"
+  }
+
+  assert_recovers "$(run_live steps)" 1
+}
+
+@test "a HEAD move that makes no commit is not a task boundary" {
+  export RALPH_SHELL_FAIL_THRESHOLD=5
+  # Two commits older than the run, for HEAD to visit.
+  GIT_COMMITTER_DATE="2020-01-01T00:00:00Z" real_commit "before this run"
+  git -C "$MOCK_WORKSPACE" branch -q older
+  GIT_COMMITTER_DATE="2020-01-02T00:00:00Z" real_commit "where this run starts"
+  steps() {
+    local n
+    feed_shell 0 "pwd"
+    real_commit "T001"
+    feed_shell 0 "/tmp/x/done.sh T001"
+    for n in 1 2 3 4 5; do
+      feed_shell 1 "pnpm basic-check"
+      if [ $((n % 2)) -eq 1 ]; then
+        git -C "$MOCK_WORKSPACE" reset -q --hard HEAD~1
+        feed_shell 0 "git reset --hard HEAD~1"
+      else
+        git -C "$MOCK_WORKSPACE" reset -q --hard ORIG_HEAD
+        feed_shell 0 "git reset --hard ORIG_HEAD"
+      fi
+    done
+    git -C "$MOCK_WORKSPACE" checkout -q older
+    feed_shell 0 "git checkout older"
+  }
+
+  local output
+  output=$(run_live steps)
+  grep -q "^GUTTER$" <<<"$output"
+  [ "$(grep -c "^RECOVER$" <<<"$output")" -eq 1 ]
+}
+
+@test "a commit made after a reset is a task boundary" {
+  steps() {
+    feed_shell 0 "pwd"
+    real_commit "T001"
+    feed_shell 0 "/tmp/x/done.sh T001"
+    git -C "$MOCK_WORKSPACE" reset -q --hard HEAD~1
+    feed_shell 0 "git reset --hard HEAD~1"
+    real_commit "T001 again"
+    feed_shell 0 "/tmp/x/done.sh T001"
+  }
+
+  assert_recovers "$(run_live steps)" 2
+}
+
+@test "the first commit of an empty repository is a task boundary" {
+  rm -rf "$MOCK_WORKSPACE/.git"
+  git -C "$MOCK_WORKSPACE" init -q
+  git -C "$MOCK_WORKSPACE" config user.email "test@test.com"
+  git -C "$MOCK_WORKSPACE" config user.name "Test"
+  steps() {
+    feed_shell 1 "pnpm basic-check"
+    real_commit "T001"
+    feed_shell 0 "/tmp/x/done.sh T001"
+  }
+
+  assert_recovers "$(run_live steps)" 1
+}
+
+@test "a denied call does not read HEAD" {
+  steps() {
+    feed_shell 1 "pnpm basic-check"
+    real_commit "T001"
+    deny_json Shell 'pnpm typecheck' 'cached'
+  }
+
+  assert_recovers "$(run_live steps)" 0
+}
+
+@test "outside git only a literal git commit is a task boundary" {
+  export RALPH_SHELL_FAIL_THRESHOLD=5
+  rm -rf "$MOCK_WORKSPACE/.git"
+  export GIT_CEILING_DIRECTORIES="$BATS_TMPDIR"
+  steps() {
+    feed_shell 1 "pnpm basic-check"
+    feed_shell 0 "git commit -m 'T001'"
+    feed_shell 0 "/tmp/x/done.sh T002"
+    for _ in 1 2 3 4 5; do
+      feed_shell 1 "pnpm basic-check"
+      feed_shell 0 "/tmp/x/done.sh T003"
+    done
+  }
+
+  local output
+  output=$(run_live steps)
+  [ "$(grep -c "^RECOVER$" <<<"$output")" -eq 1 ]
+  [ "$(grep -c "^GUTTER$" <<<"$output")" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
 # 0.12.0: handoff "Last gate state" section writer.
 #
 # 0.24.0 moved the TRIGGER. It used to be `gate-run.sh` appearing in the

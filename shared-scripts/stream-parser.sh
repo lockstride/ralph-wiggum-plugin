@@ -16,6 +16,7 @@
 #   TURN_END        — 5 consecutive gate failures
 #   GUTTER          — stuck pattern detected, or agent self-signal,
 #                     or non-retryable API error
+#   RECOVER         — a task was committed, earlier failures no longer count
 #   COMPLETE        — agent emitted <ralph>COMPLETE</ralph>
 #   DEFER           — retryable API/network error, back off and retry
 #
@@ -80,6 +81,14 @@ SESSION_TOKENS_BASE=0
 FAILURES_FILE=$(mktemp)
 WRITES_FILE=$(mktemp)
 
+# Task boundary — see _check_task_boundary. HEADS_SEEN holds every commit the
+# workspace's HEAD has been read at, so one commit is one boundary.
+# HEAD_COMMIT_UNNAMED is 1 while the last commit HEAD showed was read under a
+# command that did not name it.
+PARSER_STARTED_AT=$(date +%s)
+HEADS_SEEN=""
+HEAD_COMMIT_UNNAMED=0
+
 # 0.10.0: Consecutive gate-failure counter. Tracks gate-run.sh invocations
 # that exit nonzero without an intervening success. At threshold (5), emits
 # TURN_END so the main loop ends the turn and spawns fresh. Resets at
@@ -129,7 +138,7 @@ trap _cleanup_parser EXIT
 
 SHELL_FAIL_THRESHOLD="${RALPH_SHELL_FAIL_THRESHOLD:-5}"
 # 0.11.5: thrash threshold raised from 5/10min → 10/5min and the per-file
-# counter resets on successful commit (see reset_failure_counters_on_task_boundary).
+# counter resets on a commit (see reset_failure_counters_on_task_boundary).
 # Rationale: 0.11.4 folded Edit operations into the thrash counter, and a normal
 # fix-up cycle commonly does 5+ Edits to one file. The original 5/600s threshold
 # was tuned for Write-only traffic. The new threshold lets bursty Edit cycles
@@ -883,9 +892,9 @@ track_shell_failure() {
     # 0.1.10: lowered from 3 to 2. A second identical failure is already
     # strong evidence of stuckness; the extra retry just burns tokens on
     # shell output and delays GUTTER detection.
-    # 0.1.16: the counter is reset to zero on any successful `git commit`
-    # (task boundary) via reset_failure_counters_on_task_boundary, so this
-    # counts failures within the current task, not the whole session.
+    # 0.1.16: the counter is reset to zero on any commit (task boundary) via
+    # reset_failure_counters_on_task_boundary, so this counts failures within
+    # the current task, not the whole session.
     # 0.3.0: First trip in a loop emits RECOVER_ATTEMPT (the loop
     # kills the agent and re-spawns it with a recovery hint prepended).
     # Second trip in the same loop falls through to GUTTER — the
@@ -907,9 +916,9 @@ track_shell_failure() {
 }
 
 # 0.1.16: Clears the failure counter and emits a RECOVER signal on every
-# successful `git commit`. This reflects that a successful commit marks
-# a task boundary — any prior shell failures within the task have been
-# resolved, and any latched GUTTER signal is stale.
+# commit. This reflects that a commit marks a task boundary — any prior
+# shell failures within the task have been resolved, and any latched GUTTER
+# signal is stale.
 #
 # Without this reset, a session that survived a transient gate failure
 # early on (fixed, gate green, committed) would still surface GUTTER at
@@ -923,6 +932,55 @@ reset_failure_counters_on_task_boundary() {
   # clean commit would still poison the next 5-min window.
   : >"$WRITES_FILE"
   echo "RECOVER" 2>/dev/null || true
+}
+
+# True when the workspace's HEAD is at a commit it was not read at before and
+# that was made since the parser started. A checkout or reset moves HEAD
+# without making a commit, so it is no progress: an agent bouncing between old
+# commits is still stuck. False outside git and in a repository with no commits.
+_head_at_new_commit() {
+  local made_at_and_sha sha
+  made_at_and_sha=$(git -C "$WORKSPACE" rev-list --timestamp -1 HEAD -- 2>/dev/null) || return 1
+  sha="${made_at_and_sha#* }"
+  [[ "$HEADS_SEEN" != *"$sha"* ]] || return 1
+  HEADS_SEEN+=" $sha"
+  [[ "${made_at_and_sha%% *}" -ge "$PARSER_STARTED_AT" ]]
+}
+
+# True when command $1 names `git commit`.
+# 0.5.4: anchored to either start-of-string OR a shell separator (whitespace,
+# &, ;, |, `(`).
+# 0.10.4: allows global flags between `git` and the subcommand (e.g.
+# `git -C /path commit`). Each flag is -<letter> <value>.
+_names_git_commit() {
+  [[ "$1" =~ (^|[[:space:]\&\;\|\(])git([[:space:]]+-[[:alpha:]][[:space:]]+[^[:space:]]+)*[[:space:]]+commit ]]
+}
+
+# Resets the stuck counters when a Shell result closes a task, once per commit.
+# HEAD is the evidence, so a commit made inside a helper script, or followed by
+# a command that failed, closes its task. The command's text still counts where
+# HEAD cannot: a workspace outside git, a commit in another repository.
+#
+# Runs before the result's own failure is counted: that failure belongs to the
+# task after the commit.
+#   $1 = the command, $2 = its exit code
+_check_task_boundary() {
+  local names_commit=0
+  if _names_git_commit "$1"; then
+    names_commit=1
+  fi
+  if _head_at_new_commit; then
+    HEAD_COMMIT_UNNAMED=$((1 - names_commit))
+  elif [[ $names_commit -eq 0 ]]; then
+    return 0
+  elif [[ $HEAD_COMMIT_UNNAMED -eq 1 ]]; then
+    # Parallel calls: HEAD showed this commit under an earlier result.
+    HEAD_COMMIT_UNNAMED=0
+    return 0
+  elif [[ $2 -ne 0 ]]; then
+    return 0
+  fi
+  reset_failure_counters_on_task_boundary
 }
 
 # 0.14.5: Return 0 if `git commit` is the TERMINAL command of a (possibly
@@ -1193,16 +1251,15 @@ process_line() {
           ;;
         Shell)
           SHELL_OUTPUT_CHARS=$((SHELL_OUTPUT_CHARS + acct))
+          if [[ "$denied" != "true" ]]; then
+            _check_task_boundary "$cmd" "$exit_code"
+          fi
           if [[ "$denied" == "true" ]]; then
             # 0.26.0: never ran, so not a SHELL FAIL, a COMMIT FAILED, or a
             # PUSH FAILED — the guard already logged why as ⛔ GUARD DENY.
             log_activity "SHELL $cmd → denied by guard"
             track_guard_deny "$cmd" "$deny_reason"
-          # 0.5.4: anchor the `git commit` and `git push` matches to either
-          # start-of-string OR a shell separator (whitespace, &, ;, |, `(`).
-          # 0.10.4: allow global flags between `git` and the subcommand
-          # (e.g. `git -C /path commit`). Each flag is -<letter> <value>.
-          elif [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git([[:space:]]+-[[:alpha:]][[:space:]]+[^[:space:]]+)*[[:space:]]+commit ]]; then
+          elif _names_git_commit "$cmd"; then
             local commit_msg=""
             if [[ "$cmd" =~ -m[[:space:]]+[\"\']([^\"\']+)[\"\'] ]]; then
               commit_msg="${BASH_REMATCH[1]}"
@@ -1214,7 +1271,6 @@ process_line() {
             if [[ $exit_code -eq 0 ]]; then
               # Whole command exited 0 → the commit ran and succeeded.
               log_activity "$commit_label"
-              reset_failure_counters_on_task_boundary
             elif _commit_is_terminal "$cmd"; then
               # 0.14.5: `git commit` is the last command in the chain, so the
               # non-zero exit code is the commit's own — a genuine failure.
@@ -1229,6 +1285,7 @@ process_line() {
               # shell-failure counter toward GUTTER and emit a bogus hint).
               log_activity "$commit_label (compound exit=$exit_code; commit status unknown — trailing command in chain)"
             fi
+          # Same anchoring as _names_git_commit.
           elif [[ "$cmd" =~ (^|[[:space:]\&\;\|\(])git([[:space:]]+-[[:alpha:]][[:space:]]+[^[:space:]]+)*[[:space:]]+push ]]; then
             if [[ $exit_code -eq 0 ]]; then
               log_activity "PUSH $cmd → exit 0"
@@ -1396,6 +1453,9 @@ main() {
   # Settle the working set's baseline before the agent can touch it, and catch
   # a rewrite the previous loop made after its last look.
   _check_handoff_working_set "handoff.md"
+
+  # The commit the run starts from is nobody's progress.
+  _head_at_new_commit || true
 
   while IFS= read -r line; do
     process_line "$line"
